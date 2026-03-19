@@ -1,0 +1,36 @@
+version: 1
+script:
+  - cargo build --release
+  - mkdir -p AppDir/usr/bin
+  - cp target/release/tuxflow AppDir/usr/bin/
+  - mkdir -p AppDir/usr/share/applications
+  - cp data/com.tuxflow.TuxFlow.desktop AppDir/usr/share/applications/
+  - mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
+  - cp data/icons/com.tuxflow.TuxFlow.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: com.tuxflow.TuxFlow
+    name: TuxFlow
+    icon: com.tuxflow.TuxFlow
+    version: 0.1.0
+    exec: usr/bin/tuxflow
+    exec_args: $@
+
+  runtime:
+    env:
+      GDK_BACKEND: x11
+
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: deb http://archive.ubuntu.com/ubuntu noble main universe
+    include:
+      - libgtk-4-1
+      - libadwaita-1-0
+      - libvte-2.91-gtk4-0
+
+AppImage:
+  arch: x86_64
+  update-information: gh-releases-zsync|tuxflow|tuxflow|latest|TuxFlow-*x86_64.AppImage.zsync

@@ -1,0 +1,25 @@
+[project]
+name = "my-app"
+# icon = "public/favicon.svg"
+
+[[process]]
+name = "npm:dev"
+command = "npm run dev"
+auto_start = true
+auto_restart = false
+# category = "command"  # command (default), agent, terminal
+# working_dir = "."
+# restart_when_changed = ["src/**/*.ts"]
+# env = { NODE_ENV = "development" }
+
+[[process]]
+name = "Logs"
+command = "tail -f storage/logs/laravel.log"
+auto_start = true
+
+[[process]]
+name = "Queue"
+command = "php artisan queue:work"
+auto_start = false
+auto_restart = true
+restart_when_changed = ["app/Jobs/**/*.php"]

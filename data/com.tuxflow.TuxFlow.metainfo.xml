@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.tuxflow.TuxFlow</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>TuxFlow</name>
+  <summary>Linux-native dev environment manager</summary>
+  <description>
+    <p>
+      TuxFlow lets developers manage their entire dev environment from one window —
+      start/stop/restart dev servers, run multiple AI coding agents side by side,
+      monitor process status and resource usage, auto-restart crashed processes,
+      watch files for changes, and expose an MCP server so AI agents can observe
+      and control neighboring processes.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Manage multiple dev processes (servers, watchers, queues) from a single window</li>
+      <li>Run AI coding agents (Claude Code, Codex, Gemini CLI) side by side</li>
+      <li>Auto-detect project stacks (Node.js, Rust, Python, Go, PHP, Ruby, Docker)</li>
+      <li>Auto-restart crashed processes with exponential backoff</li>
+      <li>File watching with glob patterns to restart on changes</li>
+      <li>Command palette (Ctrl+K) for quick navigation</li>
+      <li>MCP server for AI agent integration</li>
+      <li>TOML-based configuration</li>
+      <li>Dark-first design with GTK4 + libadwaita</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.tuxflow.TuxFlow.desktop</launchable>
+  <url type="homepage">https://github.com/tuxflow/tuxflow</url>
+  <url type="bugtracker">https://github.com/tuxflow/tuxflow/issues</url>
+  <content_rating type="oars-1.1" />
+  <requires>
+    <display_length compare="ge">800</display_length>
+  </requires>
+  <branding>
+    <color type="primary" scheme_preference="dark">#1a1a2e</color>
+    <color type="primary" scheme_preference="light">#e8e8f0</color>
+  </branding>
+</component>

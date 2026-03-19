@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=TuxFlow
+Comment=Linux-native dev environment manager
+Exec=tuxflow %U
+Icon=com.tuxflow.TuxFlow
+Terminal=false
+Type=Application
+Categories=Development;IDE;Utility;
+Keywords=terminal;development;process;manager;agent;
+MimeType=inode/directory;
+StartupNotify=true
+StartupWMClass=com.tuxflow.TuxFlow

@@ -139,7 +139,7 @@ impl SettingsWindow {
 
         let license_row = adw::ActionRow::builder()
             .title("License")
-            .subtitle("MIT / Apache-2.0")
+            .subtitle("MIT")
             .build();
         group.add(&license_row);
 

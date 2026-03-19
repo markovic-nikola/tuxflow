@@ -5,7 +5,7 @@ pkgrel=1
 pkgdesc='Linux-native dev environment manager'
 arch=('x86_64')
 url='https://github.com/tuxflow/tuxflow'
-license=('MIT' 'Apache-2.0')
+license=('MIT')
 depends=('gtk4' 'libadwaita' 'vte4')
 makedepends=('rust' 'cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
@@ -24,5 +24,4 @@ package() {
   install -Dm644 "data/com.tuxflow.TuxFlow.metainfo.xml" "$pkgdir/usr/share/metainfo/com.tuxflow.TuxFlow.metainfo.xml"
   install -Dm644 "data/icons/com.tuxflow.TuxFlow.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg"
   install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
-  install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
 }

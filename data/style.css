@@ -1,0 +1,88 @@
+/* TuxFlow — Dark-first design */
+
+/* Status dot colors */
+.status-running {
+    color: #73c991;
+}
+
+.status-stopped {
+    color: #6c6c6c;
+}
+
+.status-crashed {
+    color: #f14c4c;
+}
+
+.status-restarting {
+    color: #cca700;
+}
+
+/* Sidebar */
+.sidebar {
+    background: alpha(@window_bg_color, 0.97);
+}
+
+.project-row {
+    padding: 4px;
+    border-radius: 8px;
+}
+
+.project-row:hover {
+    background: alpha(@accent_bg_color, 0.1);
+}
+
+.process-row {
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: background 150ms;
+}
+
+.process-row:hover {
+    background: alpha(@accent_bg_color, 0.08);
+}
+
+/* Status bar */
+.status-bar {
+    border-top: 1px solid alpha(@borders, 0.3);
+    min-height: 32px;
+}
+
+/* Section header */
+.caption-heading {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+}
+
+/* Command palette */
+.command-palette-backdrop {
+    background: alpha(black, 0.4);
+}
+
+.command-palette {
+    background: @window_bg_color;
+    border-radius: 12px;
+    border: 1px solid alpha(@borders, 0.5);
+    box-shadow: 0 8px 32px alpha(black, 0.4);
+    padding: 8px;
+}
+
+.command-palette-entry {
+    font-size: 15px;
+    min-height: 40px;
+    border: none;
+    background: transparent;
+}
+
+.command-palette-results {
+    background: transparent;
+}
+
+.command-palette-row {
+    border-radius: 8px;
+    transition: background 100ms;
+}
+
+.command-palette-row:selected {
+    background: alpha(@accent_bg_color, 0.15);
+}

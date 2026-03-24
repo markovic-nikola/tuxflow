@@ -8,6 +8,8 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 
 - **Process management** — Start, stop, restart dev servers and background tasks from one place
 - **AI agent support** — Run Claude Code, Codex, Gemini CLI, and other AI agents side-by-side
+- **Multi-project workspace** — Open multiple projects in one window with expandable sidebar sections
+- **SSH connections** — Connect to remote hosts from `~/.ssh/config`, managed like any other process
 - **Embedded terminals** — Full VTE4 terminals with ANSI color, true color, and mouse support
 - **Auto-restart** — Crashed processes restart automatically with exponential backoff
 - **File watching** — Restart processes when source files change (glob patterns)
@@ -16,7 +18,10 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **Resource monitoring** — Per-process CPU and memory usage via `/proc`
 - **MCP server** — Exposes tools over Unix socket so AI agents can observe and control processes
 - **Command palette** — Ctrl+K fuzzy search for quick actions
+- **Terminal search** — Ctrl+F to search terminal output
+- **Drag-and-drop** — Reorder processes in the sidebar
 - **Keyboard-driven** — Fully configurable keyboard shortcuts
+- **Desktop notifications** — Get notified when processes crash or restart
 - **TOML config** — Simple, human-readable project configuration
 - **Theming** — Dark/light/system theme with accent colors and terminal color schemes
 
@@ -42,7 +47,7 @@ sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
 sudo pacman -S gtk4 libadwaita vte4
 
 # Clone and build
-git clone https://github.com/nicholasgasior/tuxflow.git
+git clone https://github.com/markovic-nikola/tuxflow.git
 cd tuxflow
 cargo build --release
 
@@ -114,12 +119,23 @@ Settings are stored at `~/.config/tuxflow/settings.toml` and managed through the
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+K` | Command palette |
-| `Ctrl+T` | New agent/terminal |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+P` | Add project or process |
+| `Ctrl+T` | New terminal |
 | `Ctrl+,` | Settings |
-| `Ctrl+F` | Terminal search |
-| `Ctrl+1..9` | Switch to process N |
-| `Alt+1..9` | Switch to project N |
+| `Ctrl+F` | Filter processes |
+| `Ctrl+Shift+F` | Terminal search |
+| `Ctrl+Up/Down` | Previous/Next process |
+| `Ctrl+Shift+Up/Down` | Previous/Next project |
+| `Ctrl+O` | Quick jump |
+| `Ctrl+W` | Close agent/terminal |
+| `Ctrl+Left/Right` | Focus sidebar/terminal |
+| `Ctrl+\` | Toggle sidebar |
+| `Ctrl+Alt+S` | Start/Stop process |
+| `Ctrl+Alt+R` | Restart process |
+| `Ctrl+Alt+C` | Clear output |
+| `Ctrl+=/-` | Increase/Decrease font size |
+| `Ctrl+Shift+C/V` | Copy/Paste |
 
 All shortcuts are configurable via Settings > Hotkeys.
 

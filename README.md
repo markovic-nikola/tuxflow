@@ -66,27 +66,20 @@ TuxFlow auto-detects your tech stack and suggests commands. Add processes, agent
 
 ## Configuration
 
-### Project config (`tuxflow.toml`)
+Processes added through the GUI are saved to `~/.config/tuxflow/projects.toml`. Global settings are managed through the Settings window (`Ctrl+,`) and stored at `~/.config/tuxflow/settings.toml`.
+
+Optionally, you can create a `tuxflow.toml` in your project root for version-controlled config:
 
 ```toml
 [project]
 name = "my-app"
-# icon = "public/favicon.svg"
 
 [[process]]
-name = "npm:dev"
+name = "dev"
 command = "npm run dev"
-auto_start = true
-auto_restart = false
-# category = "command"  # command (default), agent, terminal
-# working_dir = "."
-# restart_when_changed = ["src/**/*.ts"]
-# env = { NODE_ENV = "development" }
+start_with_project = true
+auto_restart = true
 ```
-
-### Global settings
-
-Settings are stored at `~/.config/tuxflow/settings.toml` and managed through the Settings window (Ctrl+,).
 
 ## Keyboard Shortcuts
 

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
@@ -10,27 +10,60 @@ type ActionCallback = Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>;
 
 pub struct ProcessRow {
     container: gtk4::Box,
+    status_stack: gtk4::Stack,
     status_dot: gtk4::Label,
+    status_spinner: gtk4::Image,
+    is_terminal: bool,
+    is_running: Cell<bool>,
     name_label: gtk4::Label,
+    cpu_label: gtk4::Label,
+    memory_label: gtk4::Label,
     port_label: gtk4::Label,
+    browser_button: gtk4::Button,
+    play_button: gtk4::Button,
+    stop_button: gtk4::Button,
     on_context_action: ActionCallback,
+    url: Rc<RefCell<Option<String>>>,
+    browser_menu_section: gio::Menu,
 }
 
 impl ProcessRow {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, command: &str) -> Self {
+        Self::new_with_options(name, command, false)
+    }
+
+    pub fn new_terminal(name: &str, command: &str) -> Self {
+        Self::new_with_options(name, command, true)
+    }
+
+    fn new_with_options(name: &str, command: &str, is_terminal: bool) -> Self {
         let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        container.set_margin_start(32);
+        container.set_margin_start(8);
         container.set_margin_end(12);
         container.set_margin_top(4);
         container.set_margin_bottom(4);
         container.add_css_class("process-row");
+        container.set_tooltip_text(Some(command));
 
-        // Status dot
+        // Status indicator: stack with spinner (running) and dot (stopped/crashed)
         let status_dot = gtk4::Label::builder()
             .label("\u{25CF}") // ●
             .css_classes(["caption", "status-stopped"])
             .build();
-        container.append(&status_dot);
+
+        let status_spinner = gtk4::Image::builder()
+            .icon_name("process-working-symbolic")
+            .pixel_size(10)
+            .css_classes(["status-spinner"])
+            .build();
+
+        let status_stack = gtk4::Stack::builder()
+            .transition_type(gtk4::StackTransitionType::None)
+            .build();
+        status_stack.add_named(&status_dot, Some("dot"));
+        status_stack.add_named(&status_spinner, Some("spinner"));
+        status_stack.set_visible_child_name("dot");
+        container.append(&status_stack);
 
         // Process name
         let name_label = gtk4::Label::builder()
@@ -41,6 +74,20 @@ impl ProcessRow {
             .build();
         container.append(&name_label);
 
+        // CPU label (hidden by default)
+        let cpu_label = gtk4::Label::builder()
+            .css_classes(["caption", "dim-label", "resource-label"])
+            .visible(false)
+            .build();
+        container.append(&cpu_label);
+
+        // Memory label (hidden by default)
+        let memory_label = gtk4::Label::builder()
+            .css_classes(["caption", "dim-label", "resource-label"])
+            .visible(false)
+            .build();
+        container.append(&memory_label);
+
         // Port label (hidden by default)
         let port_label = gtk4::Label::builder()
             .css_classes(["caption", "dim-label"])
@@ -48,10 +95,80 @@ impl ProcessRow {
             .build();
         container.append(&port_label);
 
+        // Browser button (hidden until URL is detected)
+        let browser_button = gtk4::Button::builder()
+            .icon_name("external-link-symbolic")
+            .tooltip_text("Open in Browser")
+            .css_classes(["flat", "circular", "browser-btn"])
+            .visible(false)
+            .build();
+        container.append(&browser_button);
+
+        let url: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+        // Wire browser button to open URL
+        let url_ref = url.clone();
+        browser_button.connect_clicked(move |btn| {
+            if let Some(ref url_str) = *url_ref.borrow() {
+                let launcher = gtk4::UriLauncher::new(url_str);
+                let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+                launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
+            }
+        });
+
+        // Action buttons (visible on hover via CSS)
+        let play_button = gtk4::Button::builder()
+            .icon_name("media-playback-start-symbolic")
+            .tooltip_text(command)
+            .css_classes(["flat", "circular", "process-play-btn", "btn-play"])
+            .build();
+        container.append(&play_button);
+
+        let restart_button = gtk4::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .tooltip_text("Restart")
+            .css_classes(["flat", "circular", "process-play-btn"])
+            .build();
+        container.append(&restart_button);
+
+        let stop_button = gtk4::Button::builder()
+            .icon_name("media-playback-stop-symbolic")
+            .tooltip_text("Stop")
+            .css_classes(["flat", "circular", "process-play-btn", "btn-stop"])
+            .build();
+        container.append(&stop_button);
+
         let on_context_action: ActionCallback = Rc::new(RefCell::new(None));
 
+        // Wire play button to trigger "toggle" action
+        let on_action_ref = on_context_action.clone();
+        let name_owned = name.to_string();
+        play_button.connect_clicked(move |_| {
+            if let Some(ref cb) = *on_action_ref.borrow() {
+                cb(&name_owned, "toggle");
+            }
+        });
+
+        // Wire restart button
+        let on_action_ref = on_context_action.clone();
+        let name_owned = name.to_string();
+        restart_button.connect_clicked(move |_| {
+            if let Some(ref cb) = *on_action_ref.borrow() {
+                cb(&name_owned, "restart");
+            }
+        });
+
+        // Wire stop button
+        let on_action_ref = on_context_action.clone();
+        let name_owned = name.to_string();
+        stop_button.connect_clicked(move |_| {
+            if let Some(ref cb) = *on_action_ref.borrow() {
+                cb(&name_owned, "stop");
+            }
+        });
+
         // Right-click context menu
-        let popover = Self::build_context_menu(name, &on_context_action);
+        let (popover, _menu, browser_section) = Self::build_context_menu(name, command, &on_context_action, &url);
         popover.set_parent(&container);
 
         let gesture = gtk4::GestureClick::builder()
@@ -64,95 +181,237 @@ impl ProcessRow {
         });
         container.add_controller(gesture);
 
+        // Initially show play, hide stop (default state is Stopped)
+        stop_button.set_visible(false);
+
         Self {
             container,
+            status_stack,
             status_dot,
+            status_spinner,
+            is_terminal,
+            is_running: Cell::new(false),
             name_label,
+            cpu_label,
+            memory_label,
             port_label,
+            browser_button,
+            play_button,
+            stop_button,
             on_context_action,
+            url,
+            browser_menu_section: browser_section,
         }
     }
 
-    fn build_context_menu(process_name: &str, on_action: &ActionCallback) -> gtk4::PopoverMenu {
+    fn build_context_menu(
+        process_name: &str,
+        command: &str,
+        on_action: &ActionCallback,
+        url: &Rc<RefCell<Option<String>>>,
+    ) -> (gtk4::PopoverMenu, gio::Menu, gio::Menu) {
         let menu = gio::Menu::new();
-        menu.append(Some("Start / Stop"), Some("proc.toggle"));
-        menu.append(Some("Restart"), Some("proc.restart"));
-        menu.append(Some("Clear Output"), Some("proc.clear"));
+
+        let control_section = gio::Menu::new();
+        control_section.append(Some("Start / Stop"), Some("proc.toggle"));
+        control_section.append(Some("Restart"), Some("proc.restart"));
+        menu.append_section(None, &control_section);
+
+        // Browser section (initially empty, items added/removed dynamically)
+        let browser_section = gio::Menu::new();
+        menu.append_section(None, &browser_section);
+
+        let terminal_section = gio::Menu::new();
+        terminal_section.append(Some("Edit Command"), Some("proc.edit"));
+        terminal_section.append(Some("Clear Output"), Some("proc.clear"));
+        terminal_section.append(Some("Redraw Terminal"), Some("proc.redraw"));
+        terminal_section.append(Some("Copy Command"), Some("proc.copy_command"));
+        menu.append_section(None, &terminal_section);
+
+        let danger_section = gio::Menu::new();
+        let delete_item = gio::MenuItem::new(None, None);
+        delete_item.set_attribute_value("custom", Some(&"delete-button".to_variant()));
+        danger_section.append_item(&delete_item);
+        menu.append_section(None, &danger_section);
 
         let popover = gtk4::PopoverMenu::from_model(Some(&menu));
         popover.set_has_arrow(false);
 
+        // Custom red delete button
+        let delete_btn = gtk4::Button::builder()
+            .label("Delete Command")
+            .css_classes(["flat", "destructive-menu-item"])
+            .build();
+        popover.add_child(&delete_btn, "delete-button");
+
         let action_group = gio::SimpleActionGroup::new();
         let name = process_name.to_string();
 
+        // Helper to create context actions
+        let add_action = |action_name: &str, action_str: &str| {
+            let on_action_ref = on_action.clone();
+            let name_ref = name.clone();
+            let action_owned = action_str.to_string();
+            let action = gio::SimpleAction::new(action_name, None);
+            action.connect_activate(move |_, _| {
+                if let Some(ref cb) = *on_action_ref.borrow() {
+                    cb(&name_ref, &action_owned);
+                }
+            });
+            action_group.add_action(&action);
+        };
+
+        add_action("toggle", "toggle");
+        add_action("restart", "restart");
+        add_action("edit", "edit");
+        add_action("clear", "clear");
+        add_action("redraw", "redraw");
+
+        // Wire delete button directly (custom widget, not in action group)
         let on_action_ref = on_action.clone();
         let name_ref = name.clone();
-        let toggle_action = gio::SimpleAction::new("toggle", None);
-        toggle_action.connect_activate(move |_, _| {
+        let popover_ref = popover.clone();
+        delete_btn.connect_clicked(move |_| {
+            popover_ref.popdown();
             if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_ref, "toggle");
+                cb(&name_ref, "delete");
             }
         });
-        action_group.add_action(&toggle_action);
 
-        let on_action_ref = on_action.clone();
-        let name_ref = name.clone();
-        let restart_action = gio::SimpleAction::new("restart", None);
-        restart_action.connect_activate(move |_, _| {
-            if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_ref, "restart");
+        // Copy command — uses clipboard directly
+        let command_owned = command.to_string();
+        let copy_action = gio::SimpleAction::new("copy_command", None);
+        copy_action.connect_activate(move |_, _| {
+            if let Some(display) = gtk4::gdk::Display::default() {
+                display.clipboard().set_text(&command_owned);
             }
         });
-        action_group.add_action(&restart_action);
+        action_group.add_action(&copy_action);
 
-        let on_action_ref = on_action.clone();
-        let name_ref = name.clone();
-        let clear_action = gio::SimpleAction::new("clear", None);
-        clear_action.connect_activate(move |_, _| {
-            if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_ref, "clear");
+        // Open in Browser action
+        let url_ref = url.clone();
+        let open_url_action = gio::SimpleAction::new("open_url", None);
+        let popover_ref2 = popover.clone();
+        open_url_action.connect_activate(move |_, _| {
+            if let Some(ref url_str) = *url_ref.borrow() {
+                let launcher = gtk4::UriLauncher::new(url_str);
+                let window = popover_ref2.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+                launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
             }
         });
-        action_group.add_action(&clear_action);
+        action_group.add_action(&open_url_action);
 
-        popover.insert_action_group("process", Some(&action_group));
+        popover.insert_action_group("proc", Some(&action_group));
 
-        popover
+        (popover, menu, browser_section)
     }
 
     pub fn set_status(&self, status: ProcessStatus) {
-        // Remove old CSS classes
+        // Remove old CSS classes from dot
         self.status_dot.remove_css_class("status-running");
         self.status_dot.remove_css_class("status-stopped");
         self.status_dot.remove_css_class("status-crashed");
         self.status_dot.remove_css_class("status-restarting");
 
+        let is_running = matches!(status, ProcessStatus::Running | ProcessStatus::Restarting);
+        self.play_button.set_visible(!is_running);
+        self.stop_button.set_visible(is_running);
+
         match status {
-            ProcessStatus::Running => {
+            ProcessStatus::Running | ProcessStatus::Restarting => {
+                self.is_running.set(true);
+                self.status_spinner.remove_css_class("spinning");
+                self.status_stack.set_visible_child_name("dot");
                 self.status_dot.add_css_class("status-running");
             }
             ProcessStatus::Stopped => {
+                self.is_running.set(false);
+                self.status_spinner.remove_css_class("spinning");
+                self.status_stack.set_visible_child_name("dot");
                 self.status_dot.add_css_class("status-stopped");
+                self.clear_resources();
+                self.set_port(None);
+                self.set_url(None);
             }
             ProcessStatus::Crashed => {
+                self.is_running.set(false);
+                self.status_spinner.remove_css_class("spinning");
+                self.status_stack.set_visible_child_name("dot");
                 self.status_dot.add_css_class("status-crashed");
-            }
-            ProcessStatus::Restarting => {
-                self.status_dot.add_css_class("status-restarting");
+                self.clear_resources();
+                self.set_port(None);
+                self.set_url(None);
             }
         }
+    }
+
+    pub fn set_resources(&self, cpu_percent: f64, memory_mb: f64, cpu_threshold: f64, mem_threshold: f64) {
+        self.cpu_label.set_label(&format!("{cpu_percent:.1}%"));
+        self.cpu_label.set_visible(cpu_threshold >= 0.0 && cpu_percent > cpu_threshold);
+
+        let mem_str = if memory_mb >= 1024.0 {
+            format!("{:.1}GB", memory_mb / 1024.0)
+        } else {
+            format!("{:.0}MB", memory_mb)
+        };
+        self.memory_label.set_label(&mem_str);
+        self.memory_label.set_visible(mem_threshold >= 0.0 && memory_mb > mem_threshold);
+
+        // Toggle spinner based on CPU activity (not for terminals)
+        if self.is_running.get() {
+            if cpu_percent > 1.0 {
+                self.status_spinner.add_css_class("spinning");
+                self.status_stack.set_visible_child_name("spinner");
+            } else {
+                self.status_spinner.remove_css_class("spinning");
+                self.status_dot.remove_css_class("status-stopped");
+                self.status_dot.remove_css_class("status-crashed");
+                self.status_dot.add_css_class("status-running");
+                self.status_stack.set_visible_child_name("dot");
+            }
+        }
+    }
+
+    pub fn clear_resources(&self) {
+        self.cpu_label.set_visible(false);
+        self.memory_label.set_visible(false);
+        self.status_spinner.remove_css_class("spinning");
+        self.status_stack.set_visible_child_name("dot");
     }
 
     pub fn set_port(&self, port: Option<u16>) {
         match port {
             Some(p) => {
-                self.port_label.set_label(&p.to_string());
+                self.port_label.set_label(&format!(":{p}"));
                 self.port_label.set_visible(true);
             }
             None => {
                 self.port_label.set_visible(false);
             }
         }
+    }
+
+    pub fn set_url(&self, url: Option<&str>) {
+        match url {
+            Some(u) => {
+                *self.url.borrow_mut() = Some(u.to_string());
+                self.browser_button.set_visible(true);
+                self.browser_button.set_tooltip_text(Some(&format!("Open {u}")));
+                // Add "Open in Browser" to context menu if not already there
+                if self.browser_menu_section.n_items() == 0 {
+                    self.browser_menu_section.append(Some("Open in Browser"), Some("proc.open_url"));
+                }
+            }
+            None => {
+                *self.url.borrow_mut() = None;
+                self.browser_button.set_visible(false);
+                self.browser_menu_section.remove_all();
+            }
+        }
+    }
+
+    pub fn get_url(&self) -> Option<String> {
+        self.url.borrow().clone()
     }
 
     pub fn widget(&self) -> &gtk4::Box {
@@ -165,5 +424,13 @@ impl ProcessRow {
 
     pub fn name(&self) -> String {
         self.name_label.label().to_string()
+    }
+
+    pub fn set_name(&self, name: &str) {
+        self.name_label.set_label(name);
+    }
+
+    pub fn set_command_tooltip(&self, command: &str) {
+        self.container.set_tooltip_text(Some(command));
     }
 }

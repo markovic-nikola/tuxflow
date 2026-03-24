@@ -1,39 +1,26 @@
-use std::sync::{Arc, Mutex};
-
 use rmcp::ServiceExt;
 use tokio::net::UnixListener;
 
-use crate::mcp::tools::{ProcessSnapshot, ProcessStateRef, TuxFlowMcpServer};
-use crate::process::manager::ProcessManagerRef;
+use crate::mcp::bridge::{self, McpBridge};
+use crate::mcp::tools::TuxFlowMcpServer;
 
-pub fn create_process_state(manager: &ProcessManagerRef) -> ProcessStateRef {
-    let mgr = manager.borrow();
-    let snapshots: Vec<ProcessSnapshot> = mgr
-        .process_names()
-        .iter()
-        .filter_map(|name| {
-            mgr.get_process(name).map(|proc| ProcessSnapshot {
-                name: proc.config.name.clone(),
-                status: format!("{:?}", proc.status),
-                command: proc.config.command.clone(),
-                category: format!("{:?}", proc.config.category),
-            })
-        })
-        .collect();
-
-    Arc::new(Mutex::new(snapshots))
+pub fn socket_path(project_name: &str) -> String {
+    let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    format!("{}/tuxflow-{}.sock", base, sanitize_name(project_name))
 }
 
-pub fn start_mcp_server(project_name: &str, process_state: ProcessStateRef) {
-    let socket_path = format!("/tmp/tuxflow-{}.sock", sanitize_name(project_name));
+pub fn start_mcp_server(project_name: &str, project_dir: &str, bridge: McpBridge) {
+    let socket_path = socket_path(project_name);
 
     // Remove existing socket
     let _ = std::fs::remove_file(&socket_path);
 
-    let state = process_state.clone();
+    // Write sidecar file with project directory for auto-discovery
+    let dir_file = format!("{}.dir", socket_path);
+    let _ = std::fs::write(&dir_file, project_dir);
+
     let path = socket_path.clone();
 
-    // Spawn the MCP server on a tokio runtime in a background thread
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(async move {
@@ -48,9 +35,26 @@ pub fn start_mcp_server(project_name: &str, process_state: ProcessStateRef) {
             log::info!("MCP server listening on {path}");
 
             loop {
+                // Check if MCP is still enabled
+                if !bridge::is_mcp_enabled() {
+                    log::info!("MCP server disabled, removing socket {path}");
+                    let _ = std::fs::remove_file(&path);
+                    let _ = std::fs::remove_file(format!("{}.dir", path));
+                    // Wait until re-enabled
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if bridge::is_mcp_enabled() {
+                            break;
+                        }
+                    }
+                    // Re-bind the socket
+                    log::info!("MCP server re-enabled, but requires app restart to rebind socket");
+                    return;
+                }
+
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
-                        let server = TuxFlowMcpServer::new(state.clone());
+                        let server = TuxFlowMcpServer::new(bridge.clone());
                         tokio::spawn(async move {
                             match server.serve(stream).await {
                                 Ok(service) => {
@@ -73,8 +77,21 @@ pub fn start_mcp_server(project_name: &str, process_state: ProcessStateRef) {
     });
 }
 
-fn sanitize_name(name: &str) -> String {
+pub fn stop_mcp_server(project_name: &str) {
+    let path = socket_path(project_name);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{}.dir", path));
+    log::info!("Removed MCP socket {path}");
+}
+
+pub fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }

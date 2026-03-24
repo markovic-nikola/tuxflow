@@ -6,6 +6,7 @@ mod process;
 mod ui;
 mod util;
 mod watcher;
+mod workspace;
 
 fn main() {
     env_logger::init();

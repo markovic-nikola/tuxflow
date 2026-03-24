@@ -4,6 +4,19 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "A Linux-native dev environment manager"
+default-run = "tuxflow"
+
+[lib]
+name = "tuxflow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tuxflow"
+path = "src/main.rs"
+
+[[bin]]
+name = "tuxflow-mcp"
+path = "src/bin/tuxflow-mcp.rs"
 
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_14"] }
@@ -24,3 +37,6 @@ dirs = "6"
 nix = { version = "0.29", features = ["signal", "process"] }
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
 anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -21,8 +21,8 @@ pub struct ProcessConfig {
     pub command: String,
     #[serde(default)]
     pub working_dir: Option<String>,
-    #[serde(default)]
-    pub auto_start: bool,
+    #[serde(default, alias = "auto_start")]
+    pub start_with_project: bool,
     #[serde(default)]
     pub auto_restart: bool,
     #[serde(default)]
@@ -31,6 +31,10 @@ pub struct ProcessConfig {
     pub env: HashMap<String, String>,
     #[serde(default = "default_category")]
     pub category: ProcessCategory,
+    #[serde(default)]
+    pub auto_named: bool,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +43,8 @@ pub enum ProcessCategory {
     Command,
     Agent,
     Terminal,
+    #[serde(alias = "ssh_connection")]
+    SSH,
 }
 
 fn default_category() -> ProcessCategory {

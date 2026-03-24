@@ -23,14 +23,16 @@ impl PortDetector {
         // Match patterns like:
         // localhost:3000, 127.0.0.1:8080, 0.0.0.0:5000
         // http://localhost:3000, https://...
-        for word in text.split_whitespace() {
+        for raw_word in text.split_whitespace() {
+            // Strip surrounding brackets, parens, quotes, punctuation
+            let word = raw_word.trim_matches(|c: char| "[](){}\"'`,;.!".contains(c));
+
             // Full URL pattern
             if word.starts_with("http://") || word.starts_with("https://") {
-                let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '/' && c != '.');
-                if let Some(port) = extract_port_from_url(clean) {
+                if let Some(port) = extract_port_from_url(word) {
                     found.push(DetectedPort {
                         port,
-                        url: Some(clean.to_string()),
+                        url: Some(word.to_string()),
                     });
                 }
             }

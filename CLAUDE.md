@@ -106,4 +106,4 @@ packaging/
 
 - **Split terminal view** — Currently `gtk4::Stack` (one at a time). Would need `gtk4::Paned` for side-by-side
 - **Tests** — Core modules covered (config, detector, port detector, log buffer). UI and process management untested (require GTK runtime)
-- **Distribution** — No GitHub repo, CI, README, or verified packaging builds
+- **CI** — No GitHub Actions or verified packaging builds yet

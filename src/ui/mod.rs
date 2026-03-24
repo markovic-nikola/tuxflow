@@ -1,7 +1,13 @@
+pub mod accent;
 pub mod add_command_dialog;
+pub mod add_ssh_dialog;
 pub mod command_palette;
+pub mod edit_project_dialog;
+pub mod project_detail;
 pub mod sidebar;
 pub mod settings;
 pub mod status_bar;
+pub mod terminal_search;
+pub mod terminal_theme;
 pub mod terminal_view;
 pub mod window;

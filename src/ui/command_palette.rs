@@ -18,6 +18,7 @@ pub struct CommandPalette {
     results_box: gtk4::ListBox,
     items: Rc<RefCell<Vec<PaletteItem>>>,
     on_action: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
+    on_refresh: Rc<RefCell<Option<Box<dyn Fn(&CommandPalette)>>>>,
 }
 
 impl CommandPalette {
@@ -61,26 +62,27 @@ impl CommandPalette {
         center.append(&results_scroll);
 
         // Footer hint
-        let footer = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+        let footer = gtk4::Box::new(gtk4::Orientation::Horizontal, 16);
         footer.set_margin_start(12);
         footer.set_margin_end(12);
-        footer.set_margin_top(8);
-        footer.set_margin_bottom(8);
+        footer.set_margin_top(6);
+        footer.set_margin_bottom(6);
+        footer.set_halign(gtk4::Align::Start);
 
         let hints = [
-            ("\u{2191}\u{2193}", "navigate"),
+            ("\u{2191} \u{2193}", "navigate"),
             ("\u{21B5}", "select"),
             ("esc", "close"),
         ];
         for (key, label) in hints {
-            let hint_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+            let hint_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
             let key_label = gtk4::Label::builder()
                 .label(key)
-                .css_classes(["caption-heading"])
+                .css_classes(["caption", "kbd-badge"])
                 .build();
             let desc_label = gtk4::Label::builder()
                 .label(label)
-                .css_classes(["caption", "dim-label"])
+                .css_classes(["dim-label", "palette-hint"])
                 .build();
             hint_box.append(&key_label);
             hint_box.append(&desc_label);
@@ -95,6 +97,7 @@ impl CommandPalette {
             .transition_duration(150)
             .halign(gtk4::Align::Fill)
             .valign(gtk4::Align::Fill)
+            .can_target(false)
             .build();
 
         let revealer_content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -109,6 +112,7 @@ impl CommandPalette {
 
         let items = Rc::new(RefCell::new(Vec::new()));
         let on_action: Rc<RefCell<Option<Box<dyn Fn(&str)>>>> = Rc::new(RefCell::new(None));
+        let on_refresh: Rc<RefCell<Option<Box<dyn Fn(&CommandPalette)>>>> = Rc::new(RefCell::new(None));
 
         // Filter on search
         let items_ref = items.clone();
@@ -119,18 +123,58 @@ impl CommandPalette {
             Self::populate_results(&results_ref, &items_ref.borrow(), &query, &on_action_ref);
         });
 
+        // Arrow keys + Escape on the entry
+        let key_controller = gtk4::EventControllerKey::new();
+        let results_ref_key = results_box.clone();
+        let revealer_ref_key = revealer.clone();
+        let scroll_ref = results_scroll.clone();
+        key_controller.connect_key_pressed(move |_, keyval, _, _| {
+            use gtk4::gdk::Key;
+            match keyval {
+                Key::Escape => {
+                    revealer_ref_key.set_reveal_child(false);
+                    revealer_ref_key.set_can_target(false);
+                    gtk4::glib::Propagation::Stop
+                }
+                Key::Down => {
+                    let rb = &results_ref_key;
+                    let current = rb.selected_row().map(|r| r.index()).unwrap_or(-1);
+                    if let Some(next) = rb.row_at_index(current + 1) {
+                        rb.select_row(Some(&next));
+                        Self::scroll_to_row(&scroll_ref, &next);
+                    }
+                    gtk4::glib::Propagation::Stop
+                }
+                Key::Up => {
+                    let rb = &results_ref_key;
+                    let current = rb.selected_row().map(|r| r.index()).unwrap_or(0);
+                    if current > 0 {
+                        if let Some(prev) = rb.row_at_index(current - 1) {
+                            rb.select_row(Some(&prev));
+                            Self::scroll_to_row(&scroll_ref, &prev);
+                        }
+                    }
+                    gtk4::glib::Propagation::Stop
+                }
+                _ => gtk4::glib::Propagation::Proceed,
+            }
+        });
+        entry.add_controller(key_controller);
+
         // Close on backdrop click
         let gesture = gtk4::GestureClick::new();
         let revealer_ref = revealer.clone();
         gesture.connect_released(move |_, _, _, _| {
             revealer_ref.set_reveal_child(false);
+            revealer_ref.set_can_target(false);
         });
         backdrop.add_controller(gesture);
 
-        // Enter to select first result
+        // Enter to activate selected row
         let revealer_ref2 = revealer.clone();
         let on_action_ref2 = on_action.clone();
         let items_ref2 = items.clone();
+        let results_ref2 = results_box.clone();
         entry.connect_activate(move |entry| {
             let query = entry.text().to_string().to_lowercase();
             let items = items_ref2.borrow();
@@ -139,15 +183,57 @@ impl CommandPalette {
             } else {
                 items
                     .iter()
-                    .filter(|i| i.label.to_lowercase().contains(&query) || i.category.to_lowercase().contains(&query))
+                    .filter(|i| {
+                        i.label.to_lowercase().contains(&query)
+                            || i.category.to_lowercase().contains(&query)
+                            || i.action.to_lowercase().contains(&query)
+                    })
                     .collect()
             };
 
-            if let Some(item) = matched.first() {
+            // Use selected row index, fall back to first
+            let idx = results_ref2
+                .selected_row()
+                .map(|r| r.index() as usize)
+                .unwrap_or(0);
+
+            if let Some(item) = matched.get(idx) {
                 if let Some(ref cb) = *on_action_ref2.borrow() {
                     cb(&item.action);
                 }
                 revealer_ref2.set_reveal_child(false);
+                revealer_ref2.set_can_target(false);
+            }
+        });
+
+        // Click on row to activate
+        let on_action_ref3 = on_action.clone();
+        let items_ref3 = items.clone();
+        let revealer_ref3 = revealer.clone();
+        let entry_ref = entry.clone();
+        results_box.connect_row_activated(move |_, row| {
+            let idx = row.index() as usize;
+            let query = entry_ref.text().to_string().to_lowercase();
+            let items = items_ref3.borrow();
+            let matched: Vec<&PaletteItem> = if query.is_empty() {
+                items.iter().collect()
+            } else {
+                items
+                    .iter()
+                    .filter(|i| {
+                        i.label.to_lowercase().contains(&query)
+                            || i.category.to_lowercase().contains(&query)
+                            || i.action.to_lowercase().contains(&query)
+                    })
+                    .collect()
+            };
+
+            if let Some(item) = matched.get(idx) {
+                if let Some(ref cb) = *on_action_ref3.borrow() {
+                    cb(&item.action);
+                }
+                revealer_ref3.set_reveal_child(false);
+                revealer_ref3.set_can_target(false);
             }
         });
 
@@ -158,6 +244,7 @@ impl CommandPalette {
             results_box,
             items,
             on_action,
+            on_refresh,
         };
 
         // Populate with default items
@@ -168,23 +255,60 @@ impl CommandPalette {
 
     fn default_items() -> Vec<PaletteItem> {
         vec![
+            // Matches sidebar order: AGENTS → COMMANDS → TERMINALS → SSH
             PaletteItem {
-                category: "PROJECT".to_string(),
-                label: "Create new terminal tab".to_string(),
-                icon: "utilities-terminal-symbolic".to_string(),
-                action: "new_terminal".to_string(),
+                category: "AGENT".to_string(),
+                label: "New Claude agent".to_string(),
+                icon: "ai-brain-symbolic".to_string(),
+                action: "new_agent:claude".to_string(),
             },
             PaletteItem {
-                category: "PROJECT".to_string(),
-                label: "Add new process".to_string(),
+                category: "AGENT".to_string(),
+                label: "New Codex agent".to_string(),
+                icon: "ai-brain-symbolic".to_string(),
+                action: "new_agent:codex".to_string(),
+            },
+            PaletteItem {
+                category: "AGENT".to_string(),
+                label: "New Gemini agent".to_string(),
+                icon: "ai-brain-symbolic".to_string(),
+                action: "new_agent:gemini".to_string(),
+            },
+            PaletteItem {
+                category: "AGENT".to_string(),
+                label: "New OpenCode agent".to_string(),
+                icon: "ai-brain-symbolic".to_string(),
+                action: "new_agent:opencode".to_string(),
+            },
+            PaletteItem {
+                category: "AGENT".to_string(),
+                label: "New custom agent".to_string(),
+                icon: "ai-brain-symbolic".to_string(),
+                action: "new_custom_agent".to_string(),
+            },
+            PaletteItem {
+                category: "COMMAND".to_string(),
+                label: "New command".to_string(),
                 icon: "list-add-symbolic".to_string(),
                 action: "add_process".to_string(),
             },
             PaletteItem {
-                category: "ACTIONS".to_string(),
-                label: "Start all processes".to_string(),
-                icon: "media-playback-start-symbolic".to_string(),
-                action: "start_all".to_string(),
+                category: "TERMINAL".to_string(),
+                label: "New terminal tab".to_string(),
+                icon: "utilities-terminal-symbolic".to_string(),
+                action: "new_terminal".to_string(),
+            },
+            PaletteItem {
+                category: "SSH".to_string(),
+                label: "New SSH connection".to_string(),
+                icon: "network-server-symbolic".to_string(),
+                action: "new_ssh".to_string(),
+            },
+            PaletteItem {
+                category: "PROJECT".to_string(),
+                label: "New project (open directory)".to_string(),
+                icon: "folder-open-symbolic".to_string(),
+                action: "add_project".to_string(),
             },
             PaletteItem {
                 category: "ACTIONS".to_string(),
@@ -227,6 +351,34 @@ impl CommandPalette {
         *self.on_action.borrow_mut() = Some(Box::new(cb));
     }
 
+    pub fn set_on_refresh(&self, cb: impl Fn(&CommandPalette) + 'static) {
+        *self.on_refresh.borrow_mut() = Some(Box::new(cb));
+    }
+
+    fn refresh(&self) {
+        // Remove existing navigation items
+        self.items.borrow_mut().retain(|item| item.category != "NAVIGATION");
+        // Let the callback re-add current ones
+        if let Some(ref cb) = *self.on_refresh.borrow() {
+            cb(self);
+        }
+    }
+
+    fn scroll_to_row(scroll: &gtk4::ScrolledWindow, row: &gtk4::ListBoxRow) {
+        let adj = scroll.vadjustment();
+        let alloc = row.allocation();
+        let y = alloc.y() as f64;
+        let height = alloc.height() as f64;
+        let visible_top = adj.value();
+        let visible_height = adj.page_size();
+
+        if y + height > visible_top + visible_height {
+            adj.set_value(y + height - visible_height);
+        } else if y < visible_top {
+            adj.set_value(y);
+        }
+    }
+
     fn populate_results(
         results_box: &gtk4::ListBox,
         items: &[PaletteItem],
@@ -252,27 +404,33 @@ impl CommandPalette {
         };
 
         for item in filtered {
-            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-            row.set_margin_start(12);
-            row.set_margin_end(12);
-            row.set_margin_top(6);
-            row.set_margin_bottom(6);
+            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 16);
+            row.set_margin_start(8);
+            row.set_margin_end(8);
+            row.set_margin_top(2);
+            row.set_margin_bottom(2);
 
+            // Category badge
             let cat_label = gtk4::Label::builder()
                 .label(&item.category)
-                .width_request(90)
-                .css_classes(["caption", "dim-label"])
-                .halign(gtk4::Align::Start)
+                .width_request(72)
+                .css_classes(["caption", "palette-category"])
+                .halign(gtk4::Align::End)
                 .build();
             row.append(&cat_label);
 
+            // Icon
             let icon = gtk4::Image::from_icon_name(&item.icon);
+            icon.set_pixel_size(16);
+            icon.add_css_class("dim-label");
             row.append(&icon);
 
+            // Label
             let label = gtk4::Label::builder()
                 .label(&item.label)
                 .halign(gtk4::Align::Start)
                 .hexpand(true)
+                .css_classes(["palette-label"])
                 .build();
             row.append(&label);
 
@@ -292,7 +450,9 @@ impl CommandPalette {
     pub fn toggle(&self) {
         let visible = self.revealer.reveals_child();
         self.revealer.set_reveal_child(!visible);
+        self.revealer.set_can_target(!visible);
         if !visible {
+            self.refresh();
             self.entry.set_text("");
             self.entry.grab_focus();
             Self::populate_results(
@@ -304,8 +464,25 @@ impl CommandPalette {
         }
     }
 
+    pub fn show_with_text(&self, text: &str) {
+        self.refresh();
+        self.revealer.set_reveal_child(true);
+        self.revealer.set_can_target(true);
+        self.entry.set_text(text);
+        self.entry.set_position(-1); // cursor at end
+        self.entry.grab_focus();
+        let query = text.to_lowercase();
+        Self::populate_results(
+            &self.results_box,
+            &self.items.borrow(),
+            &query,
+            &self.on_action,
+        );
+    }
+
     pub fn hide(&self) {
         self.revealer.set_reveal_child(false);
+        self.revealer.set_can_target(false);
     }
 
     pub fn is_visible(&self) -> bool {

@@ -77,16 +77,18 @@ pub fn detect_stacks(project_dir: &Path) -> Vec<DetectedStack> {
     stacks
 }
 
-fn make_process(name: &str, command: &str, auto_start: bool) -> ProcessConfig {
+fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
     ProcessConfig {
         name: name.to_string(),
         command: command.to_string(),
         working_dir: None,
-        auto_start,
+        start_with_project: false,
         auto_restart: false,
         restart_when_changed: Vec::new(),
         env: std::collections::HashMap::new(),
         category: ProcessCategory::Command,
+        auto_named: false,
+        display_name: None,
     }
 }
 
@@ -123,11 +125,18 @@ fn detect_nodejs(dir: &Path, content: &str) -> Vec<ProcessConfig> {
     procs
 }
 
-fn detect_rust(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {
-    vec![
-        make_process("cargo run", "cargo run", true),
-        make_process("cargo test", "cargo test", false),
-    ]
+fn detect_rust(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
+    let mut procs = Vec::new();
+
+    // Skip "cargo run" if this project would re-launch TuxFlow itself
+    let is_self = std::env::var("TUXFLOW_CHILD").is_ok()
+        || content.contains("name = \"tuxflow\"");
+    if !is_self {
+        procs.push(make_process("cargo run", "cargo run", true));
+    }
+    procs.push(make_process("cargo test", "cargo test", false));
+
+    procs
 }
 
 fn detect_django(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {

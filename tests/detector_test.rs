@@ -1,0 +1,228 @@
+use std::fs;
+
+use tempfile::TempDir;
+
+use tuxflow::detect::detector::detect_stacks;
+
+#[test]
+fn detect_nodejs_npm() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite","build":"vite build","test":"vitest"}}"#,
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks.len(), 1);
+    assert_eq!(stacks[0].name, "Node.js");
+
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(names.contains(&"dev"));
+    assert!(names.contains(&"build"));
+    assert!(names.contains(&"test"));
+
+    // Should use npm by default
+    let dev = stacks[0]
+        .suggested_processes
+        .iter()
+        .find(|p| p.name == "dev")
+        .unwrap();
+    assert_eq!(dev.command, "npm run dev");
+}
+
+#[test]
+fn detect_nodejs_yarn() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("yarn.lock"), "").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let dev = stacks[0]
+        .suggested_processes
+        .iter()
+        .find(|p| p.name == "dev")
+        .unwrap();
+    assert_eq!(dev.command, "yarn dev");
+}
+
+#[test]
+fn detect_nodejs_pnpm() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("pnpm-lock.yaml"), "").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let dev = stacks[0]
+        .suggested_processes
+        .iter()
+        .find(|p| p.name == "dev")
+        .unwrap();
+    assert_eq!(dev.command, "pnpm dev");
+}
+
+#[test]
+fn detect_nodejs_start_only_when_no_dev() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"start":"node index.js"}}"#,
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(names.contains(&"start"));
+    assert!(!names.contains(&"dev"));
+}
+
+#[test]
+fn detect_rust_non_tuxflow() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "my-project"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    // Make sure TUXFLOW_CHILD is not set for this test
+    unsafe { std::env::remove_var("TUXFLOW_CHILD"); }
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks.len(), 1);
+    assert_eq!(stacks[0].name, "Rust");
+
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(names.contains(&"cargo run"));
+    assert!(names.contains(&"cargo test"));
+}
+
+#[test]
+fn detect_rust_skips_cargo_run_for_tuxflow() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"
+[package]
+name = "tuxflow"
+version = "0.1.0"
+"#,
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(!names.contains(&"cargo run"), "should skip cargo run for tuxflow itself");
+    assert!(names.contains(&"cargo test"));
+}
+
+#[test]
+fn detect_go() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("go.mod"), "module example.com/app").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks[0].name, "Go");
+
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(names.contains(&"go run"));
+    assert!(names.contains(&"go test"));
+}
+
+#[test]
+fn detect_django() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("manage.py"), "").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks[0].name, "Django");
+    assert!(stacks[0]
+        .suggested_processes
+        .iter()
+        .any(|p| p.command.contains("runserver")));
+}
+
+#[test]
+fn detect_laravel() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("composer.json"),
+        r#"{"require":{"laravel/framework":"^11.0"}}"#,
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks[0].name, "PHP");
+    assert!(stacks[0]
+        .suggested_processes
+        .iter()
+        .any(|p| p.command.contains("artisan serve")));
+}
+
+#[test]
+fn detect_docker_compose() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("docker-compose.yml"), "version: '3'").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks[0].name, "Docker Compose");
+    assert!(stacks[0]
+        .suggested_processes
+        .iter()
+        .any(|p| p.command == "docker compose up"));
+}
+
+#[test]
+fn detect_multiple_stacks() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("docker-compose.yml"), "version: '3'").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let stack_names: Vec<&str> = stacks.iter().map(|s| s.name.as_str()).collect();
+    assert!(stack_names.contains(&"Node.js"));
+    assert!(stack_names.contains(&"Docker Compose"));
+}
+
+#[test]
+fn detect_empty_directory() {
+    let dir = TempDir::new().unwrap();
+    let stacks = detect_stacks(dir.path());
+    assert!(stacks.is_empty());
+}

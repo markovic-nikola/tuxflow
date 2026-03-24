@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gtk4::glib;
@@ -73,6 +75,11 @@ impl ResourceMonitor {
         self.prev_ticks.insert(pid, (process_ticks, total_ticks));
         Some(cpu_percent)
     }
+
+    /// Clean up stale PID entries that are no longer tracked
+    pub fn remove_stale(&mut self, active_pids: &[i32]) {
+        self.prev_ticks.retain(|pid, _| active_pids.contains(pid));
+    }
 }
 
 fn num_cpus() -> usize {
@@ -81,15 +88,23 @@ fn num_cpus() -> usize {
         .unwrap_or(1)
 }
 
+/// Start periodic resource monitoring.
+/// `get_pids` returns current (process_name, pid) pairs.
+/// `on_update` receives resource data per process.
 pub fn start_monitoring(
-    pids: Vec<(String, i32)>,
+    get_pids: impl Fn() -> Vec<(String, i32)> + 'static,
     on_update: impl Fn(&str, &ProcessResources) + 'static,
 ) {
-    let mut monitor = ResourceMonitor::new();
+    let monitor = Rc::new(RefCell::new(ResourceMonitor::new()));
 
     glib::timeout_add_local(Duration::from_secs(2), move || {
+        let pids = get_pids();
+        let active_pids: Vec<i32> = pids.iter().map(|(_, pid)| *pid).collect();
+        let mut mon = monitor.borrow_mut();
+        mon.remove_stale(&active_pids);
+
         for (name, pid) in &pids {
-            if let Some(resources) = monitor.sample(*pid) {
+            if let Some(resources) = mon.sample(*pid) {
                 on_update(name, &resources);
             }
         }

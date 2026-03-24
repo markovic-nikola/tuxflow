@@ -13,7 +13,7 @@ impl SectionHeader {
 
         // Header row (clickable to expand/collapse)
         let header_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        header_row.set_margin_start(12);
+        header_row.set_margin_start(0);
         header_row.set_margin_end(12);
         header_row.set_margin_top(8);
         header_row.set_margin_bottom(4);

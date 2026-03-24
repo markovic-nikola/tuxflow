@@ -98,9 +98,9 @@ packaging/
 
 ## Config Files
 
-- **Project config:** `tuxflow.toml` in project root (version-controlled)
-- **Global settings:** `~/.config/tuxflow/settings.toml`
-- **Custom commands:** `~/.config/tuxflow/projects.toml`
+- **Project config:** `tuxflow.toml` in project root (optional, version-controlled)
+- **Global settings:** `~/.config/tuxflow/settings.toml` (appearance, keybindings, notifications)
+- **Project state:** `~/.config/tuxflow/projects.toml` (open directories, custom commands, process order, UI state)
 
 ## TODO
 

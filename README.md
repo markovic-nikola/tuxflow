@@ -57,39 +57,12 @@ cargo build --release
 
 ## Quick Start
 
-1. Navigate to your project directory
-2. Create a `tuxflow.toml`:
-
-```toml
-[project]
-name = "my-app"
-
-[[process]]
-name = "npm:dev"
-command = "npm run dev"
-auto_start = true
-
-[[process]]
-name = "Logs"
-command = "tail -f storage/logs/laravel.log"
-auto_start = true
-
-[[process]]
-name = "Queue"
-command = "php artisan queue:work"
-auto_start = false
-auto_restart = true
-restart_when_changed = ["app/Jobs/**/*.php"]
-```
-
-3. Run TuxFlow:
-
 ```bash
-tuxflow              # auto-detects tuxflow.toml in current dir
-tuxflow /path/to/project  # or specify project path
+tuxflow                   # opens in current directory
+tuxflow /path/to/project  # or specify a project path
 ```
 
-If no `tuxflow.toml` exists, TuxFlow auto-detects your tech stack and suggests commands.
+TuxFlow auto-detects your tech stack and suggests commands. Add processes, agents, and terminals through the GUI with `Ctrl+P`.
 
 ## Configuration
 

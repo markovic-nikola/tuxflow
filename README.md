@@ -120,11 +120,13 @@ To connect from Claude Code, add to your MCP config:
   "mcpServers": {
     "tuxflow": {
       "command": "tuxflow-mcp",
-      "args": ["/path/to/project"]
+      "args": ["my-project"]
     }
   }
 }
 ```
+
+The argument is the project name (as shown in TuxFlow). If omitted, `tuxflow-mcp` auto-discovers the socket when run from within the project directory.
 
 ## License
 

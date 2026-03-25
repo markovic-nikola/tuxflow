@@ -49,10 +49,10 @@ impl ProjectDetail {
                 display.clipboard().set_text(&dir_owned);
             }
         });
-        if let Some(content) = dir_card.last_child() {
-            if let Ok(content_box) = content.downcast::<gtk4::Box>() {
-                content_box.append(&copy_btn);
-            }
+        if let Some(content) = dir_card.last_child()
+            && let Ok(content_box) = content.downcast::<gtk4::Box>()
+        {
+            content_box.append(&copy_btn);
         }
         cards_box.append(&dir_card);
 
@@ -110,7 +110,7 @@ impl ProjectDetail {
                 };
                 let row = adw::ActionRow::builder()
                     .title(name)
-                    .subtitle(&format!("{} — {status_str}", proc.config.command))
+                    .subtitle(format!("{} — {status_str}", proc.config.command))
                     .build();
                 proc_group.add(&row);
             }

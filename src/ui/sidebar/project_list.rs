@@ -144,10 +144,10 @@ impl ProjectList {
 
     pub fn select_process(&self, qname: &str) {
         let rows = self.process_rows.borrow();
-        if let Some(ref prev) = *self.selected_qname.borrow() {
-            if let Some(prev_row) = rows.get(prev.as_str()) {
-                prev_row.widget().remove_css_class("process-row-selected");
-            }
+        if let Some(ref prev) = *self.selected_qname.borrow()
+            && let Some(prev_row) = rows.get(prev.as_str())
+        {
+            prev_row.widget().remove_css_class("process-row-selected");
         }
         if let Some(row) = rows.get(qname) {
             row.widget().add_css_class("process-row-selected");
@@ -396,10 +396,10 @@ impl ProjectList {
             "copy_path" => {
                 if let Some(ref ws) = *ws_ref.borrow() {
                     let ws_borrow = ws.borrow();
-                    if let Some(dir) = ws_borrow.get_project_dir(&pname) {
-                        if let Some(display) = gtk4::gdk::Display::default() {
-                            display.clipboard().set_text(&dir.to_string_lossy());
-                        }
+                    if let Some(dir) = ws_borrow.get_project_dir(&pname)
+                        && let Some(display) = gtk4::gdk::Display::default()
+                    {
+                        display.clipboard().set_text(&dir.to_string_lossy());
                     }
                 }
             }
@@ -476,10 +476,8 @@ impl ProjectList {
                                     row.set_icon(result.icon_path.as_deref());
                                 }
 
-                                if renamed {
-                                    if let Some(ref cb) = *on_renamed_cb.borrow() {
-                                        cb(&pname_for_closure, &result.name);
-                                    }
+                                if renamed && let Some(ref cb) = *on_renamed_cb.borrow() {
+                                    cb(&pname_for_closure, &result.name);
                                 }
                             }
                         },
@@ -573,10 +571,10 @@ impl ProjectList {
             let select_and_highlight = |qname: &str| {
                 // Update sidebar highlight
                 let rows = rows_for_highlight.borrow();
-                if let Some(ref prev) = *selected_ref.borrow() {
-                    if let Some(prev_row) = rows.get(prev.as_str()) {
-                        prev_row.widget().remove_css_class("process-row-selected");
-                    }
+                if let Some(ref prev) = *selected_ref.borrow()
+                    && let Some(prev_row) = rows.get(prev.as_str())
+                {
+                    prev_row.widget().remove_css_class("process-row-selected");
                 }
                 if let Some(row) = rows.get(qname) {
                     row.widget().add_css_class("process-row-selected");
@@ -660,15 +658,14 @@ impl ProjectList {
                                             .update_process_config(&old_name, new_config.clone());
 
                                         // Persist: remove old, save new
-                                        if let Some((proj_name, _)) = old_qname.split_once("::") {
-                                            if let Some(ref ws) = *ws_edit.borrow() {
-                                                let mut ws_mut = ws.borrow_mut();
-                                                if name_changed {
-                                                    ws_mut
-                                                        .mark_process_deleted(proj_name, &old_name);
-                                                }
-                                                ws_mut.save_custom_command(proj_name, new_config);
+                                        if let Some((proj_name, _)) = old_qname.split_once("::")
+                                            && let Some(ref ws) = *ws_edit.borrow()
+                                        {
+                                            let mut ws_mut = ws.borrow_mut();
+                                            if name_changed {
+                                                ws_mut.mark_process_deleted(proj_name, &old_name);
                                             }
+                                            ws_mut.save_custom_command(proj_name, new_config);
                                         }
 
                                         // Update sidebar row
@@ -731,11 +728,10 @@ impl ProjectList {
                                         // Persist deletion
                                         if let Some((proj_name, proc_name)) =
                                             old_qname.split_once("::")
+                                            && let Some(ref ws) = *ws_edit.borrow()
                                         {
-                                            if let Some(ref ws) = *ws_edit.borrow() {
-                                                ws.borrow_mut()
-                                                    .mark_process_deleted(proj_name, proc_name);
-                                            }
+                                            ws.borrow_mut()
+                                                .mark_process_deleted(proj_name, proc_name);
                                         }
 
                                         // Runtime removal
@@ -743,14 +739,11 @@ impl ProjectList {
 
                                         // Remove the row widget from the sidebar
                                         if let Some(row) = rows_edit.borrow_mut().remove(&old_qname)
+                                            && let Some(parent) = row.widget().parent()
+                                            && let Some(parent_box) =
+                                                parent.downcast_ref::<gtk4::Box>()
                                         {
-                                            if let Some(parent) = row.widget().parent() {
-                                                if let Some(parent_box) =
-                                                    parent.downcast_ref::<gtk4::Box>()
-                                                {
-                                                    parent_box.remove(row.widget());
-                                                }
-                                            }
+                                            parent_box.remove(row.widget());
                                         }
 
                                         // Remove from section tracking and update counts
@@ -838,22 +831,21 @@ impl ProjectList {
                             }
 
                             // Persist deletion
-                            if let Some((proj_name, proc_name)) = qname_del.split_once("::") {
-                                if let Some(ref ws) = *ws_del.borrow() {
-                                    ws.borrow_mut().mark_process_deleted(proj_name, proc_name);
-                                }
+                            if let Some((proj_name, proc_name)) = qname_del.split_once("::")
+                                && let Some(ref ws) = *ws_del.borrow()
+                            {
+                                ws.borrow_mut().mark_process_deleted(proj_name, proc_name);
                             }
 
                             // Runtime removal
                             mgr_del.borrow_mut().remove_process(&process_name);
 
                             // Remove the row widget from the sidebar
-                            if let Some(row) = process_rows_del.borrow_mut().remove(&qname_del) {
-                                if let Some(parent) = row.widget().parent() {
-                                    if let Some(parent_box) = parent.downcast_ref::<gtk4::Box>() {
-                                        parent_box.remove(row.widget());
-                                    }
-                                }
+                            if let Some(row) = process_rows_del.borrow_mut().remove(&qname_del)
+                                && let Some(parent) = row.widget().parent()
+                                && let Some(parent_box) = parent.downcast_ref::<gtk4::Box>()
+                            {
+                                parent_box.remove(row.widget());
                             }
 
                             // Remove from section tracking and update counts
@@ -1009,10 +1001,10 @@ impl ProjectList {
             // Remove highlight from previous selection
             {
                 let rows = rows_ref.borrow();
-                if let Some(ref prev) = *selected_ref.borrow() {
-                    if let Some(prev_row) = rows.get(prev.as_str()) {
-                        prev_row.widget().remove_css_class("process-row-selected");
-                    }
+                if let Some(ref prev) = *selected_ref.borrow()
+                    && let Some(prev_row) = rows.get(prev.as_str())
+                {
+                    prev_row.widget().remove_css_class("process-row-selected");
                 }
                 // Highlight new selection
                 if let Some(row) = rows.get(name.as_str()) {
@@ -1239,9 +1231,7 @@ impl ProjectList {
         self.process_statuses
             .borrow()
             .get(qualified_name)
-            .map_or(false, |s| {
-                matches!(s, ProcessStatus::Running | ProcessStatus::Restarting)
-            })
+            .is_some_and(|s| matches!(s, ProcessStatus::Running | ProcessStatus::Restarting))
     }
 
     pub fn set_process_port(&self, qualified_name: &str, port: Option<u16>) {
@@ -1280,12 +1270,11 @@ impl ProjectList {
     /// Remove a process from the sidebar and notify listeners.
     pub fn remove_process(&self, qualified_name: &str) {
         // Remove the row widget
-        if let Some(row) = self.process_rows.borrow_mut().remove(qualified_name) {
-            if let Some(parent) = row.widget().parent() {
-                if let Some(parent_box) = parent.downcast_ref::<gtk4::Box>() {
-                    parent_box.remove(row.widget());
-                }
-            }
+        if let Some(row) = self.process_rows.borrow_mut().remove(qualified_name)
+            && let Some(parent) = row.widget().parent()
+            && let Some(parent_box) = parent.downcast_ref::<gtk4::Box>()
+        {
+            parent_box.remove(row.widget());
         }
 
         // Remove from section tracking and update counts

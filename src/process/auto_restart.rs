@@ -21,12 +21,11 @@ pub fn setup_auto_restart(manager: &ProcessManagerRef, process_name: &str) {
         // If already marked as Stopped (user-initiated kill), don't treat as crash
         {
             let mgr = manager_ref.borrow();
-            if let Some(proc) = mgr.get_process(&name) {
-                if proc.status == ProcessStatus::Stopped {
+            if let Some(proc) = mgr.get_process(&name)
+                && proc.status == ProcessStatus::Stopped {
                     log::info!("Process {name} exited after user stop (status {status})");
                     return;
                 }
-            }
         }
 
         if status == 0 {

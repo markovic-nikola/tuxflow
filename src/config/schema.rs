@@ -39,7 +39,9 @@ pub struct ProcessConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ProcessCategory {
+    #[default]
     Command,
     Agent,
     Terminal,
@@ -49,10 +51,4 @@ pub enum ProcessCategory {
 
 fn default_category() -> ProcessCategory {
     ProcessCategory::Command
-}
-
-impl Default for ProcessCategory {
-    fn default() -> Self {
-        Self::Command
-    }
 }

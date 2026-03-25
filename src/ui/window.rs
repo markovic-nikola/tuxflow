@@ -364,16 +364,16 @@ impl TuxFlowWindow {
             if !is_auto {
                 return;
             }
-            if let Some(title) = term.window_title() {
-                if let Some(display_name) = Self::parse_window_title(&title) {
-                    sidebar_ref.set_process_name(&qname, &display_name);
-                    if let Some(proc) = mgr_ref.borrow_mut().get_process_mut(&proc_name) {
-                        proc.config.display_name = Some(display_name.clone());
-                    }
-                    ws_ref
-                        .borrow_mut()
-                        .set_display_name(&proj_name, &proc_name, &display_name);
+            if let Some(title) = term.window_title()
+                && let Some(display_name) = Self::parse_window_title(&title)
+            {
+                sidebar_ref.set_process_name(&qname, &display_name);
+                if let Some(proc) = mgr_ref.borrow_mut().get_process_mut(&proc_name) {
+                    proc.config.display_name = Some(display_name.clone());
                 }
+                ws_ref
+                    .borrow_mut()
+                    .set_display_name(&proj_name, &proc_name, &display_name);
             }
         });
     }
@@ -435,10 +435,10 @@ impl TuxFlowWindow {
             .build();
 
         // Pre-select best project
-        if let Some(best) = best_project {
-            if let Some(idx) = project_names.iter().position(|n| n == best) {
-                project_row.set_selected(idx as u32);
-            }
+        if let Some(best) = best_project
+            && let Some(idx) = project_names.iter().position(|n| n == best)
+        {
+            project_row.set_selected(idx as u32);
         }
 
         project_group.add(&project_row);
@@ -508,10 +508,10 @@ impl TuxFlowWindow {
                     sidebar_ref.update_process_status(&qname, status);
 
                     // Update MCP shared state
-                    if let Ok(mut state) = mcp_state.lock() {
-                        if let Some(snapshot) = state.get_mut(process_name) {
-                            snapshot.status = format!("{:?}", status);
-                        }
+                    if let Ok(mut state) = mcp_state.lock()
+                        && let Some(snapshot) = state.get_mut(process_name)
+                    {
+                        snapshot.status = format!("{:?}", status);
                     }
                 });
 
@@ -550,13 +550,13 @@ impl TuxFlowWindow {
                         let last_row: Rc<Cell<i64>> = Rc::new(Cell::new(0));
 
                         proc.terminal.connect_contents_changed(move |terminal| {
-                            let row = terminal.cursor_position().1 as i64;
+                            let row = terminal.cursor_position().1;
 
                             // Capture new output lines into MCP log buffer
                             {
                                 let prev_row = last_row.get();
                                 if row > prev_row {
-                                    let cols = terminal.column_count() as i64;
+                                    let cols = terminal.column_count();
                                     let (text_opt, _) = terminal.text_range_format(
                                         vte4::Format::Text,
                                         prev_row,
@@ -564,15 +564,15 @@ impl TuxFlowWindow {
                                         row,
                                         cols,
                                     );
-                                    if let Some(text) = text_opt {
-                                        if let Ok(mut buffers) = log_buffers.lock() {
-                                            let buffer = buffers
-                                                .entry(log_proc_name.clone())
-                                                .or_insert_with(crate::mcp::bridge::LogBuffer::new);
-                                            for line in text.lines() {
-                                                if !line.trim().is_empty() {
-                                                    buffer.push(line.to_string());
-                                                }
+                                    if let Some(text) = text_opt
+                                        && let Ok(mut buffers) = log_buffers.lock()
+                                    {
+                                        let buffer = buffers
+                                            .entry(log_proc_name.clone())
+                                            .or_insert_with(crate::mcp::bridge::LogBuffer::new);
+                                        for line in text.lines() {
+                                            if !line.trim().is_empty() {
+                                                buffer.push(line.to_string());
                                             }
                                         }
                                     }
@@ -583,7 +583,7 @@ impl TuxFlowWindow {
                             // Port detection — skip for agents, skip when not running
                             if !skip_port_detection && sidebar_ref.is_process_running(&qname) {
                                 let start_row = (row - 5).max(0);
-                                let cols = terminal.column_count() as i64;
+                                let cols = terminal.column_count();
                                 let (text_opt, _len) = terminal.text_range_format(
                                     vte4::Format::Text,
                                     start_row,
@@ -624,19 +624,19 @@ impl TuxFlowWindow {
             {
                 let mgr = manager.borrow();
                 for name in mgr.process_names() {
-                    if let Some(proc) = mgr.get_process(name) {
-                        if proc.config.auto_named {
-                            let qname = workspace::qualified_name(&project_name, name);
-                            Self::connect_window_title_auto_rename(
-                                &proc.terminal,
-                                &manager,
-                                name,
-                                sidebar,
-                                &qname,
-                                ws,
-                                &project_name,
-                            );
-                        }
+                    if let Some(proc) = mgr.get_process(name)
+                        && proc.config.auto_named
+                    {
+                        let qname = workspace::qualified_name(&project_name, name);
+                        Self::connect_window_title_auto_rename(
+                            &proc.terminal,
+                            &manager,
+                            name,
+                            sidebar,
+                            &qname,
+                            ws,
+                            &project_name,
+                        );
                     }
                 }
             }
@@ -684,11 +684,11 @@ impl TuxFlowWindow {
             for project in ws_borrow.projects() {
                 let mgr = project.manager.borrow();
                 for name in mgr.process_names() {
-                    if let Some(proc) = mgr.get_process(name) {
-                        if proc.status == ProcessStatus::Running {
-                            let qname = workspace::qualified_name(&project.name, name);
-                            p.add_navigation_items(&[qname]);
-                        }
+                    if let Some(proc) = mgr.get_process(name)
+                        && proc.status == ProcessStatus::Running
+                    {
+                        let qname = workspace::qualified_name(&project.name, name);
+                        p.add_navigation_items(&[qname]);
                     }
                 }
             }
@@ -730,12 +730,10 @@ impl TuxFlowWindow {
                         .title("Open Project Directory")
                         .build();
                     dialog.select_folder(Some(&win), gtk4::gio::Cancellable::NONE, move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                Self::load_project(
-                                    &ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2,
-                                );
-                            }
+                        if let Ok(file) = result
+                            && let Some(path) = file.path()
+                        {
+                            Self::load_project(&ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2);
                         }
                     });
                 }
@@ -765,11 +763,10 @@ impl TuxFlowWindow {
                                     .projects()
                                     .iter()
                                     .find(|p| p.name == selected_project)
+                                    && config.working_dir.is_none()
                                 {
-                                    if config.working_dir.is_none() {
-                                        config.working_dir =
-                                            Some(project.dir.to_string_lossy().to_string());
-                                    }
+                                    config.working_dir =
+                                        Some(project.dir.to_string_lossy().to_string());
                                 }
                             }
                             ws2.borrow_mut()
@@ -844,11 +841,10 @@ impl TuxFlowWindow {
                                     .projects()
                                     .iter()
                                     .find(|p| p.name == selected_project)
+                                    && config.working_dir.is_none()
                                 {
-                                    if config.working_dir.is_none() {
-                                        config.working_dir =
-                                            Some(project.dir.to_string_lossy().to_string());
-                                    }
+                                    config.working_dir =
+                                        Some(project.dir.to_string_lossy().to_string());
                                 }
                             }
                             ws2.borrow_mut()
@@ -927,11 +923,10 @@ impl TuxFlowWindow {
                                     .projects()
                                     .iter()
                                     .find(|p| p.name == selected_project)
+                                    && config.working_dir.is_none()
                                 {
-                                    if config.working_dir.is_none() {
-                                        config.working_dir =
-                                            Some(project.dir.to_string_lossy().to_string());
-                                    }
+                                    config.working_dir =
+                                        Some(project.dir.to_string_lossy().to_string());
                                 }
                             }
                             // Persist the custom command
@@ -1194,13 +1189,12 @@ impl TuxFlowWindow {
         let selected_ref = selected_process.clone();
         status_bar.connect_stop(move || {
             let ws_borrow = ws_ref.borrow();
-            if let Some(ref qname) = *selected_ref.borrow() {
-                if let Some((proj, proc_name)) = qname.split_once("::") {
-                    if let Some(mgr) = ws_borrow.get_manager_for_project(proj) {
-                        mgr.borrow_mut().kill(proc_name);
-                        return;
-                    }
-                }
+            if let Some(ref qname) = *selected_ref.borrow()
+                && let Some((proj, proc_name)) = qname.split_once("::")
+                && let Some(mgr) = ws_borrow.get_manager_for_project(proj)
+            {
+                mgr.borrow_mut().kill(proc_name);
+                return;
             }
             for project in ws_borrow.projects() {
                 project.manager.borrow_mut().stop_all();
@@ -1212,13 +1206,12 @@ impl TuxFlowWindow {
         let selected_ref = selected_process.clone();
         status_bar.connect_restart(move || {
             let ws_borrow = ws_ref.borrow();
-            if let Some(ref qname) = *selected_ref.borrow() {
-                if let Some((proj, proc_name)) = qname.split_once("::") {
-                    if let Some(mgr) = ws_borrow.get_manager_for_project(proj) {
-                        mgr.borrow_mut().restart(proc_name);
-                        return;
-                    }
-                }
+            if let Some(ref qname) = *selected_ref.borrow()
+                && let Some((proj, proc_name)) = qname.split_once("::")
+                && let Some(mgr) = ws_borrow.get_manager_for_project(proj)
+            {
+                mgr.borrow_mut().restart(proc_name);
+                return;
             }
             for project in ws_borrow.projects() {
                 project.manager.borrow_mut().restart_all();
@@ -1227,10 +1220,10 @@ impl TuxFlowWindow {
 
         let stack_ref = terminal_stack.clone();
         status_bar.connect_clear(move || {
-            if let Some(child) = stack_ref.visible_child() {
-                if let Ok(terminal) = child.downcast::<vte4::Terminal>() {
-                    terminal.reset(true, true);
-                }
+            if let Some(child) = stack_ref.visible_child()
+                && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+            {
+                terminal.reset(true, true);
             }
         });
 
@@ -1328,10 +1321,10 @@ impl TuxFlowWindow {
         // Update search bar terminal when stack child changes
         let search_ref = search_bar.clone();
         terminal_stack.connect_visible_child_notify(move |stack| {
-            if let Some(child) = stack.visible_child() {
-                if let Ok(terminal) = child.downcast::<vte4::Terminal>() {
-                    search_ref.set_terminal(&terminal);
-                }
+            if let Some(child) = stack.visible_child()
+                && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+            {
+                search_ref.set_terminal(&terminal);
             }
         });
 
@@ -1445,17 +1438,17 @@ impl TuxFlowWindow {
             if let Some(action) = kb_map.borrow().action_for(keyval, state) {
                 match action {
                     ShortcutAction::Copy => {
-                        if let Some(child) = stack_ref.visible_child() {
-                            if let Ok(terminal) = child.downcast::<vte4::Terminal>() {
-                                terminal.copy_clipboard_format(vte4::Format::Text);
-                            }
+                        if let Some(child) = stack_ref.visible_child()
+                            && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+                        {
+                            terminal.copy_clipboard_format(vte4::Format::Text);
                         }
                     }
                     ShortcutAction::Paste => {
-                        if let Some(child) = stack_ref.visible_child() {
-                            if let Ok(terminal) = child.downcast::<vte4::Terminal>() {
-                                terminal.paste_clipboard();
-                            }
+                        if let Some(child) = stack_ref.visible_child()
+                            && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+                        {
+                            terminal.paste_clipboard();
                         }
                     }
                     ShortcutAction::TerminalSearch => {
@@ -1507,10 +1500,10 @@ impl TuxFlowWindow {
                         palette_ref.show_with_text("Switch ");
                     }
                     ShortcutAction::ClearOutput => {
-                        if let Some(child) = stack_ref.visible_child() {
-                            if let Ok(terminal) = child.downcast::<vte4::Terminal>() {
-                                terminal.reset(true, true);
-                            }
+                        if let Some(child) = stack_ref.visible_child()
+                            && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+                        {
+                            terminal.reset(true, true);
                         }
                     }
                     ShortcutAction::ToggleProcess => {
@@ -1945,18 +1938,17 @@ impl TuxFlowWindow {
     }
 
     fn adjust_font_size(stack: &gtk4::Stack, delta: i32) {
-        if let Some(child) = stack.visible_child() {
-            if let Ok(terminal) = child.downcast::<vte4::Terminal>() {
-                if let Some(font) = terminal.font() {
-                    let current_size = font.size() / gtk4::pango::SCALE;
-                    let new_size = (current_size + delta).max(6).min(48);
-                    let new_desc = gtk4::pango::FontDescription::from_string(&format!(
-                        "{} {new_size}",
-                        font.family().unwrap_or("Monospace".into())
-                    ));
-                    terminal.set_font(Some(&new_desc));
-                }
-            }
+        if let Some(child) = stack.visible_child()
+            && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+            && let Some(font) = terminal.font()
+        {
+            let current_size = font.size() / gtk4::pango::SCALE;
+            let new_size = (current_size + delta).max(6).min(48);
+            let new_desc = gtk4::pango::FontDescription::from_string(&format!(
+                "{} {new_size}",
+                font.family().unwrap_or("Monospace".into())
+            ));
+            terminal.set_font(Some(&new_desc));
         }
     }
 
@@ -2094,8 +2086,8 @@ impl TuxFlowWindow {
             let mgr = project.manager.borrow();
             if let Some(proc) = mgr.get_process(process_name) {
                 let terminal = &proc.terminal;
-                let row = terminal.cursor_position().1 as i64;
-                let cols = terminal.column_count() as i64;
+                let row = terminal.cursor_position().1;
+                let cols = terminal.column_count();
                 let start_row = (row - max_lines as i64).max(0);
                 let (text_opt, _) =
                     terminal.text_range_format(vte4::Format::Text, start_row, 0, row, cols);

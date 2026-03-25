@@ -103,36 +103,50 @@
 <!-- Install -->
 <section id="install">
   <span class="section-label">Getting started</span>
-  <h2 class="section-heading">Build from source</h2>
-  <p class="section-sub">Install system dependencies, clone, and build. Under a minute.</p>
+  <h2 class="section-heading">Install TuxFlow</h2>
+  <p class="section-sub">Pick the method that suits your distro.</p>
 
   <div class="install-tabs">
-    <input type="radio" name="distro" id="tab-ubuntu" checked>
-    <label for="tab-ubuntu">Ubuntu / Debian</label>
-    <input type="radio" name="distro" id="tab-fedora">
-    <label for="tab-fedora">Fedora</label>
+    <input type="radio" name="distro" id="tab-deb" checked>
+    <label for="tab-deb">Ubuntu / Debian</label>
     <input type="radio" name="distro" id="tab-arch">
-    <label for="tab-arch">Arch</label>
+    <label for="tab-arch">Arch (AUR)</label>
+    <input type="radio" name="distro" id="tab-tarball">
+    <label for="tab-tarball">Binary tarball</label>
+    <input type="radio" name="distro" id="tab-source">
+    <label for="tab-source">From source</label>
   </div>
 
-  <div class="install-block active" id="block-ubuntu">
-    <pre><code>sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev build-essential
-git clone https://github.com/markovic-nikola/tuxflow.git
-cd tuxflow
-cargo build --release
-./target/release/tuxflow</code></pre>
-  </div>
-
-  <div class="install-block" id="block-fedora">
-    <pre><code>sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
-git clone https://github.com/markovic-nikola/tuxflow.git
-cd tuxflow
-cargo build --release
-./target/release/tuxflow</code></pre>
+  <div class="install-block active" id="block-deb">
+    <pre><code># Download the latest .deb from GitHub Releases
+sudo dpkg -i tuxflow_*_amd64.deb
+sudo apt-get install -f</code></pre>
+    <p class="install-note">Download from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a></p>
   </div>
 
   <div class="install-block" id="block-arch">
-    <pre><code>sudo pacman -S gtk4 libadwaita vte4
+    <pre><code>yay -S tuxflow</code></pre>
+  </div>
+
+  <div class="install-block" id="block-tarball">
+    <pre><code># Download the latest .tar.gz from GitHub Releases
+tar xzf tuxflow-*-x86_64-linux.tar.gz
+cd tuxflow-*-x86_64-linux
+./install.sh              # installs to /usr/local (requires sudo)
+./install.sh --user       # installs to ~/.local (no sudo)</code></pre>
+    <p class="install-note">Download from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a></p>
+  </div>
+
+  <div class="install-block" id="block-source">
+    <pre><code># Ubuntu/Debian
+sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev build-essential
+
+# Fedora
+# sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
+
+# Arch
+# sudo pacman -S gtk4 libadwaita vte4
+
 git clone https://github.com/markovic-nikola/tuxflow.git
 cd tuxflow
 cargo build --release

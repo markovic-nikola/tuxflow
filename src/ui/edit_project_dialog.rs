@@ -291,14 +291,14 @@ impl EditProjectDialog {
             let store_ref = store_ref.clone();
             let preview_ref = preview_ref.clone();
             file_dialog.open(win.as_ref(), gtk4::gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let path_str = path.to_string_lossy().to_string();
-                        label_ref.set_label(&path_str);
-                        preview_ref.set_from_file(Some(&*path_str));
-                        preview_ref.set_visible(true);
-                        *store_ref.borrow_mut() = Some(path_str);
-                    }
+                if let Ok(file) = result
+                    && let Some(path) = file.path()
+                {
+                    let path_str = path.to_string_lossy().to_string();
+                    label_ref.set_label(&path_str);
+                    preview_ref.set_from_file(Some(&*path_str));
+                    preview_ref.set_visible(true);
+                    *store_ref.borrow_mut() = Some(path_str);
                 }
             });
         });

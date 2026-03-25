@@ -14,11 +14,11 @@ impl SshHost {
     pub fn to_ssh_command(&self) -> String {
         let mut parts = vec!["ssh".to_string()];
 
-        if let Some(port) = self.port {
-            if port != 22 {
-                parts.push("-p".to_string());
-                parts.push(port.to_string());
-            }
+        if let Some(port) = self.port
+            && port != 22
+        {
+            parts.push("-p".to_string());
+            parts.push(port.to_string());
         }
 
         if let Some(ref identity) = self.identity_file {

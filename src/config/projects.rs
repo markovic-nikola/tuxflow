@@ -51,11 +51,11 @@ impl SavedProjects {
 
     pub fn save(&self) {
         let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                log::error!("Failed to create config directory: {e}");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            log::error!("Failed to create config directory: {e}");
+            return;
         }
         match toml::to_string_pretty(self) {
             Ok(content) => {
@@ -162,11 +162,11 @@ impl SavedProjects {
     }
 
     pub fn set_display_name(&mut self, dir: &str, process_name: &str, display_name: &str) {
-        if let Some(list) = self.custom_commands.get_mut(dir) {
-            if let Some(cmd) = list.iter_mut().find(|c| c.name == process_name) {
-                cmd.display_name = Some(display_name.to_string());
-                self.save();
-            }
+        if let Some(list) = self.custom_commands.get_mut(dir)
+            && let Some(cmd) = list.iter_mut().find(|c| c.name == process_name)
+        {
+            cmd.display_name = Some(display_name.to_string());
+            self.save();
         }
     }
 

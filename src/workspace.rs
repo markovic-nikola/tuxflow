@@ -246,7 +246,7 @@ impl Workspace {
         self.projects
             .iter()
             .find(|p| p.name == project_name)
-            .and_then(|p| self.saved.is_expanded(&p.dir.to_string_lossy().as_ref()))
+            .and_then(|p| self.saved.is_expanded(p.dir.to_string_lossy().as_ref()))
     }
 
     pub fn save_custom_command(

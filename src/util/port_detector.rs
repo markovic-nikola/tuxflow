@@ -10,6 +10,12 @@ pub struct DetectedPort {
     pub url: Option<String>,
 }
 
+impl Default for PortDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PortDetector {
     pub fn new() -> Self {
         Self {
@@ -51,16 +57,15 @@ impl PortDetector {
             // 0.0.0.0:PORT or 127.0.0.1:PORT
             else if word.starts_with("0.0.0.0:") || word.starts_with("127.0.0.1:") {
                 let parts: Vec<&str> = word.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    if let Ok(port) = parts[1]
+                if parts.len() == 2
+                    && let Ok(port) = parts[1]
                         .trim_matches(|c: char| !c.is_numeric())
                         .parse::<u16>()
-                    {
-                        found.push(DetectedPort {
-                            port,
-                            url: Some(format!("http://localhost:{port}")),
-                        });
-                    }
+                {
+                    found.push(DetectedPort {
+                        port,
+                        url: Some(format!("http://localhost:{port}")),
+                    });
                 }
             }
             // "port NNNN" or "Port NNNN"
@@ -74,13 +79,14 @@ impl PortDetector {
         if let Some(idx) = lower.find("port ") {
             let after = &text[idx + 5..];
             let port_str: String = after.chars().take_while(|c| c.is_numeric()).collect();
-            if let Ok(port) = port_str.parse::<u16>() {
-                if port > 0 && !found.iter().any(|f| f.port == port) {
-                    found.push(DetectedPort {
-                        port,
-                        url: Some(format!("http://localhost:{port}")),
-                    });
-                }
+            if let Ok(port) = port_str.parse::<u16>()
+                && port > 0
+                && !found.iter().any(|f| f.port == port)
+            {
+                found.push(DetectedPort {
+                    port,
+                    url: Some(format!("http://localhost:{port}")),
+                });
             }
         }
 

@@ -310,7 +310,7 @@ fn friendly_name_to_key(name: &str) -> Option<gdk::Key> {
             let k = gdk::Key::from_name(name)?;
             if k == gdk::Key::VoidSymbol {
                 // Try lowercase
-                return gdk::Key::from_name(&name.to_lowercase())
+                return gdk::Key::from_name(name.to_lowercase())
                     .filter(|k| *k != gdk::Key::VoidSymbol);
             }
             k

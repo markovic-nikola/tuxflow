@@ -20,6 +20,7 @@ build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
     CARGO_HOME: /run/build/tuxflow/cargo
+    CARGO_NET_OFFLINE: 'true'
     RUST_BACKTRACE: '1'
 
 modules:
@@ -38,12 +39,14 @@ modules:
   - name: tuxflow
     buildsystem: simple
     build-commands:
-      - cargo build --release
+      - cargo build --release --offline
       - install -Dm755 target/release/tuxflow /app/bin/tuxflow
       - install -Dm755 target/release/tuxflow-mcp /app/bin/tuxflow-mcp
       - install -Dm644 data/com.tuxflow.TuxFlow.desktop /app/share/applications/com.tuxflow.TuxFlow.desktop
       - install -Dm644 data/com.tuxflow.TuxFlow.metainfo.xml /app/share/metainfo/com.tuxflow.TuxFlow.metainfo.xml
       - install -Dm644 data/icons/com.tuxflow.TuxFlow.svg /app/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg
     sources:
-      - type: dir
-        path: ../../
+      - type: git
+        url: https://github.com/markovic-nikola/tuxflow.git
+        commit: d7b4ab102a3f6f418662fd2d3277b0cd03071cb8
+      - cargo-sources.json

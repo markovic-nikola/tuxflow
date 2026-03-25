@@ -11,15 +11,69 @@ struct AccentColor {
 }
 
 const ACCENT_COLORS: &[AccentColor] = &[
-    AccentColor { name: "green",  label: "Green (Default)", bg: "",        fg: "",        accent: ""        },
-    AccentColor { name: "blue",   label: "Blue",            bg: "#3584e4", fg: "#ffffff", accent: "#3584e4" },
-    AccentColor { name: "purple", label: "Purple",          bg: "#9141ac", fg: "#ffffff", accent: "#9141ac" },
-    AccentColor { name: "teal",   label: "Teal",            bg: "#2190a4", fg: "#ffffff", accent: "#2190a4" },
-    AccentColor { name: "orange", label: "Orange",          bg: "#e66100", fg: "#ffffff", accent: "#e66100" },
-    AccentColor { name: "red",    label: "Red",             bg: "#e01b24", fg: "#ffffff", accent: "#e01b24" },
-    AccentColor { name: "pink",   label: "Pink",            bg: "#d56199", fg: "#ffffff", accent: "#d56199" },
-    AccentColor { name: "yellow", label: "Yellow",          bg: "#c88800", fg: "#ffffff", accent: "#c88800" },
-    AccentColor { name: "slate",  label: "Slate",           bg: "#6e8898", fg: "#ffffff", accent: "#6e8898" },
+    AccentColor {
+        name: "green",
+        label: "Green (Default)",
+        bg: "",
+        fg: "",
+        accent: "",
+    },
+    AccentColor {
+        name: "blue",
+        label: "Blue",
+        bg: "#3584e4",
+        fg: "#ffffff",
+        accent: "#3584e4",
+    },
+    AccentColor {
+        name: "purple",
+        label: "Purple",
+        bg: "#9141ac",
+        fg: "#ffffff",
+        accent: "#9141ac",
+    },
+    AccentColor {
+        name: "teal",
+        label: "Teal",
+        bg: "#2190a4",
+        fg: "#ffffff",
+        accent: "#2190a4",
+    },
+    AccentColor {
+        name: "orange",
+        label: "Orange",
+        bg: "#e66100",
+        fg: "#ffffff",
+        accent: "#e66100",
+    },
+    AccentColor {
+        name: "red",
+        label: "Red",
+        bg: "#e01b24",
+        fg: "#ffffff",
+        accent: "#e01b24",
+    },
+    AccentColor {
+        name: "pink",
+        label: "Pink",
+        bg: "#d56199",
+        fg: "#ffffff",
+        accent: "#d56199",
+    },
+    AccentColor {
+        name: "yellow",
+        label: "Yellow",
+        bg: "#c88800",
+        fg: "#ffffff",
+        accent: "#c88800",
+    },
+    AccentColor {
+        name: "slate",
+        label: "Slate",
+        bg: "#6e8898",
+        fg: "#ffffff",
+        accent: "#6e8898",
+    },
 ];
 
 thread_local! {

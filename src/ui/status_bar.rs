@@ -160,7 +160,8 @@ impl StatusBar {
     pub fn set_project_info(&self, project_name: Option<&str>, running: usize, total: usize) {
         match project_name {
             Some(name) if total > 0 => {
-                self.process_label.set_label(&format!("{name} {running}/{total}"));
+                self.process_label
+                    .set_label(&format!("{name} {running}/{total}"));
                 self.process_label.set_visible(true);
             }
             Some(name) => {
@@ -175,7 +176,8 @@ impl StatusBar {
 
     pub fn set_global_info(&self, running: usize, total: usize, has_project: bool) {
         if total > 0 {
-            self.global_label.set_label(&format!("Total {running}/{total}"));
+            self.global_label
+                .set_label(&format!("Total {running}/{total}"));
             self.global_label.set_visible(true);
             self.separator_label.set_visible(has_project);
         } else {
@@ -227,7 +229,8 @@ impl StatusBar {
             Some(u) => {
                 *self.url.borrow_mut() = Some(u.to_string());
                 self.browser_btn.set_visible(true);
-                self.browser_btn.set_tooltip_text(Some(&format!("Open {u}")));
+                self.browser_btn
+                    .set_tooltip_text(Some(&format!("Open {u}")));
             }
             None => {
                 *self.url.borrow_mut() = None;

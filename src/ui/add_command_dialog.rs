@@ -1,6 +1,6 @@
+use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use adw::prelude::*;
 
 use crate::config::schema::{ProcessCategory, ProcessConfig};
 
@@ -23,18 +23,14 @@ fn build_form_fields(content: &gtk4::Box) -> FormFields {
     // Name field
     let name_group = adw::PreferencesGroup::new();
     name_group.set_margin_top(12);
-    let name_row = adw::EntryRow::builder()
-        .title("Name")
-        .build();
+    let name_row = adw::EntryRow::builder().title("Name").build();
     name_group.add(&name_row);
     content.append(&name_group);
 
     // Command field
     let cmd_group = adw::PreferencesGroup::new();
     cmd_group.set_margin_top(12);
-    let cmd_row = adw::EntryRow::builder()
-        .title("Command")
-        .build();
+    let cmd_row = adw::EntryRow::builder().title("Command").build();
     cmd_group.add(&cmd_row);
     content.append(&cmd_group);
 
@@ -65,7 +61,13 @@ fn build_form_fields(content: &gtk4::Box) -> FormFields {
     watch_group.add(&watch_row);
     content.append(&watch_group);
 
-    FormFields { name_row, cmd_row, start_with_project_row, auto_restart_row, watch_row }
+    FormFields {
+        name_row,
+        cmd_row,
+        start_with_project_row,
+        auto_restart_row,
+        watch_row,
+    }
 }
 
 fn parse_watch_patterns(text: &str) -> Vec<String> {
@@ -100,7 +102,8 @@ impl AddCommandDialog {
 
         // Project selector
         let project_group = adw::PreferencesGroup::new();
-        let project_list = gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let project_list =
+            gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let project_row = adw::ComboRow::builder()
             .title("Project")
             .model(&project_list)
@@ -189,10 +192,14 @@ impl AddCommandDialog {
         // Pre-fill from current config
         fields.name_row.set_text(&current.name);
         fields.cmd_row.set_text(&current.command);
-        fields.start_with_project_row.set_active(current.start_with_project);
+        fields
+            .start_with_project_row
+            .set_active(current.start_with_project);
         fields.auto_restart_row.set_active(current.auto_restart);
         if !current.restart_when_changed.is_empty() {
-            fields.watch_row.set_text(&current.restart_when_changed.join(", "));
+            fields
+                .watch_row
+                .set_text(&current.restart_when_changed.join(", "));
         }
 
         // Button row: Save + Delete
@@ -284,7 +291,8 @@ impl AddCommandDialog {
 
         // Project selector
         let project_group = adw::PreferencesGroup::new();
-        let project_list = gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let project_list =
+            gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let project_row = adw::ComboRow::builder()
             .title("Project")
             .model(&project_list)
@@ -300,18 +308,14 @@ impl AddCommandDialog {
         // Name field
         let name_group = adw::PreferencesGroup::new();
         name_group.set_margin_top(12);
-        let name_row = adw::EntryRow::builder()
-            .title("Name")
-            .build();
+        let name_row = adw::EntryRow::builder().title("Name").build();
         name_group.add(&name_row);
         content.append(&name_group);
 
         // Command field
         let cmd_group = adw::PreferencesGroup::new();
         cmd_group.set_margin_top(12);
-        let cmd_row = adw::EntryRow::builder()
-            .title("Command")
-            .build();
+        let cmd_row = adw::EntryRow::builder().title("Command").build();
         cmd_group.add(&cmd_row);
         content.append(&cmd_group);
 

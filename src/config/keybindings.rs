@@ -39,25 +39,53 @@ pub fn action_metadata() -> Vec<(ShortcutAction, &'static str, &'static str)> {
         (ShortcutAction::CommandPalette, "Command Palette", "General"),
         (ShortcutAction::AddNew, "Add Project or Process", "General"),
         (ShortcutAction::Settings, "Settings", "General"),
-        (ShortcutAction::FilterProcesses, "Filter Processes", "General"),
+        (
+            ShortcutAction::FilterProcesses,
+            "Filter Processes",
+            "General",
+        ),
         (ShortcutAction::TerminalSearch, "Terminal Search", "General"),
         (ShortcutAction::Copy, "Copy", "General"),
         (ShortcutAction::Paste, "Paste", "General"),
         (ShortcutAction::FocusSidebar, "Focus Sidebar", "General"),
         (ShortcutAction::FocusTerminal, "Focus Terminal", "General"),
         (ShortcutAction::NewTerminal, "New Terminal", "General"),
-        (ShortcutAction::CloseProcess, "Close Agent/Terminal", "General"),
+        (
+            ShortcutAction::CloseProcess,
+            "Close Agent/Terminal",
+            "General",
+        ),
         (ShortcutAction::QuickJump, "Quick Jump", "Navigation"),
-        (ShortcutAction::PrevProcess, "Previous Process", "Navigation"),
+        (
+            ShortcutAction::PrevProcess,
+            "Previous Process",
+            "Navigation",
+        ),
         (ShortcutAction::NextProcess, "Next Process", "Navigation"),
-        (ShortcutAction::PrevProject, "Previous Project", "Navigation"),
+        (
+            ShortcutAction::PrevProject,
+            "Previous Project",
+            "Navigation",
+        ),
         (ShortcutAction::NextProject, "Next Project", "Navigation"),
         (ShortcutAction::ClearOutput, "Clear Output", "General"),
-        (ShortcutAction::ToggleProcess, "Start/Stop Process", "General"),
+        (
+            ShortcutAction::ToggleProcess,
+            "Start/Stop Process",
+            "General",
+        ),
         (ShortcutAction::RestartProcess, "Restart Process", "General"),
         (ShortcutAction::ToggleSidebar, "Toggle Sidebar", "General"),
-        (ShortcutAction::FontIncrease, "Increase Font Size", "Terminal"),
-        (ShortcutAction::FontDecrease, "Decrease Font Size", "Terminal"),
+        (
+            ShortcutAction::FontIncrease,
+            "Increase Font Size",
+            "Terminal",
+        ),
+        (
+            ShortcutAction::FontDecrease,
+            "Decrease Font Size",
+            "Terminal",
+        ),
     ]
 }
 
@@ -429,8 +457,7 @@ impl KeybindingMap {
                     raw,
                     action
                 );
-                parse_keybinding(defaults.get(action))
-                    .expect("default keybinding must be valid")
+                parse_keybinding(defaults.get(action)).expect("default keybinding must be valid")
             });
             bindings.insert(action, kb);
         }
@@ -450,7 +477,11 @@ impl KeybindingMap {
     }
 
     /// Find which action matches the given key event, if any.
-    pub fn action_for(&self, key: gdk::Key, modifiers: gdk::ModifierType) -> Option<ShortcutAction> {
+    pub fn action_for(
+        &self,
+        key: gdk::Key,
+        modifiers: gdk::ModifierType,
+    ) -> Option<ShortcutAction> {
         for (&action, kb) in &self.bindings {
             if kb.matches(key, modifiers) {
                 return Some(action);

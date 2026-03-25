@@ -2,9 +2,9 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use adw::prelude::*;
 
 use crate::config::settings::AppSettings;
 
@@ -120,8 +120,22 @@ impl EditProjectDialog {
             let terminal = &settings.tools.default_terminal;
             if terminal == "xdg-open" {
                 // xdg-open on a dir opens file manager, so pick a real terminal
-                for candidate in ["gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty", "foot", "wezterm", "xterm"] {
-                    if std::process::Command::new("which").arg(candidate).output().map(|o| o.status.success()).unwrap_or(false) {
+                for candidate in [
+                    "gnome-terminal",
+                    "konsole",
+                    "xfce4-terminal",
+                    "alacritty",
+                    "kitty",
+                    "foot",
+                    "wezterm",
+                    "xterm",
+                ] {
+                    if std::process::Command::new("which")
+                        .arg(candidate)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                    {
                         let _ = std::process::Command::new(candidate)
                             .current_dir(&dir_for_terminal)
                             .spawn();
@@ -142,8 +156,20 @@ impl EditProjectDialog {
             let editor = &settings.tools.default_editor;
             if editor == "xdg-open" {
                 // xdg-open on a dir opens file manager; probe for a GUI editor
-                for candidate in ["code", "codium", "zed", "gnome-text-editor", "gedit", "kate"] {
-                    if std::process::Command::new("which").arg(candidate).output().map(|o| o.status.success()).unwrap_or(false) {
+                for candidate in [
+                    "code",
+                    "codium",
+                    "zed",
+                    "gnome-text-editor",
+                    "gedit",
+                    "kate",
+                ] {
+                    if std::process::Command::new("which")
+                        .arg(candidate)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false)
+                    {
                         let _ = std::process::Command::new(candidate)
                             .arg(&dir_for_editor)
                             .spawn();

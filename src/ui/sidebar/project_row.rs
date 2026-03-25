@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gtk4::prelude::*;
 use gtk4::gio;
+use gtk4::prelude::*;
 
 type ActionCallback = Rc<RefCell<Option<Box<dyn Fn(&str)>>>>;
 type ToggleCallback = Rc<RefCell<Option<Box<dyn Fn(&str, bool)>>>>;
@@ -116,9 +116,7 @@ impl ProjectRow {
 
         // Toggle on left-click only (button 1)
         let on_toggled: ToggleCallback = Rc::new(RefCell::new(None));
-        let gesture = gtk4::GestureClick::builder()
-            .button(1)
-            .build();
+        let gesture = gtk4::GestureClick::builder().button(1).build();
         let revealer_ref = revealer.clone();
         let expander_icon_ref = expander_icon.clone();
         let name_label_ref = name_label.clone();
@@ -146,9 +144,7 @@ impl ProjectRow {
         let popover = Self::build_context_menu(name, &on_context_action);
         popover.set_parent(&header_row);
 
-        let right_click = gtk4::GestureClick::builder()
-            .button(3)
-            .build();
+        let right_click = gtk4::GestureClick::builder().button(3).build();
         let popover_ref = popover;
         right_click.connect_released(move |_, _, x, y| {
             popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
@@ -212,7 +208,14 @@ impl ProjectRow {
 
         let action_group = gio::SimpleActionGroup::new();
 
-        let actions = ["start_all", "stop_all", "restart_all", "open_in_editor", "edit", "copy_path"];
+        let actions = [
+            "start_all",
+            "stop_all",
+            "restart_all",
+            "open_in_editor",
+            "edit",
+            "copy_path",
+        ];
         for action_name in &actions {
             let on_action_ref = on_action.clone();
             let action_owned = action_name.to_string();
@@ -240,11 +243,7 @@ impl ProjectRow {
             image.set_pixel_size(24);
             icon_area.append(&image);
         } else {
-            let initials = name
-                .chars()
-                .take(2)
-                .collect::<String>()
-                .to_uppercase();
+            let initials = name.chars().take(2).collect::<String>().to_uppercase();
             let label = gtk4::Label::builder()
                 .label(&initials)
                 .css_classes(["project-icon"])
@@ -265,7 +264,9 @@ impl ProjectRow {
     pub fn set_name(&self, name: &str) {
         self.name_label.set_label(name);
         // Update icon initials if no custom icon
-        if self.icon_area.first_child()
+        if self
+            .icon_area
+            .first_child()
             .and_then(|w| w.downcast::<gtk4::Image>().ok())
             .is_none()
         {

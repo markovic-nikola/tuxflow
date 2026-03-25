@@ -1,8 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gtk4::prelude::*;
 use gtk4::gio;
+use gtk4::prelude::*;
 
 use crate::process::manager::ProcessStatus;
 
@@ -168,7 +168,8 @@ impl ProcessRow {
         });
 
         // Right-click context menu
-        let (popover, _menu, browser_section) = Self::build_context_menu(name, command, &on_context_action, &url);
+        let (popover, _menu, browser_section) =
+            Self::build_context_menu(name, command, &on_context_action, &url);
         popover.set_parent(&container);
 
         let gesture = gtk4::GestureClick::builder()
@@ -295,7 +296,9 @@ impl ProcessRow {
         open_url_action.connect_activate(move |_, _| {
             if let Some(ref url_str) = *url_ref.borrow() {
                 let launcher = gtk4::UriLauncher::new(url_str);
-                let window = popover_ref2.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+                let window = popover_ref2
+                    .root()
+                    .and_then(|r| r.downcast::<gtk4::Window>().ok());
                 launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
             }
         });
@@ -345,9 +348,16 @@ impl ProcessRow {
         }
     }
 
-    pub fn set_resources(&self, cpu_percent: f64, memory_mb: f64, cpu_threshold: f64, mem_threshold: f64) {
+    pub fn set_resources(
+        &self,
+        cpu_percent: f64,
+        memory_mb: f64,
+        cpu_threshold: f64,
+        mem_threshold: f64,
+    ) {
         self.cpu_label.set_label(&format!("{cpu_percent:.1}%"));
-        self.cpu_label.set_visible(cpu_threshold >= 0.0 && cpu_percent > cpu_threshold);
+        self.cpu_label
+            .set_visible(cpu_threshold >= 0.0 && cpu_percent > cpu_threshold);
 
         let mem_str = if memory_mb >= 1024.0 {
             format!("{:.1}GB", memory_mb / 1024.0)
@@ -355,7 +365,8 @@ impl ProcessRow {
             format!("{:.0}MB", memory_mb)
         };
         self.memory_label.set_label(&mem_str);
-        self.memory_label.set_visible(mem_threshold >= 0.0 && memory_mb > mem_threshold);
+        self.memory_label
+            .set_visible(mem_threshold >= 0.0 && memory_mb > mem_threshold);
 
         // Toggle spinner based on CPU activity (not for terminals)
         if self.is_running.get() {
@@ -396,10 +407,12 @@ impl ProcessRow {
             Some(u) => {
                 *self.url.borrow_mut() = Some(u.to_string());
                 self.browser_button.set_visible(true);
-                self.browser_button.set_tooltip_text(Some(&format!("Open {u}")));
+                self.browser_button
+                    .set_tooltip_text(Some(&format!("Open {u}")));
                 // Add "Open in Browser" to context menu if not already there
                 if self.browser_menu_section.n_items() == 0 {
-                    self.browser_menu_section.append(Some("Open in Browser"), Some("proc.open_url"));
+                    self.browser_menu_section
+                        .append(Some("Open in Browser"), Some("proc.open_url"));
                 }
             }
             None => {

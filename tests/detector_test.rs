@@ -106,7 +106,9 @@ version = "0.1.0"
     .unwrap();
 
     // Make sure TUXFLOW_CHILD is not set for this test
-    unsafe { std::env::remove_var("TUXFLOW_CHILD"); }
+    unsafe {
+        std::env::remove_var("TUXFLOW_CHILD");
+    }
 
     let stacks = detect_stacks(dir.path());
     assert_eq!(stacks.len(), 1);
@@ -140,7 +142,10 @@ version = "0.1.0"
         .iter()
         .map(|p| p.name.as_str())
         .collect();
-    assert!(!names.contains(&"cargo run"), "should skip cargo run for tuxflow itself");
+    assert!(
+        !names.contains(&"cargo run"),
+        "should skip cargo run for tuxflow itself"
+    );
     assert!(names.contains(&"cargo test"));
 }
 
@@ -168,10 +173,12 @@ fn detect_django() {
 
     let stacks = detect_stacks(dir.path());
     assert_eq!(stacks[0].name, "Django");
-    assert!(stacks[0]
-        .suggested_processes
-        .iter()
-        .any(|p| p.command.contains("runserver")));
+    assert!(
+        stacks[0]
+            .suggested_processes
+            .iter()
+            .any(|p| p.command.contains("runserver"))
+    );
 }
 
 #[test]
@@ -185,10 +192,12 @@ fn detect_laravel() {
 
     let stacks = detect_stacks(dir.path());
     assert_eq!(stacks[0].name, "PHP");
-    assert!(stacks[0]
-        .suggested_processes
-        .iter()
-        .any(|p| p.command.contains("artisan serve")));
+    assert!(
+        stacks[0]
+            .suggested_processes
+            .iter()
+            .any(|p| p.command.contains("artisan serve"))
+    );
 }
 
 #[test]
@@ -198,10 +207,12 @@ fn detect_docker_compose() {
 
     let stacks = detect_stacks(dir.path());
     assert_eq!(stacks[0].name, "Docker Compose");
-    assert!(stacks[0]
-        .suggested_processes
-        .iter()
-        .any(|p| p.command == "docker compose up"));
+    assert!(
+        stacks[0]
+            .suggested_processes
+            .iter()
+            .any(|p| p.command == "docker compose up")
+    );
 }
 
 #[test]

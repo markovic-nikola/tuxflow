@@ -59,7 +59,10 @@ impl ManagedProcess {
         let term_ref = terminal.clone();
         gesture.connect_pressed(move |gesture, _, x, y| {
             if let Some(event) = gesture.current_event() {
-                if event.modifier_state().contains(gtk4::gdk::ModifierType::CONTROL_MASK) {
+                if event
+                    .modifier_state()
+                    .contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                {
                     let (url_opt, _tag) = term_ref.check_match_at(x, y);
                     if let Some(url) = url_opt {
                         let _ = std::process::Command::new("xdg-open")
@@ -90,9 +93,14 @@ impl ManagedProcess {
 
     fn apply_settings_to_terminal(terminal: &vte4::Terminal, settings: &AppSettings) {
         use gtk4::pango;
-        let font_str = format!("{} {}", settings.appearance.font_family, settings.appearance.font_size);
+        let font_str = format!(
+            "{} {}",
+            settings.appearance.font_family, settings.appearance.font_size
+        );
         let mut font_desc = pango::FontDescription::from_string(&font_str);
-        font_desc.set_weight(pango::Weight::__Unknown(settings.appearance.font_weight as i32));
+        font_desc.set_weight(pango::Weight::__Unknown(
+            settings.appearance.font_weight as i32,
+        ));
         terminal.set_font(Some(&font_desc));
         terminal.set_scrollback_lines(settings.appearance.scrollback_lines as i64);
         if (settings.appearance.line_height - 1.0).abs() > f64::EPSILON {
@@ -104,7 +112,9 @@ impl ManagedProcess {
         // Bold weight is applied through the terminal theme's bold attribute;
         // VTE uses the font description for normal weight and derives bold from it.
         // We set bold_is_bright based on whether bold weight differs from normal.
-        terminal.set_bold_is_bright(settings.appearance.bold_font_weight != settings.appearance.font_weight);
+        terminal.set_bold_is_bright(
+            settings.appearance.bold_font_weight != settings.appearance.font_weight,
+        );
     }
 
     fn setup_url_matching(terminal: &vte4::Terminal) {
@@ -346,7 +356,8 @@ impl ProcessManager {
             .values()
             .filter(|p| p.status == ProcessStatus::Running)
             .filter_map(|p| {
-                p.pid_cell.as_ref()
+                p.pid_cell
+                    .as_ref()
                     .and_then(|cell| *cell.borrow())
                     .map(|pid| (p.config.name.clone(), pid))
             })
@@ -399,9 +410,15 @@ impl ProcessManager {
     }
 
     pub fn reorder_process(&mut self, process_name: &str, target_name: &str, before: bool) {
-        let Some(src_idx) = self.order.iter().position(|n| n == process_name) else { return };
+        let Some(src_idx) = self.order.iter().position(|n| n == process_name) else {
+            return;
+        };
         let name = self.order.remove(src_idx);
-        let target_idx = self.order.iter().position(|n| n == target_name).unwrap_or(0);
+        let target_idx = self
+            .order
+            .iter()
+            .position(|n| n == target_name)
+            .unwrap_or(0);
         let insert_idx = if before { target_idx } else { target_idx + 1 };
         self.order.insert(insert_idx, name);
     }
@@ -410,7 +427,10 @@ impl ProcessManager {
     /// keep their relative position and are appended at the end.
     pub fn apply_saved_order(&mut self, saved_order: &[String]) {
         self.order.sort_by_key(|name| {
-            saved_order.iter().position(|s| s == name).unwrap_or(usize::MAX)
+            saved_order
+                .iter()
+                .position(|s| s == name)
+                .unwrap_or(usize::MAX)
         });
     }
 }

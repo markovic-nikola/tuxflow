@@ -198,8 +198,7 @@ fn regex_escape(s: &str) -> String {
     let mut escaped = String::with_capacity(s.len() * 2);
     for c in s.chars() {
         match c {
-            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$'
-            | '|' => {
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' => {
                 escaped.push('\\');
                 escaped.push(c);
             }

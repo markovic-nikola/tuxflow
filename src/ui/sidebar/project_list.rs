@@ -7,8 +7,8 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use vte4::prelude::*;
 
-use libadwaita as adw;
 use adw::prelude::*;
+use libadwaita as adw;
 
 use crate::config::schema::ProcessCategory;
 use crate::process::manager::{ProcessManagerRef, ProcessStatus};
@@ -174,7 +174,13 @@ impl ProjectList {
 
     /// Add a single project to the sidebar (appends, doesn't clear)
     /// `saved_expanded` is the persisted expanded state (None = no saved preference).
-    pub fn add_project(&self, manager: &ProcessManagerRef, project_name: &str, icon_path: Option<&str>, saved_expanded: Option<bool>) {
+    pub fn add_project(
+        &self,
+        manager: &ProcessManagerRef,
+        project_name: &str,
+        icon_path: Option<&str>,
+        saved_expanded: Option<bool>,
+    ) {
         let mgr = manager.borrow();
 
         let project_row = ProjectRow::new(project_name, icon_path);
@@ -226,7 +232,9 @@ impl ProjectList {
         drag_source.set_actions(gdk::DragAction::MOVE);
         let pname_drag = project_name.to_string();
         drag_source.connect_prepare(move |_, _, _| {
-            Some(gdk::ContentProvider::for_value(&glib::Value::from(&pname_drag)))
+            Some(gdk::ContentProvider::for_value(&glib::Value::from(
+                &pname_drag,
+            )))
         });
         dnd::setup_drag_icon(&drag_source, project_row.header_row());
         project_row.header_row().add_controller(drag_source);
@@ -248,14 +256,20 @@ impl ProjectList {
         let project_rows_ref = self.project_rows.clone();
         let header_ref = project_row.header_row().clone();
         drop_target.connect_drop(move |_, value, _, y| {
-            let Ok(dragged_name) = value.get::<String>() else { return false };
+            let Ok(dragged_name) = value.get::<String>() else {
+                return false;
+            };
             // Only accept project-level drags (no "::" means it's a project name)
             if dragged_name.contains("::") || dragged_name == pname_drop {
                 return false;
             }
             let rows = project_rows_ref.borrow();
-            let Some(dragged_row) = rows.get(&dragged_name) else { return false };
-            let Some(target_row) = rows.get(&pname_drop) else { return false };
+            let Some(dragged_row) = rows.get(&dragged_name) else {
+                return false;
+            };
+            let Some(target_row) = rows.get(&pname_drop) else {
+                return false;
+            };
 
             let target_widget = target_row.widget();
             let height = target_widget.height() as f64;
@@ -264,7 +278,8 @@ impl ProjectList {
             dnd::reorder_in_box(&container_ref, dragged_row.widget(), target_widget, before);
 
             if let Some(ref ws) = *ws_ref.borrow() {
-                ws.borrow_mut().reorder_project(&dragged_name, &pname_drop, before);
+                ws.borrow_mut()
+                    .reorder_project(&dragged_name, &pname_drop, before);
             }
             true
         });
@@ -273,7 +288,11 @@ impl ProjectList {
         let categories = [
             ("AGENTS", "ai-brain-symbolic", ProcessCategory::Agent),
             ("COMMANDS", "view-list-symbolic", ProcessCategory::Command),
-            ("TERMINALS", "utilities-terminal-symbolic", ProcessCategory::Terminal),
+            (
+                "TERMINALS",
+                "utilities-terminal-symbolic",
+                ProcessCategory::Terminal,
+            ),
             ("SSH", "network-server-symbolic", ProcessCategory::SSH),
         ];
 
@@ -284,14 +303,19 @@ impl ProjectList {
             }
 
             let section = SectionHeader::new(title, icon);
-            let running = procs.iter().filter(|p| p.status == ProcessStatus::Running).count();
+            let running = procs
+                .iter()
+                .filter(|p| p.status == ProcessStatus::Running)
+                .count();
             section.set_count(running, procs.len());
 
             let mut section_qnames = Vec::new();
 
             for proc in &procs {
                 let qname = workspace::qualified_name(project_name, &proc.config.name);
-                let row = if *category == ProcessCategory::Terminal || *category == ProcessCategory::SSH {
+                let row = if *category == ProcessCategory::Terminal
+                    || *category == ProcessCategory::SSH
+                {
                     ProcessRow::new_terminal(&proc.config.name, &proc.config.command)
                 } else {
                     ProcessRow::new(&proc.config.name, &proc.config.command)
@@ -301,12 +325,27 @@ impl ProjectList {
                 }
                 row.set_status(proc.status);
                 self.connect_row_click(&row, &qname);
-                Self::connect_row_actions(&row, manager, &qname, &self.on_process_selected, &self.process_rows, &self.sections, &self.process_statuses, &self.on_process_deleted, &self.on_counts_changed, &self.window, &self.workspace, &self.selected_qname);
+                Self::connect_row_actions(
+                    &row,
+                    manager,
+                    &qname,
+                    &self.on_process_selected,
+                    &self.process_rows,
+                    &self.sections,
+                    &self.process_statuses,
+                    &self.on_process_deleted,
+                    &self.on_counts_changed,
+                    &self.window,
+                    &self.workspace,
+                    &self.selected_qname,
+                );
 
                 self.connect_row_dnd(&row, manager, &qname);
 
                 section.content_box().append(row.widget());
-                self.process_statuses.borrow_mut().insert(qname.clone(), proc.status);
+                self.process_statuses
+                    .borrow_mut()
+                    .insert(qname.clone(), proc.status);
                 self.process_rows.borrow_mut().insert(qname.clone(), row);
                 section_qnames.push(qname);
             }
@@ -319,11 +358,15 @@ impl ProjectList {
             });
 
             let last_idx = self.sections.borrow().len() - 1;
-            project_row.content_box().append(self.sections.borrow()[last_idx].header.widget());
+            project_row
+                .content_box()
+                .append(self.sections.borrow()[last_idx].header.widget());
         }
 
         self.container.append(project_row.widget());
-        self.project_rows.borrow_mut().insert(project_name.to_string(), project_row);
+        self.project_rows
+            .borrow_mut()
+            .insert(project_name.to_string(), project_row);
     }
 
     fn connect_project_context_actions(
@@ -340,125 +383,132 @@ impl ProjectList {
         let project_rows_ref = self.project_rows.clone();
         let on_renamed = self.on_project_renamed.clone();
 
-        project_row.set_on_context_action(move |action| {
-            match action {
-                "start_all" => {
-                    mgr.borrow_mut().spawn_project_group();
-                }
-                "stop_all" => {
-                    mgr.borrow_mut().stop_all();
-                }
-                "restart_all" => {
-                    mgr.borrow_mut().restart_all();
-                }
-                "copy_path" => {
-                    if let Some(ref ws) = *ws_ref.borrow() {
-                        let ws_borrow = ws.borrow();
-                        if let Some(dir) = ws_borrow.get_project_dir(&pname) {
-                            if let Some(display) = gtk4::gdk::Display::default() {
-                                display.clipboard().set_text(&dir.to_string_lossy());
-                            }
+        project_row.set_on_context_action(move |action| match action {
+            "start_all" => {
+                mgr.borrow_mut().spawn_project_group();
+            }
+            "stop_all" => {
+                mgr.borrow_mut().stop_all();
+            }
+            "restart_all" => {
+                mgr.borrow_mut().restart_all();
+            }
+            "copy_path" => {
+                if let Some(ref ws) = *ws_ref.borrow() {
+                    let ws_borrow = ws.borrow();
+                    if let Some(dir) = ws_borrow.get_project_dir(&pname) {
+                        if let Some(display) = gtk4::gdk::Display::default() {
+                            display.clipboard().set_text(&dir.to_string_lossy());
                         }
                     }
                 }
-                "open_in_editor" => {
-                    if let Some(ref ws) = *ws_ref.borrow() {
-                        let ws_borrow = ws.borrow();
-                        if let Some(dir) = ws_borrow.get_project_dir(&pname) {
-                            let settings = crate::config::settings::AppSettings::load();
-                            let editor = &settings.tools.default_editor;
-                            let mut cmd = std::process::Command::new(editor);
-                            if settings.tools.reuse_editor_window
-                                && matches!(editor.as_str(), "code" | "cursor" | "codium" | "code-insiders")
-                            {
-                                cmd.arg("--reuse-window");
-                            }
-                            cmd.arg(&dir);
-                            if let Err(e) = cmd.spawn() {
-                                log::error!("Failed to open editor '{}': {}", editor, e);
-                            }
+            }
+            "open_in_editor" => {
+                if let Some(ref ws) = *ws_ref.borrow() {
+                    let ws_borrow = ws.borrow();
+                    if let Some(dir) = ws_borrow.get_project_dir(&pname) {
+                        let settings = crate::config::settings::AppSettings::load();
+                        let editor = &settings.tools.default_editor;
+                        let mut cmd = std::process::Command::new(editor);
+                        if settings.tools.reuse_editor_window
+                            && matches!(
+                                editor.as_str(),
+                                "code" | "cursor" | "codium" | "code-insiders"
+                            )
+                        {
+                            cmd.arg("--reuse-window");
+                        }
+                        cmd.arg(&dir);
+                        if let Err(e) = cmd.spawn() {
+                            log::error!("Failed to open editor '{}': {}", editor, e);
                         }
                     }
                 }
-                "edit" => {
-                    let ws = ws_ref.borrow().clone();
-                    let win = win_ref.borrow().clone();
-                    if let (Some(ws), Some(win)) = (ws, win) {
-                        let ws_borrow = ws.borrow();
-                        let dir = ws_borrow.get_project_dir(&pname)
-                            .map(|d| d.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let icon = ws_borrow.get_project_icon(&pname);
-                        drop(ws_borrow);
+            }
+            "edit" => {
+                let ws = ws_ref.borrow().clone();
+                let win = win_ref.borrow().clone();
+                if let (Some(ws), Some(win)) = (ws, win) {
+                    let ws_borrow = ws.borrow();
+                    let dir = ws_borrow
+                        .get_project_dir(&pname)
+                        .map(|d| d.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let icon = ws_borrow.get_project_icon(&pname);
+                    drop(ws_borrow);
 
-                        let ws_edit = ws.clone();
-                        let pname_for_dialog = pname.clone();
-                        let pname_for_closure = pname.clone();
-                        let project_rows_edit = project_rows_ref.clone();
-                        let container_edit = container_ref.clone();
-                        let on_renamed_cb = on_renamed.clone();
+                    let ws_edit = ws.clone();
+                    let pname_for_dialog = pname.clone();
+                    let pname_for_closure = pname.clone();
+                    let project_rows_edit = project_rows_ref.clone();
+                    let container_edit = container_ref.clone();
+                    let on_renamed_cb = on_renamed.clone();
 
-                        EditProjectDialog::show(
-                            &win,
-                            &pname_for_dialog,
-                            &dir,
-                            icon.as_deref(),
-                            move |result: EditProjectResult| {
-                                if result.remove {
-                                    let mut ws_mut = ws_edit.borrow_mut();
-                                    ws_mut.remove_project(&pname_for_closure);
-                                    drop(ws_mut);
-                                    let mut rows = project_rows_edit.borrow_mut();
-                                    if let Some(row) = rows.remove(&pname_for_closure) {
-                                        container_edit.remove(row.widget());
-                                    }
-                                } else {
-                                    let mut ws_mut = ws_edit.borrow_mut();
-                                    ws_mut.set_project_icon(&pname_for_closure, result.icon_path.clone());
-                                    let renamed = result.name != pname_for_closure;
+                    EditProjectDialog::show(
+                        &win,
+                        &pname_for_dialog,
+                        &dir,
+                        icon.as_deref(),
+                        move |result: EditProjectResult| {
+                            if result.remove {
+                                let mut ws_mut = ws_edit.borrow_mut();
+                                ws_mut.remove_project(&pname_for_closure);
+                                drop(ws_mut);
+                                let mut rows = project_rows_edit.borrow_mut();
+                                if let Some(row) = rows.remove(&pname_for_closure) {
+                                    container_edit.remove(row.widget());
+                                }
+                            } else {
+                                let mut ws_mut = ws_edit.borrow_mut();
+                                ws_mut
+                                    .set_project_icon(&pname_for_closure, result.icon_path.clone());
+                                let renamed = result.name != pname_for_closure;
+                                if renamed {
+                                    ws_mut.rename_project(&pname_for_closure, &result.name);
+                                }
+                                drop(ws_mut);
+
+                                let rows = project_rows_edit.borrow();
+                                if let Some(row) = rows.get(&pname_for_closure) {
                                     if renamed {
-                                        ws_mut.rename_project(&pname_for_closure, &result.name);
+                                        row.set_name(&result.name);
                                     }
-                                    drop(ws_mut);
+                                    row.set_icon(result.icon_path.as_deref());
+                                }
 
-                                    let rows = project_rows_edit.borrow();
-                                    if let Some(row) = rows.get(&pname_for_closure) {
-                                        if renamed {
-                                            row.set_name(&result.name);
-                                        }
-                                        row.set_icon(result.icon_path.as_deref());
-                                    }
-
-                                    if renamed {
-                                        if let Some(ref cb) = *on_renamed_cb.borrow() {
-                                            cb(&pname_for_closure, &result.name);
-                                        }
+                                if renamed {
+                                    if let Some(ref cb) = *on_renamed_cb.borrow() {
+                                        cb(&pname_for_closure, &result.name);
                                     }
                                 }
-                            },
-                        );
-                    }
+                            }
+                        },
+                    );
                 }
-                "remove" => {
-                    let dialog = adw::AlertDialog::builder()
-                        .heading(format!("Remove '{}'?", pname))
-                        .body("This will remove the project and all its processes from the sidebar.")
-                        .build();
-                    dialog.add_response("cancel", "Cancel");
-                    dialog.add_response("remove", "Remove");
-                    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
-                    dialog.set_default_response(Some("cancel"));
-                    dialog.set_close_response("cancel");
+            }
+            "remove" => {
+                let dialog = adw::AlertDialog::builder()
+                    .heading(format!("Remove '{}'?", pname))
+                    .body("This will remove the project and all its processes from the sidebar.")
+                    .build();
+                dialog.add_response("cancel", "Cancel");
+                dialog.add_response("remove", "Remove");
+                dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                dialog.set_default_response(Some("cancel"));
+                dialog.set_close_response("cancel");
 
-                    let ws_del = ws_ref.clone();
-                    let pname_del = pname.clone();
-                    let rows_del = project_rows_ref.clone();
-                    let container_del = container_ref.clone();
+                let ws_del = ws_ref.clone();
+                let pname_del = pname.clone();
+                let rows_del = project_rows_ref.clone();
+                let container_del = container_ref.clone();
 
-                    let win = win_ref.borrow().clone();
-                    let parent_widget = win.map(|w| w.upcast::<gtk4::Widget>());
+                let win = win_ref.borrow().clone();
+                let parent_widget = win.map(|w| w.upcast::<gtk4::Widget>());
 
-                    dialog.choose(parent_widget.as_ref(), gtk4::gio::Cancellable::NONE, move |response| {
+                dialog.choose(
+                    parent_widget.as_ref(),
+                    gtk4::gio::Cancellable::NONE,
+                    move |response| {
                         if response != "remove" {
                             return;
                         }
@@ -469,10 +519,10 @@ impl ProjectList {
                         if let Some(row) = rows.remove(&pname_del) {
                             container_del.remove(row.widget());
                         }
-                    });
-                }
-                _ => log::warn!("Unknown project action: {action}"),
+                    },
+                );
             }
+            _ => log::warn!("Unknown project action: {action}"),
         });
     }
 
@@ -585,143 +635,173 @@ impl ProjectList {
                     glib::idle_add_local_once(move || {
                         let (config, was_running) = {
                             let mgr_borrow = mgr_edit.borrow();
-                            let Some(proc) = mgr_borrow.get_process(&old_name) else { return };
+                            let Some(proc) = mgr_borrow.get_process(&old_name) else {
+                                return;
+                            };
                             (proc.config.clone(), proc.status == ProcessStatus::Running)
                         };
 
-                    let win = win_edit.borrow().clone();
-                    if let Some(win) = win {
-                        AddCommandDialog::show_edit(&win, &config, move |result| {
-                            match result {
-                                EditCommandResult::Save(new_config) => {
-                                    let new_name = new_config.name.clone();
-                                    let new_command = new_config.command.clone();
+                        let win = win_edit.borrow().clone();
+                        if let Some(win) = win {
+                            AddCommandDialog::show_edit(&win, &config, move |result| {
+                                match result {
+                                    EditCommandResult::Save(new_config) => {
+                                        let new_name = new_config.name.clone();
+                                        let new_command = new_config.command.clone();
 
-                                    // Stop if running
-                                    if was_running {
-                                        mgr_edit.borrow_mut().kill(&old_name);
-                                    }
-
-                                    // Update in-memory config
-                                    let name_changed = mgr_edit.borrow_mut().update_process_config(&old_name, new_config.clone());
-
-                                    // Persist: remove old, save new
-                                    if let Some((proj_name, _)) = old_qname.split_once("::") {
-                                        if let Some(ref ws) = *ws_edit.borrow() {
-                                            let mut ws_mut = ws.borrow_mut();
-                                            if name_changed {
-                                                ws_mut.mark_process_deleted(proj_name, &old_name);
-                                            }
-                                            ws_mut.save_custom_command(proj_name, new_config);
-                                        }
-                                    }
-
-                                    // Update sidebar row
-                                    let mut rows = rows_edit.borrow_mut();
-                                    if name_changed {
-                                        let new_qname = if let Some((proj, _)) = old_qname.split_once("::") {
-                                            workspace::qualified_name(proj, &new_name)
-                                        } else {
-                                            old_qname.clone()
-                                        };
-
-                                        if let Some(row) = rows.remove(&old_qname) {
-                                            row.set_name(&new_name);
-                                            row.set_command_tooltip(&new_command);
-                                            rows.insert(new_qname.clone(), row);
+                                        // Stop if running
+                                        if was_running {
+                                            mgr_edit.borrow_mut().kill(&old_name);
                                         }
 
-                                        // Update section tracking
-                                        let mut sections = sections_edit.borrow_mut();
-                                        for section in sections.iter_mut() {
-                                            if let Some(pos) = section.process_names.iter().position(|n| n == &old_qname) {
-                                                section.process_names[pos] = new_qname.clone();
-                                            }
-                                        }
+                                        // Update in-memory config
+                                        let name_changed = mgr_edit
+                                            .borrow_mut()
+                                            .update_process_config(&old_name, new_config.clone());
 
-                                        // Update status tracking
-                                        let mut statuses = statuses_edit.borrow_mut();
-                                        if let Some(status) = statuses.remove(&old_qname) {
-                                            statuses.insert(new_qname.clone(), status);
-                                        }
-                                    } else {
-                                        if let Some(row) = rows.get(&old_qname) {
-                                            row.set_command_tooltip(&new_command);
-                                        }
-                                    }
-                                    drop(rows);
-
-                                    // Restart if was running
-                                    if was_running {
-                                        mgr_edit.borrow_mut().spawn(&new_name);
-                                        let select_qname = if let Some((proj, _)) = old_qname.split_once("::") {
-                                            workspace::qualified_name(proj, &new_name)
-                                        } else {
-                                            old_qname.clone()
-                                        };
-                                        if let Some(ref cb) = *select_edit.borrow() {
-                                            cb(&select_qname);
-                                        }
-                                    }
-                                }
-                                EditCommandResult::Delete => {
-                                    // Persist deletion
-                                    if let Some((proj_name, proc_name)) = old_qname.split_once("::") {
-                                        if let Some(ref ws) = *ws_edit.borrow() {
-                                            ws.borrow_mut().mark_process_deleted(proj_name, proc_name);
-                                        }
-                                    }
-
-                                    // Runtime removal
-                                    mgr_edit.borrow_mut().remove_process(&old_name);
-
-                                    // Remove the row widget from the sidebar
-                                    if let Some(row) = rows_edit.borrow_mut().remove(&old_qname) {
-                                        if let Some(parent) = row.widget().parent() {
-                                            if let Some(parent_box) = parent.downcast_ref::<gtk4::Box>() {
-                                                parent_box.remove(row.widget());
-                                            }
-                                        }
-                                    }
-
-                                    // Remove from section tracking and update counts
-                                    statuses_edit.borrow_mut().remove(&old_qname);
-                                    {
-                                        let mut sections = sections_edit.borrow_mut();
-                                        let mut empty_idx = None;
-                                        for (idx, section) in sections.iter_mut().enumerate() {
-                                            if section.process_names.contains(&old_qname) {
-                                                section.process_names.retain(|n| n != &old_qname);
-                                                let total = section.process_names.len();
-                                                if total == 0 {
-                                                    section.header.widget().set_visible(false);
-                                                    empty_idx = Some(idx);
-                                                } else {
-                                                    let statuses = statuses_edit.borrow();
-                                                    let running = section.process_names.iter()
-                                                        .filter(|n| statuses.get(n.as_str()).map(|s| *s == ProcessStatus::Running).unwrap_or(false))
-                                                        .count();
-                                                    section.header.set_count(running, total);
+                                        // Persist: remove old, save new
+                                        if let Some((proj_name, _)) = old_qname.split_once("::") {
+                                            if let Some(ref ws) = *ws_edit.borrow() {
+                                                let mut ws_mut = ws.borrow_mut();
+                                                if name_changed {
+                                                    ws_mut
+                                                        .mark_process_deleted(proj_name, &old_name);
                                                 }
-                                                break;
+                                                ws_mut.save_custom_command(proj_name, new_config);
                                             }
                                         }
-                                        if let Some(idx) = empty_idx {
-                                            sections.remove(idx);
+
+                                        // Update sidebar row
+                                        let mut rows = rows_edit.borrow_mut();
+                                        if name_changed {
+                                            let new_qname = if let Some((proj, _)) =
+                                                old_qname.split_once("::")
+                                            {
+                                                workspace::qualified_name(proj, &new_name)
+                                            } else {
+                                                old_qname.clone()
+                                            };
+
+                                            if let Some(row) = rows.remove(&old_qname) {
+                                                row.set_name(&new_name);
+                                                row.set_command_tooltip(&new_command);
+                                                rows.insert(new_qname.clone(), row);
+                                            }
+
+                                            // Update section tracking
+                                            let mut sections = sections_edit.borrow_mut();
+                                            for section in sections.iter_mut() {
+                                                if let Some(pos) = section
+                                                    .process_names
+                                                    .iter()
+                                                    .position(|n| n == &old_qname)
+                                                {
+                                                    section.process_names[pos] = new_qname.clone();
+                                                }
+                                            }
+
+                                            // Update status tracking
+                                            let mut statuses = statuses_edit.borrow_mut();
+                                            if let Some(status) = statuses.remove(&old_qname) {
+                                                statuses.insert(new_qname.clone(), status);
+                                            }
+                                        } else {
+                                            if let Some(row) = rows.get(&old_qname) {
+                                                row.set_command_tooltip(&new_command);
+                                            }
+                                        }
+                                        drop(rows);
+
+                                        // Restart if was running
+                                        if was_running {
+                                            mgr_edit.borrow_mut().spawn(&new_name);
+                                            let select_qname = if let Some((proj, _)) =
+                                                old_qname.split_once("::")
+                                            {
+                                                workspace::qualified_name(proj, &new_name)
+                                            } else {
+                                                old_qname.clone()
+                                            };
+                                            if let Some(ref cb) = *select_edit.borrow() {
+                                                cb(&select_qname);
+                                            }
                                         }
                                     }
+                                    EditCommandResult::Delete => {
+                                        // Persist deletion
+                                        if let Some((proj_name, proc_name)) =
+                                            old_qname.split_once("::")
+                                        {
+                                            if let Some(ref ws) = *ws_edit.borrow() {
+                                                ws.borrow_mut()
+                                                    .mark_process_deleted(proj_name, proc_name);
+                                            }
+                                        }
 
-                                    // Notify to remove terminal from stack
-                                    if let Some(ref cb) = *on_deleted_edit.borrow() {
-                                        cb(&old_qname);
-                                    }
-                                    if let Some(ref cb) = *on_counts_edit.borrow() {
-                                        cb();
+                                        // Runtime removal
+                                        mgr_edit.borrow_mut().remove_process(&old_name);
+
+                                        // Remove the row widget from the sidebar
+                                        if let Some(row) = rows_edit.borrow_mut().remove(&old_qname)
+                                        {
+                                            if let Some(parent) = row.widget().parent() {
+                                                if let Some(parent_box) =
+                                                    parent.downcast_ref::<gtk4::Box>()
+                                                {
+                                                    parent_box.remove(row.widget());
+                                                }
+                                            }
+                                        }
+
+                                        // Remove from section tracking and update counts
+                                        statuses_edit.borrow_mut().remove(&old_qname);
+                                        {
+                                            let mut sections = sections_edit.borrow_mut();
+                                            let mut empty_idx = None;
+                                            for (idx, section) in sections.iter_mut().enumerate() {
+                                                if section.process_names.contains(&old_qname) {
+                                                    section
+                                                        .process_names
+                                                        .retain(|n| n != &old_qname);
+                                                    let total = section.process_names.len();
+                                                    if total == 0 {
+                                                        section.header.widget().set_visible(false);
+                                                        empty_idx = Some(idx);
+                                                    } else {
+                                                        let statuses = statuses_edit.borrow();
+                                                        let running = section
+                                                            .process_names
+                                                            .iter()
+                                                            .filter(|n| {
+                                                                statuses
+                                                                    .get(n.as_str())
+                                                                    .map(|s| {
+                                                                        *s == ProcessStatus::Running
+                                                                    })
+                                                                    .unwrap_or(false)
+                                                            })
+                                                            .count();
+                                                        section.header.set_count(running, total);
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                            if let Some(idx) = empty_idx {
+                                                sections.remove(idx);
+                                            }
+                                        }
+
+                                        // Notify to remove terminal from stack
+                                        if let Some(ref cb) = *on_deleted_edit.borrow() {
+                                            cb(&old_qname);
+                                        }
+                                        if let Some(ref cb) = *on_counts_edit.borrow() {
+                                            cb();
+                                        }
                                     }
                                 }
-                            }
-                        });
-                    }
+                            });
+                        }
                     });
                 }
                 "delete" => {
@@ -749,82 +829,90 @@ impl ProjectList {
                     let win = win_ref.borrow().clone();
                     let parent_widget = win.map(|w| w.upcast::<gtk4::Widget>());
 
-                    dialog.choose(parent_widget.as_ref(), gtk4::gio::Cancellable::NONE, move |response| {
-                        if response != "delete" {
-                            return;
-                        }
-
-                        // Persist deletion
-                        if let Some((proj_name, proc_name)) = qname_del.split_once("::") {
-                            if let Some(ref ws) = *ws_del.borrow() {
-                                ws.borrow_mut().mark_process_deleted(proj_name, proc_name);
+                    dialog.choose(
+                        parent_widget.as_ref(),
+                        gtk4::gio::Cancellable::NONE,
+                        move |response| {
+                            if response != "delete" {
+                                return;
                             }
-                        }
 
-                        // Runtime removal
-                        mgr_del.borrow_mut().remove_process(&process_name);
-
-                        // Remove the row widget from the sidebar
-                        if let Some(row) = process_rows_del.borrow_mut().remove(&qname_del) {
-                            if let Some(parent) = row.widget().parent() {
-                                if let Some(parent_box) = parent.downcast_ref::<gtk4::Box>() {
-                                    parent_box.remove(row.widget());
+                            // Persist deletion
+                            if let Some((proj_name, proc_name)) = qname_del.split_once("::") {
+                                if let Some(ref ws) = *ws_del.borrow() {
+                                    ws.borrow_mut().mark_process_deleted(proj_name, proc_name);
                                 }
                             }
-                        }
 
-                        // Remove from section tracking and update counts
-                        statuses_del.borrow_mut().remove(&qname_del);
-                        {
-                            let mut sections = sections_del.borrow_mut();
-                            let mut empty_idx = None;
-                            for (idx, section) in sections.iter_mut().enumerate() {
-                                if section.process_names.contains(&qname_del) {
-                                    section.process_names.retain(|n| n != &qname_del);
-                                    let total = section.process_names.len();
-                                    if total == 0 {
-                                        section.header.widget().set_visible(false);
-                                        empty_idx = Some(idx);
-                                    } else {
-                                        let statuses = statuses_del.borrow();
-                                        let running = section.process_names.iter()
-                                            .filter(|n| statuses.get(n.as_str()).map(|s| *s == ProcessStatus::Running).unwrap_or(false))
-                                            .count();
-                                        section.header.set_count(running, total);
+                            // Runtime removal
+                            mgr_del.borrow_mut().remove_process(&process_name);
+
+                            // Remove the row widget from the sidebar
+                            if let Some(row) = process_rows_del.borrow_mut().remove(&qname_del) {
+                                if let Some(parent) = row.widget().parent() {
+                                    if let Some(parent_box) = parent.downcast_ref::<gtk4::Box>() {
+                                        parent_box.remove(row.widget());
                                     }
-                                    break;
                                 }
                             }
-                            if let Some(idx) = empty_idx {
-                                sections.remove(idx);
-                            }
-                        }
 
-                        // Notify to remove terminal from stack
-                        if let Some(ref cb) = *on_deleted_del.borrow() {
-                            cb(&qname_del);
-                        }
-                        if let Some(ref cb) = *on_counts_del.borrow() {
-                            cb();
-                        }
-                    });
+                            // Remove from section tracking and update counts
+                            statuses_del.borrow_mut().remove(&qname_del);
+                            {
+                                let mut sections = sections_del.borrow_mut();
+                                let mut empty_idx = None;
+                                for (idx, section) in sections.iter_mut().enumerate() {
+                                    if section.process_names.contains(&qname_del) {
+                                        section.process_names.retain(|n| n != &qname_del);
+                                        let total = section.process_names.len();
+                                        if total == 0 {
+                                            section.header.widget().set_visible(false);
+                                            empty_idx = Some(idx);
+                                        } else {
+                                            let statuses = statuses_del.borrow();
+                                            let running = section
+                                                .process_names
+                                                .iter()
+                                                .filter(|n| {
+                                                    statuses
+                                                        .get(n.as_str())
+                                                        .map(|s| *s == ProcessStatus::Running)
+                                                        .unwrap_or(false)
+                                                })
+                                                .count();
+                                            section.header.set_count(running, total);
+                                        }
+                                        break;
+                                    }
+                                }
+                                if let Some(idx) = empty_idx {
+                                    sections.remove(idx);
+                                }
+                            }
+
+                            // Notify to remove terminal from stack
+                            if let Some(ref cb) = *on_deleted_del.borrow() {
+                                cb(&qname_del);
+                            }
+                            if let Some(ref cb) = *on_counts_del.borrow() {
+                                cb();
+                            }
+                        },
+                    );
                 }
                 _ => log::warn!("Unknown row action: {action}"),
             }
         });
     }
 
-    fn connect_row_dnd(
-        &self,
-        row: &ProcessRow,
-        manager: &ProcessManagerRef,
-        qualified_name: &str,
-    ) {
+    fn connect_row_dnd(&self, row: &ProcessRow, manager: &ProcessManagerRef, qualified_name: &str) {
         let proc_drag_source = gtk4::DragSource::new();
         proc_drag_source.set_actions(gdk::DragAction::MOVE);
         let qname_drag = qualified_name.to_string();
         proc_drag_source.connect_prepare(move |_, _, _| {
-            Some(gdk::ContentProvider::for_value(&glib::Value::from(&qname_drag)))
+            Some(gdk::ContentProvider::for_value(&glib::Value::from(
+                &qname_drag,
+            )))
         });
         dnd::setup_drag_icon(&proc_drag_source, row.widget());
         row.widget().add_controller(proc_drag_source);
@@ -845,12 +933,18 @@ impl ProjectList {
         let mgr_ref = manager.clone();
         let proc_ws_ref = self.workspace.clone();
         proc_drop_target.connect_drop(move |_, value, _, y| {
-            let Ok(dragged_qname) = value.get::<String>() else { return false };
+            let Ok(dragged_qname) = value.get::<String>() else {
+                return false;
+            };
             if dragged_qname == qname_drop {
                 return false;
             }
-            let Some((src_proj, src_proc)) = dragged_qname.split_once("::") else { return false };
-            let Some((tgt_proj, tgt_proc)) = qname_drop.split_once("::") else { return false };
+            let Some((src_proj, src_proc)) = dragged_qname.split_once("::") else {
+                return false;
+            };
+            let Some((tgt_proj, tgt_proc)) = qname_drop.split_once("::") else {
+                return false;
+            };
             if src_proj != tgt_proj {
                 return false;
             }
@@ -863,19 +957,34 @@ impl ProjectList {
             let Some(section) = section else { return false };
 
             let rows = process_rows_ref.borrow();
-            let Some(dragged_row) = rows.get(&dragged_qname) else { return false };
-            let Some(target_row) = rows.get(&qname_drop) else { return false };
+            let Some(dragged_row) = rows.get(&dragged_qname) else {
+                return false;
+            };
+            let Some(target_row) = rows.get(&qname_drop) else {
+                return false;
+            };
 
             let target_widget = target_row.widget();
             let height = target_widget.height() as f64;
             let before = y < height / 2.0;
             dnd::clear_drop_indicator(target_widget);
-            dnd::reorder_in_box(section.header.content_box(), dragged_row.widget(), target_widget, before);
+            dnd::reorder_in_box(
+                section.header.content_box(),
+                dragged_row.widget(),
+                target_widget,
+                before,
+            );
 
             section.process_names.retain(|n| n != &dragged_qname);
-            let tgt_idx = section.process_names.iter().position(|n| n == &qname_drop).unwrap_or(0);
+            let tgt_idx = section
+                .process_names
+                .iter()
+                .position(|n| n == &qname_drop)
+                .unwrap_or(0);
             let insert_idx = if before { tgt_idx } else { tgt_idx + 1 };
-            section.process_names.insert(insert_idx, dragged_qname.clone());
+            section
+                .process_names
+                .insert(insert_idx, dragged_qname.clone());
 
             let mut mgr = mgr_ref.borrow_mut();
             mgr.reorder_process(src_proc, tgt_proc, before);
@@ -947,10 +1056,18 @@ impl ProjectList {
         row.set_status(status);
         self.connect_row_click(&row, &qname);
         Self::connect_row_actions(
-            &row, manager, &qname,
-            &self.on_process_selected, &self.process_rows, &self.sections,
-            &self.process_statuses, &self.on_process_deleted, &self.on_counts_changed,
-            &self.window, &self.workspace, &self.selected_qname,
+            &row,
+            manager,
+            &qname,
+            &self.on_process_selected,
+            &self.process_rows,
+            &self.sections,
+            &self.process_statuses,
+            &self.on_process_deleted,
+            &self.on_counts_changed,
+            &self.window,
+            &self.workspace,
+            &self.selected_qname,
         );
         self.connect_row_dnd(&row, manager, &qname);
 
@@ -963,40 +1080,65 @@ impl ProjectList {
 
         // Find existing section for this project and category
         let mut sections = self.sections.borrow_mut();
-        let existing = sections.iter_mut().find(|s| {
-            s.project_name == project_name && s.category_title == section_title
-        });
+        let existing = sections
+            .iter_mut()
+            .find(|s| s.project_name == project_name && s.category_title == section_title);
 
         if let Some(section) = existing {
             section.header.content_box().append(row.widget());
             section.process_names.push(qname.clone());
-            self.process_statuses.borrow_mut().insert(qname.clone(), status);
+            self.process_statuses
+                .borrow_mut()
+                .insert(qname.clone(), status);
             self.process_rows.borrow_mut().insert(qname, row);
             // Update counts
             let statuses = self.process_statuses.borrow();
             let total = section.process_names.len();
-            let running = section.process_names.iter()
-                .filter(|n| statuses.get(n.as_str()).map(|s| *s == ProcessStatus::Running).unwrap_or(false))
+            let running = section
+                .process_names
+                .iter()
+                .filter(|n| {
+                    statuses
+                        .get(n.as_str())
+                        .map(|s| *s == ProcessStatus::Running)
+                        .unwrap_or(false)
+                })
                 .count();
             section.header.set_count(running, total);
         } else {
             // Create a new section
             let section = SectionHeader::new(section_title, section_icon);
             section.content_box().append(row.widget());
-            self.process_statuses.borrow_mut().insert(qname.clone(), status);
+            self.process_statuses
+                .borrow_mut()
+                .insert(qname.clone(), status);
             self.process_rows.borrow_mut().insert(qname.clone(), row);
-            section.set_count(if status == ProcessStatus::Running { 1 } else { 0 }, 1);
+            section.set_count(
+                if status == ProcessStatus::Running {
+                    1
+                } else {
+                    0
+                },
+                1,
+            );
 
             // Insert section at the correct position (AGENTS → COMMANDS → TERMINALS)
             if let Some(project_row) = self.project_rows.borrow().get(project_name) {
                 let order = Self::section_order(section_title);
                 // Find the first existing section for this project that should come after
-                let insert_before = sections.iter().find(|s| {
-                    s.project_name == project_name && Self::section_order(&s.category_title) > order
-                }).map(|s| s.header.widget().clone());
+                let insert_before = sections
+                    .iter()
+                    .find(|s| {
+                        s.project_name == project_name
+                            && Self::section_order(&s.category_title) > order
+                    })
+                    .map(|s| s.header.widget().clone());
 
                 if let Some(ref before_widget) = insert_before {
-                    project_row.content_box().insert_child_after(section.widget(), before_widget.prev_sibling().as_ref());
+                    project_row.content_box().insert_child_after(
+                        section.widget(),
+                        before_widget.prev_sibling().as_ref(),
+                    );
                 } else {
                     project_row.content_box().append(section.widget());
                 }
@@ -1015,7 +1157,9 @@ impl ProjectList {
         if let Some(row) = self.process_rows.borrow().get(qualified_name) {
             row.set_status(status);
         }
-        self.process_statuses.borrow_mut().insert(qualified_name.to_string(), status);
+        self.process_statuses
+            .borrow_mut()
+            .insert(qualified_name.to_string(), status);
         self.refresh_section_counts();
         self.notify_counts_changed();
     }
@@ -1040,9 +1184,12 @@ impl ProjectList {
         let statuses = self.process_statuses.borrow();
         for section_info in self.sections.borrow().iter() {
             let total = section_info.process_names.len();
-            let running = section_info.process_names.iter()
+            let running = section_info
+                .process_names
+                .iter()
                 .filter(|qname| {
-                    statuses.get(qname.as_str())
+                    statuses
+                        .get(qname.as_str())
                         .map(|s| *s == ProcessStatus::Running)
                         .unwrap_or(false)
                 })
@@ -1054,8 +1201,10 @@ impl ProjectList {
     pub fn set_process_resources(&self, qualified_name: &str, cpu_percent: f64, memory_mb: f64) {
         if let Some(row) = self.process_rows.borrow().get(qualified_name) {
             let settings = crate::config::settings::AppSettings::load();
-            let cpu_threshold = Self::process_cpu_threshold_value(settings.sidebar.process_cpu_threshold);
-            let mem_threshold = Self::process_mem_threshold_value(settings.sidebar.process_mem_threshold);
+            let cpu_threshold =
+                Self::process_cpu_threshold_value(settings.sidebar.process_cpu_threshold);
+            let mem_threshold =
+                Self::process_mem_threshold_value(settings.sidebar.process_mem_threshold);
             row.set_resources(cpu_percent, memory_mb, cpu_threshold, mem_threshold);
         }
     }
@@ -1064,12 +1213,12 @@ impl ProjectList {
     /// Returns -1.0 for "Never" (hide always).
     fn process_cpu_threshold_value(index: u32) -> f64 {
         match index {
-            0 => 0.0,     // Always
-            1 => 10.0,    // 10%
-            2 => 30.0,    // 30%
-            3 => 60.0,    // 60%
-            4 => 90.0,    // 90%
-            _ => -1.0,    // Never
+            0 => 0.0,  // Always
+            1 => 10.0, // 10%
+            2 => 30.0, // 30%
+            3 => 60.0, // 60%
+            4 => 90.0, // 90%
+            _ => -1.0, // Never
         }
     }
 
@@ -1077,12 +1226,12 @@ impl ProjectList {
     /// Returns -1.0 for "Never" (hide always).
     fn process_mem_threshold_value(index: u32) -> f64 {
         match index {
-            0 => 0.0,       // Always
-            1 => 100.0,     // 100MB
-            2 => 500.0,     // 500MB
-            3 => 1024.0,    // 1GB
-            4 => 2048.0,    // 2GB
-            _ => -1.0,      // Never
+            0 => 0.0,    // Always
+            1 => 100.0,  // 100MB
+            2 => 500.0,  // 500MB
+            3 => 1024.0, // 1GB
+            4 => 2048.0, // 2GB
+            _ => -1.0,   // Never
         }
     }
 
@@ -1090,7 +1239,9 @@ impl ProjectList {
         self.process_statuses
             .borrow()
             .get(qualified_name)
-            .map_or(false, |s| matches!(s, ProcessStatus::Running | ProcessStatus::Restarting))
+            .map_or(false, |s| {
+                matches!(s, ProcessStatus::Running | ProcessStatus::Restarting)
+            })
     }
 
     pub fn set_process_port(&self, qualified_name: &str, port: Option<u16>) {
@@ -1151,8 +1302,14 @@ impl ProjectList {
                         empty_idx = Some(idx);
                     } else {
                         let statuses = self.process_statuses.borrow();
-                        let running = section.process_names.iter()
-                            .filter(|n| statuses.get(n.as_str()).is_some_and(|s| *s == ProcessStatus::Running))
+                        let running = section
+                            .process_names
+                            .iter()
+                            .filter(|n| {
+                                statuses
+                                    .get(n.as_str())
+                                    .is_some_and(|s| *s == ProcessStatus::Running)
+                            })
                             .count();
                         section.header.set_count(running, total);
                     }
@@ -1211,7 +1368,10 @@ impl ProjectList {
         // Find the last expanded project (iterate in order of sections for consistency)
         let sections = self.sections.borrow();
         for section in sections.iter().rev() {
-            if rows.get(&section.project_name).is_some_and(|r| r.is_expanded()) {
+            if rows
+                .get(&section.project_name)
+                .is_some_and(|r| r.is_expanded())
+            {
                 return Some(section.project_name.clone());
             }
         }

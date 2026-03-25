@@ -1,7 +1,7 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-use tuxflow::config::loader::{load_config, ConfigError};
+use tuxflow::config::loader::{ConfigError, load_config};
 use tuxflow::config::schema::{ProcessCategory, TuxFlowConfig};
 
 #[test]

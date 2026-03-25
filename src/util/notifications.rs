@@ -13,10 +13,7 @@ pub fn send_notification(title: &str, body: &str) {
 }
 
 pub fn notify_crash(process_name: &str) {
-    send_notification(
-        "Process Crashed",
-        &format!("{process_name} has crashed"),
-    );
+    send_notification("Process Crashed", &format!("{process_name} has crashed"));
 }
 
 pub fn notify_restart(process_name: &str, attempt: u32) {

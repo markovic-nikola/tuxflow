@@ -1,5 +1,5 @@
-use gtk4::prelude::*;
 use gtk4::glib;
+use gtk4::prelude::*;
 use vte4::prelude::*;
 
 pub struct TerminalView {
@@ -39,18 +39,16 @@ impl TerminalView {
 
         terminal.spawn_async(
             vte4::PtyFlags::DEFAULT,
-            None,                           // working directory (inherit)
-            &[&shell],                      // argv
-            &[],                            // envv (inherit)
-            glib::SpawnFlags::DEFAULT,      // spawn flags
-            || {},                          // child_setup
-            -1,                             // timeout (-1 = default)
-            gtk4::gio::Cancellable::NONE,   // cancellable
-            |result| {
-                match result {
-                    Ok(_pid) => log::info!("Shell spawned"),
-                    Err(e) => log::error!("Failed to spawn shell: {e}"),
-                }
+            None,                         // working directory (inherit)
+            &[&shell],                    // argv
+            &[],                          // envv (inherit)
+            glib::SpawnFlags::DEFAULT,    // spawn flags
+            || {},                        // child_setup
+            -1,                           // timeout (-1 = default)
+            gtk4::gio::Cancellable::NONE, // cancellable
+            |result| match result {
+                Ok(_pid) => log::info!("Shell spawned"),
+                Err(e) => log::error!("Failed to spawn shell: {e}"),
             },
         );
     }

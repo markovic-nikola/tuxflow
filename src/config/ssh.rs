@@ -178,7 +178,10 @@ Host *.internal
             port: Some(2222),
             identity_file: Some("~/.ssh/mykey".to_string()),
         };
-        assert_eq!(host.to_ssh_command(), "ssh -p 2222 -i ~/.ssh/mykey admin@192.168.1.100");
+        assert_eq!(
+            host.to_ssh_command(),
+            "ssh -p 2222 -i ~/.ssh/mykey admin@192.168.1.100"
+        );
     }
 
     #[test]

@@ -85,8 +85,12 @@ impl SavedProjects {
 
     pub fn set_icon(&mut self, dir: &str, icon_path: Option<String>) {
         match icon_path {
-            Some(path) => { self.icons.insert(dir.to_string(), path); }
-            None => { self.icons.remove(dir); }
+            Some(path) => {
+                self.icons.insert(dir.to_string(), path);
+            }
+            None => {
+                self.icons.remove(dir);
+            }
         }
         self.save();
     }

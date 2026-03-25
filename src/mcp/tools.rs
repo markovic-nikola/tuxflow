@@ -1,16 +1,17 @@
 use rmcp::{
-    ServerHandler,
-    ErrorData as McpError,
-    handler::server::{tool::ToolRouter, wrapper::{Json, Parameters}},
-    model::{
-        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
-        RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult,
-        Resource, ResourceContents, ResourceTemplate, ResourcesCapability,
-        ServerInfo,
+    ErrorData as McpError, RoleServer, ServerHandler,
+    handler::server::{
+        tool::ToolRouter,
+        wrapper::{Json, Parameters},
     },
+    model::{
+        ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, RawResource,
+        RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate, ResourcesCapability, ServerInfo,
+    },
+    schemars,
     service::RequestContext,
-    RoleServer,
-    schemars, tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -130,7 +131,9 @@ impl TuxFlowMcpServer {
         })
     }
 
-    #[tool(description = "Get detailed status of a specific process including PID, uptime, and restart count")]
+    #[tool(
+        description = "Get detailed status of a specific process including PID, uptime, and restart count"
+    )]
     fn get_process_status(
         &self,
         Parameters(params): Parameters<ProcessNameParam>,
@@ -316,12 +319,9 @@ impl ServerHandler for TuxFlowMcpServer {
         let state = self.bridge.process_state.lock().unwrap();
         for name in state.keys() {
             resources.push(Resource {
-                raw: RawResource::new(
-                    format!("tuxflow://logs/{name}"),
-                    format!("logs/{name}"),
-                )
-                .with_description(format!("Recent terminal output from '{name}'"))
-                .with_mime_type("text/plain"),
+                raw: RawResource::new(format!("tuxflow://logs/{name}"), format!("logs/{name}"))
+                    .with_description(format!("Recent terminal output from '{name}'"))
+                    .with_mime_type("text/plain"),
                 annotations: None,
             });
         }
@@ -370,8 +370,7 @@ impl ServerHandler for TuxFlowMcpServer {
                 .collect();
             let json = serde_json::to_string_pretty(&processes).unwrap_or_default();
             return Ok(ReadResourceResult::new(vec![
-                ResourceContents::text(json, uri.clone())
-                    .with_mime_type("application/json"),
+                ResourceContents::text(json, uri.clone()).with_mime_type("application/json"),
             ]));
         }
 
@@ -393,8 +392,7 @@ impl ServerHandler for TuxFlowMcpServer {
                 .collect();
             let json = serde_json::to_string_pretty(&config).unwrap_or_default();
             return Ok(ReadResourceResult::new(vec![
-                ResourceContents::text(json, uri.clone())
-                    .with_mime_type("application/json"),
+                ResourceContents::text(json, uri.clone()).with_mime_type("application/json"),
             ]));
         }
 
@@ -407,8 +405,7 @@ impl ServerHandler for TuxFlowMcpServer {
                     if !lines.is_empty() {
                         let text = lines.join("\n");
                         return Ok(ReadResourceResult::new(vec![
-                            ResourceContents::text(text, uri.clone())
-                                .with_mime_type("text/plain"),
+                            ResourceContents::text(text, uri.clone()).with_mime_type("text/plain"),
                         ]));
                     }
                 }
@@ -428,8 +425,7 @@ impl ServerHandler for TuxFlowMcpServer {
             match rx.await {
                 Ok(CommandResult::Ok(text)) => {
                     return Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(text, uri.clone())
-                            .with_mime_type("text/plain"),
+                        ResourceContents::text(text, uri.clone()).with_mime_type("text/plain"),
                     ]));
                 }
                 Ok(CommandResult::Error(e)) => {

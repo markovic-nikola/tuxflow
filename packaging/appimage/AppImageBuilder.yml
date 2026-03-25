@@ -6,7 +6,10 @@ script:
   - mkdir -p AppDir/usr/share/applications
   - cp data/com.tuxflow.TuxFlow.desktop AppDir/usr/share/applications/
   - mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
-  - cp data/icons/com.tuxflow.TuxFlow.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+  - cp data/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+  - cp data/icons/hicolor/scalable/apps/tuxflow-logo-symbolic.svg AppDir/usr/share/icons/hicolor/scalable/apps/
+  - mkdir -p AppDir/usr/share/icons/hicolor/scalable/actions
+  - cp data/icons/hicolor/scalable/actions/ai-brain-symbolic.svg AppDir/usr/share/icons/hicolor/scalable/actions/
 
 AppDir:
   path: ./AppDir

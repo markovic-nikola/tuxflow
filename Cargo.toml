@@ -73,8 +73,18 @@ assets = [
 		"644",
 	],
 	[
-		"data/icons/com.tuxflow.TuxFlow.svg",
+		"data/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg",
 		"usr/share/icons/hicolor/scalable/apps/",
+		"644",
+	],
+	[
+		"data/icons/hicolor/scalable/apps/tuxflow-logo-symbolic.svg",
+		"usr/share/icons/hicolor/scalable/apps/",
+		"644",
+	],
+	[
+		"data/icons/hicolor/scalable/actions/ai-brain-symbolic.svg",
+		"usr/share/icons/hicolor/scalable/actions/",
 		"644",
 	],
 	[

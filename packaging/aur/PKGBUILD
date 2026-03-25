@@ -1,6 +1,6 @@
 # Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
 pkgname=tuxflow
-pkgver=0.1.8
+pkgver=0.1.9
 pkgrel=1
 pkgdesc='Linux-native dev environment manager'
 arch=('x86_64')

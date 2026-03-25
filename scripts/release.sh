@@ -4,18 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <new-version>"
-    echo "Example: $0 0.2.0"
-    exit 1
-fi
+# Read current version from Cargo.toml and bump patch
+CURRENT=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
 
-NEW_VERSION="$1"
-
-if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "Error: Version must be in semver format (e.g., 0.2.0)"
-    exit 1
-fi
+echo "Current version: $CURRENT"
+echo "New version:     $NEW_VERSION"
+echo ""
 
 # Check for clean working tree
 if ! git diff --quiet || ! git diff --cached --quiet; then

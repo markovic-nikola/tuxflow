@@ -96,29 +96,29 @@ fn detect_nodejs(dir: &Path, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     // Parse scripts from package.json
-    if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(content) {
-        if let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object()) {
-            if scripts.contains_key("dev") {
-                let cmd = if dir.join("yarn.lock").exists() {
-                    "yarn dev"
-                } else if dir.join("pnpm-lock.yaml").exists() {
-                    "pnpm dev"
-                } else if dir.join("bun.lockb").exists() {
-                    "bun dev"
-                } else {
-                    "npm run dev"
-                };
-                procs.push(make_process("dev", cmd, true));
-            }
-            if scripts.contains_key("start") && !scripts.contains_key("dev") {
-                procs.push(make_process("start", "npm start", true));
-            }
-            if scripts.contains_key("build") {
-                procs.push(make_process("build", "npm run build", false));
-            }
-            if scripts.contains_key("test") {
-                procs.push(make_process("test", "npm test", false));
-            }
+    if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(content)
+        && let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object())
+    {
+        if scripts.contains_key("dev") {
+            let cmd = if dir.join("yarn.lock").exists() {
+                "yarn dev"
+            } else if dir.join("pnpm-lock.yaml").exists() {
+                "pnpm dev"
+            } else if dir.join("bun.lockb").exists() {
+                "bun dev"
+            } else {
+                "npm run dev"
+            };
+            procs.push(make_process("dev", cmd, true));
+        }
+        if scripts.contains_key("start") && !scripts.contains_key("dev") {
+            procs.push(make_process("start", "npm start", true));
+        }
+        if scripts.contains_key("build") {
+            procs.push(make_process("build", "npm run build", false));
+        }
+        if scripts.contains_key("test") {
+            procs.push(make_process("test", "npm test", false));
         }
     }
 

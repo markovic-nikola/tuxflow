@@ -48,10 +48,10 @@ const CANDIDATES: &[&str] = &[
 pub fn detect_icon(project_dir: &Path) -> Option<String> {
     for candidate in CANDIDATES {
         if candidate.contains('*') {
-            if let Ok(matches) = glob::glob(&project_dir.join(candidate).to_string_lossy()) {
-                if let Some(Ok(path)) = matches.into_iter().next() {
-                    return Some(path.to_string_lossy().to_string());
-                }
+            if let Ok(matches) = glob::glob(&project_dir.join(candidate).to_string_lossy())
+                && let Some(Ok(path)) = matches.into_iter().next()
+            {
+                return Some(path.to_string_lossy().to_string());
             }
         } else {
             let path = project_dir.join(candidate);

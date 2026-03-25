@@ -149,11 +149,11 @@ impl CommandPalette {
                 Key::Up => {
                     let rb = &results_ref_key;
                     let current = rb.selected_row().map(|r| r.index()).unwrap_or(0);
-                    if current > 0 {
-                        if let Some(prev) = rb.row_at_index(current - 1) {
-                            rb.select_row(Some(&prev));
-                            Self::scroll_to_row(&scroll_ref, &prev);
-                        }
+                    if current > 0
+                        && let Some(prev) = rb.row_at_index(current - 1)
+                    {
+                        rb.select_row(Some(&prev));
+                        Self::scroll_to_row(&scroll_ref, &prev);
                     }
                     gtk4::glib::Propagation::Stop
                 }

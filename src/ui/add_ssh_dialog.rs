@@ -40,10 +40,10 @@ impl AddSshDialog {
             .title("Project")
             .model(&project_list)
             .build();
-        if let Some(last) = last_project {
-            if let Some(idx) = project_names.iter().position(|n| n == last) {
-                project_row.set_selected(idx as u32);
-            }
+        if let Some(last) = last_project
+            && let Some(idx) = project_names.iter().position(|n| n == last)
+        {
+            project_row.set_selected(idx as u32);
         }
         project_group.add(&project_row);
         content.append(&project_group);

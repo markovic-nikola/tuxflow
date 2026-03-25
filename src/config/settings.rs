@@ -7,6 +7,7 @@ use super::keybindings::KeybindingsSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AppSettings {
     pub appearance: AppearanceSettings,
     pub notifications: NotificationSettings,
@@ -63,19 +64,6 @@ pub struct ToolSettings {
 #[serde(default)]
 pub struct IntegrationSettings {
     pub mcp_enabled: bool,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            appearance: AppearanceSettings::default(),
-            notifications: NotificationSettings::default(),
-            sidebar: SidebarSettings::default(),
-            tools: ToolSettings::default(),
-            keybindings: KeybindingsSettings::default(),
-            integrations: IntegrationSettings::default(),
-        }
-    }
 }
 
 impl Default for AppearanceSettings {
@@ -161,11 +149,11 @@ impl AppSettings {
 
     pub fn save(&self) {
         let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                log::error!("Failed to create config directory: {e}");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            log::error!("Failed to create config directory: {e}");
+            return;
         }
         match toml::to_string_pretty(self) {
             Ok(content) => {

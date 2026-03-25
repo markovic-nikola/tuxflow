@@ -140,7 +140,7 @@ impl SettingsWindow {
         theme_group.add(&theme_row);
 
         let choices = crate::ui::accent::color_choices();
-        let choices_strs: Vec<&str> = choices.iter().copied().collect();
+        let choices_strs: Vec<&str> = choices.to_vec();
         let accent_row = adw::ComboRow::builder()
             .title("Accent Color")
             .subtitle("Customize the accent color throughout the UI")
@@ -167,7 +167,7 @@ impl SettingsWindow {
         let s = settings.borrow();
 
         let theme_choices = crate::ui::terminal_theme::theme_choices();
-        let theme_choices_strs: Vec<&str> = theme_choices.iter().copied().collect();
+        let theme_choices_strs: Vec<&str> = theme_choices.to_vec();
         let terminal_theme_row = adw::ComboRow::builder()
             .title("Terminal Theme")
             .subtitle("Color scheme for terminal output")

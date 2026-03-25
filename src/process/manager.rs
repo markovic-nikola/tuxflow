@@ -58,19 +58,18 @@ impl ManagedProcess {
         gesture.set_button(1);
         let term_ref = terminal.clone();
         gesture.connect_pressed(move |gesture, _, x, y| {
-            if let Some(event) = gesture.current_event() {
-                if event
+            if let Some(event) = gesture.current_event()
+                && event
                     .modifier_state()
                     .contains(gtk4::gdk::ModifierType::CONTROL_MASK)
-                {
-                    let (url_opt, _tag) = term_ref.check_match_at(x, y);
-                    if let Some(url) = url_opt {
-                        let _ = std::process::Command::new("xdg-open")
-                            .arg(url.as_str())
-                            .spawn();
-                        gesture.set_state(gtk4::EventSequenceState::Claimed);
-                        return;
-                    }
+            {
+                let (url_opt, _tag) = term_ref.check_match_at(x, y);
+                if let Some(url) = url_opt {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(url.as_str())
+                        .spawn();
+                    gesture.set_state(gtk4::EventSequenceState::Claimed);
+                    return;
                 }
             }
             gesture.set_state(gtk4::EventSequenceState::Denied);
@@ -250,19 +249,19 @@ impl ProcessManager {
         }
 
         // Kill the child process tree via its PID
-        if let Some(ref pid_cell) = proc.pid_cell {
-            if let Some(pid) = *pid_cell.borrow() {
-                if let Some(ref cb) = self.on_pid_change {
-                    cb(pid, false);
-                }
-                let neg_pid = nix::unistd::Pid::from_raw(-(pid as i32));
-                // SIGTERM the entire process group
-                let _ = nix::sys::signal::kill(neg_pid, nix::sys::signal::Signal::SIGTERM);
-                // Force kill after a delay in case SIGTERM is ignored
-                glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
-                    let _ = nix::sys::signal::kill(neg_pid, nix::sys::signal::Signal::SIGKILL);
-                });
+        if let Some(ref pid_cell) = proc.pid_cell
+            && let Some(pid) = *pid_cell.borrow()
+        {
+            if let Some(ref cb) = self.on_pid_change {
+                cb(pid, false);
             }
+            let neg_pid = nix::unistd::Pid::from_raw(-pid);
+            // SIGTERM the entire process group
+            let _ = nix::sys::signal::kill(neg_pid, nix::sys::signal::Signal::SIGTERM);
+            // Force kill after a delay in case SIGTERM is ignored
+            glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
+                let _ = nix::sys::signal::kill(neg_pid, nix::sys::signal::Signal::SIGKILL);
+            });
         }
 
         proc.terminal.reset(true, true);
@@ -399,10 +398,8 @@ impl ProcessManager {
             proc.id = new_name.clone();
             self.processes.insert(new_name.clone(), proc);
 
-            if name_changed {
-                if let Some(entry) = self.order.iter_mut().find(|n| *n == old_name) {
-                    *entry = new_name;
-                }
+            if name_changed && let Some(entry) = self.order.iter_mut().find(|n| *n == old_name) {
+                *entry = new_name;
             }
         }
 

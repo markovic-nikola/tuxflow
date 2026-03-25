@@ -16,6 +16,12 @@ pub struct ResourceMonitor {
     prev_ticks: HashMap<i32, (u64, u64)>, // pid -> (process_ticks, total_ticks)
 }
 
+impl Default for ResourceMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceMonitor {
     pub fn new() -> Self {
         Self {

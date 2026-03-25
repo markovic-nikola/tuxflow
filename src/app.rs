@@ -24,8 +24,7 @@ impl TuxFlowApp {
             // Register custom icons so GTK can find them by name.
             // In development, icons live under CARGO_MANIFEST_DIR/data/icons/hicolor.
             // When installed, they live under /usr/share/icons/hicolor (standard XDG path).
-            let icon_theme =
-                gtk4::IconTheme::for_display(&gtk4::gdk::Display::default().unwrap());
+            let icon_theme = gtk4::IconTheme::for_display(&gtk4::gdk::Display::default().unwrap());
             let dev_icons = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("data")
                 .join("icons");

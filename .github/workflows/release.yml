@@ -59,7 +59,7 @@ jobs:
           mkdir -p packaging/appimage/AppDir/usr/share/icons/hicolor/scalable/actions
           cp data/icons/hicolor/scalable/actions/ai-brain-symbolic.svg packaging/appimage/AppDir/usr/share/icons/hicolor/scalable/actions/
           cd packaging/appimage
-          appimage-builder --skip-script --skip-build --skip-tests
+          appimage-builder --skip-script --skip-tests
           mv *.AppImage ../../
 
       - name: Extract version from tag

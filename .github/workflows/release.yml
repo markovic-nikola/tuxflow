@@ -68,4 +68,4 @@ jobs:
           generate_release_notes: true
           files: |
             tuxflow-${{ steps.version.outputs.version }}-x86_64-linux.tar.gz
-            target/debian/tuxflow_${{ steps.version.outputs.version }}-1_amd64.deb
+            target/debian/*.deb

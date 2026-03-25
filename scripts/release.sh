@@ -61,19 +61,12 @@ git commit -m "release v$NEW_VERSION"
 git tag "v$NEW_VERSION"
 echo ""
 
-read -rp "Push to origin and trigger release build? [Y/n] " confirm < /dev/tty
-if [[ "${confirm:-Y}" =~ ^[Yy]$ ]]; then
-    git push && git push --tags
-    echo ""
-    COMMIT_HASH=$(git rev-parse HEAD)
-    echo "Done! Release workflow will build and publish artifacts."
-    echo "Watch progress at: https://github.com/markovic-nikola/tuxflow/actions"
-    echo ""
-    echo "Flathub: update commit hash in com.tuxflow.TuxFlow.yml to:"
-    echo "  commit: $COMMIT_HASH"
-    echo "Then regenerate cargo-sources.json and push to the Flathub repo."
-else
-    echo ""
-    echo "Committed and tagged locally. Push when ready:"
-    echo "  git push && git push --tags"
-fi
+git push && git push --tags
+echo ""
+COMMIT_HASH=$(git rev-parse HEAD)
+echo "Done! Release workflow will build and publish artifacts."
+echo "Watch progress at: https://github.com/markovic-nikola/tuxflow/actions"
+echo ""
+echo "Flathub: update commit hash in com.tuxflow.TuxFlow.yml to:"
+echo "  commit: $COMMIT_HASH"
+echo "Then regenerate cargo-sources.json and push to the Flathub repo."

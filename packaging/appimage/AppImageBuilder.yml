@@ -17,7 +17,7 @@ AppDir:
     id: com.tuxflow.TuxFlow
     name: TuxFlow
     icon: com.tuxflow.TuxFlow
-    version: 0.1.4
+    version: 0.1.5
     exec: usr/bin/tuxflow
     exec_args: $@
 

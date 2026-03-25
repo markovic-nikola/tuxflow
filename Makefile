@@ -42,9 +42,8 @@ install: ## Install to /usr/local
 uninstall: ## Uninstall from /usr/local
 	./scripts/install.sh --uninstall
 
-release: ## Bump version, tag, and push (usage: make release v=0.2.0)
-	@test -n "$(v)" || { echo "Usage: make release v=0.2.0"; exit 1; }
-	./scripts/release.sh $(v)
+release: ## Bump patch version, tag, and push
+	./scripts/release.sh
 
 clean: ## Clean build artifacts
 	cargo clean

@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TuxFlow — Linux-Native Dev Environment Manager</title>
+  <meta name="description" content="Manage dev servers, AI coding agents, and terminals from a single GTK4 window. Built with Rust for Linux.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="#top" class="logo">
+      <span class="logo-icon">
+        <img src="logo.svg" alt="TuxFlow" width="18" height="18">
+      </span>
+      TuxFlow
+    </a>
+    <ul class="nav-links">
+      <li><a href="#features">Features</a></li>
+      <li><a href="#install">Install</a></li>
+      <li><a href="#shortcuts">Shortcuts</a></li>
+      <li><a href="#mcp">MCP</a></li>
+      <li><a href="https://github.com/markovic-nikola/tuxflow" class="gh-link">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero" id="top">
+  <div class="hero-badge"><span class="dot"></span> Built with Rust + GTK4</div>
+  <h1>One window for<br>your <span class="gold">dev environment</span></h1>
+  <p class="tagline">Processes, AI agents, SSH, and terminals &mdash; managed together. Native Linux desktop app.</p>
+  <div class="cta">
+    <a href="#install" class="btn btn-primary">Get Started</a>
+    <a href="https://github.com/markovic-nikola/tuxflow" class="btn btn-secondary">View on GitHub</a>
+  </div>
+  <div class="screenshot-wrap">
+    <img src="hero.png" alt="TuxFlow screenshot" class="screenshot">
+  </div>
+</section>
+
+<div class="section-divider"><hr></div>
+
+<!-- Features -->
+<section id="features" class="section-center">
+  <span class="section-label">Capabilities</span>
+  <h2 class="section-heading">Everything in one place</h2>
+  <p class="section-sub">Stop juggling terminal tabs. TuxFlow gives you a unified view of everything running in your project.</p>
+  <div class="features-grid reveal">
+    <div class="feature-card">
+      <span class="feature-icon">&#9654;</span>
+      <h3>Process Management</h3>
+      <p>Start, stop, and restart dev servers. Auto-restart with exponential backoff on crashes.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#10023;</span>
+      <h3>AI Agents</h3>
+      <p>Run Claude Code, Codex, Gemini CLI, and other agents side-by-side with your processes.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#9776;</span>
+      <h3>Multi-Project</h3>
+      <p>Open multiple projects in one window with expandable sidebar sections and drag-and-drop.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#8594;</span>
+      <h3>SSH Connections</h3>
+      <p>Connect to remote hosts from ~/.ssh/config. Managed like any other process.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&gt;_</span>
+      <h3>Embedded Terminals</h3>
+      <p>Full VTE4 terminals with true color, mouse events, search, and clickable URLs.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#9881;</span>
+      <h3>Stack Detection</h3>
+      <p>Auto-detects Node.js, Rust, Go, Python, PHP, Docker and suggests commands.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#9618;</span>
+      <h3>Resources</h3>
+      <p>Per-process CPU and memory usage via /proc. See what's consuming resources at a glance.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#9741;</span>
+      <h3>MCP Server</h3>
+      <p>Unix socket API so AI agents can list processes, read logs, and control your environment.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#9775;</span>
+      <h3>Theming</h3>
+      <p>Dark, light, and system themes with accent colors and terminal color schemes.</p>
+    </div>
+  </div>
+</section>
+
+<div class="section-divider"><hr></div>
+
+<!-- Install -->
+<section id="install">
+  <span class="section-label">Getting started</span>
+  <h2 class="section-heading">Build from source</h2>
+  <p class="section-sub">Install system dependencies, clone, and build. Under a minute.</p>
+
+  <div class="install-tabs">
+    <input type="radio" name="distro" id="tab-ubuntu" checked>
+    <label for="tab-ubuntu">Ubuntu / Debian</label>
+    <input type="radio" name="distro" id="tab-fedora">
+    <label for="tab-fedora">Fedora</label>
+    <input type="radio" name="distro" id="tab-arch">
+    <label for="tab-arch">Arch</label>
+  </div>
+
+  <div class="install-block active" id="block-ubuntu">
+    <pre><code>sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev build-essential
+git clone https://github.com/markovic-nikola/tuxflow.git
+cd tuxflow
+cargo build --release
+./target/release/tuxflow</code></pre>
+  </div>
+
+  <div class="install-block" id="block-fedora">
+    <pre><code>sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
+git clone https://github.com/markovic-nikola/tuxflow.git
+cd tuxflow
+cargo build --release
+./target/release/tuxflow</code></pre>
+  </div>
+
+  <div class="install-block" id="block-arch">
+    <pre><code>sudo pacman -S gtk4 libadwaita vte4
+git clone https://github.com/markovic-nikola/tuxflow.git
+cd tuxflow
+cargo build --release
+./target/release/tuxflow</code></pre>
+  </div>
+
+  <script>
+    document.querySelectorAll('input[name="distro"]').forEach(function(radio) {
+      radio.addEventListener('change', function() {
+        document.querySelectorAll('.install-block').forEach(function(b) { b.classList.remove('active'); });
+        document.getElementById(radio.id.replace('tab-', 'block-')).classList.add('active');
+      });
+    });
+  </script>
+</section>
+
+<div class="section-divider"><hr></div>
+
+<!-- Keyboard Shortcuts -->
+<section id="shortcuts">
+  <span class="section-label">Navigation</span>
+  <h2 class="section-heading">Keyboard-driven</h2>
+  <p class="section-sub">Every shortcut is configurable via Settings.</p>
+  <div class="shortcuts-wrap reveal">
+    <table class="shortcuts-table">
+      <thead>
+        <tr><th>Shortcut</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Command palette</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Add project or process</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>New terminal</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Filter processes</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Terminal search</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Previous / Next process</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Previous / Next project</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Quick jump</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>Close agent / terminal</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>\</kbd></td><td>Toggle sidebar</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd></td><td>Start / Stop process</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd></td><td>Restart process</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="section-divider"><hr></div>
+
+<!-- MCP -->
+<section id="mcp">
+  <span class="section-label">Integration</span>
+  <h2 class="section-heading">MCP Server</h2>
+  <p class="section-sub">Let AI agents observe and control your dev environment.</p>
+  <div class="mcp-content reveal">
+    <ul class="mcp-features">
+      <li>List and monitor running processes</li>
+      <li>Read terminal output and logs</li>
+      <li>Start, stop, and restart processes</li>
+    </ul>
+    <p class="connect-label">Claude Code config</p>
+    <pre><code>{
+  "mcpServers": {
+    "tuxflow": {
+      "command": "tuxflow-mcp",
+      "args": ["my-project"]
+    }
+  }
+}</code></pre>
+  </div>
+</section>
+
+<footer>
+  <p>MIT License &middot; <a href="https://github.com/markovic-nikola/tuxflow">GitHub</a></p>
+</footer>
+
+<!-- Scroll reveal -->
+<script>
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.1 });
+  document.querySelectorAll('.reveal').forEach(function(el) { observer.observe(el); });
+</script>
+
+</body>
+</html>

@@ -67,7 +67,12 @@ impl PidFile {
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let content: String = self.pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("\n");
+        let content: String = self
+            .pids
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let _ = fs::write(&self.path, content);
     }
 

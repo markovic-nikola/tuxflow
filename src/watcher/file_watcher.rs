@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gtk4::glib;
 use notify::RecursiveMode;
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 
 use crate::process::manager::ProcessManagerRef;
 
@@ -95,9 +95,7 @@ impl FileWatcher {
         entries: &[WatchEntry],
         manager: &ProcessManagerRef,
     ) {
-        let relative = path
-            .strip_prefix(project_dir)
-            .unwrap_or(path);
+        let relative = path.strip_prefix(project_dir).unwrap_or(path);
 
         let rel_str = relative.to_string_lossy();
 

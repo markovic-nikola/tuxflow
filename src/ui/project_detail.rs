@@ -1,9 +1,9 @@
+use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use adw::prelude::*;
 
-use crate::workspace::Project;
 use crate::process::manager::ProcessStatus;
+use crate::workspace::Project;
 
 pub struct ProjectDetail;
 
@@ -58,7 +58,11 @@ impl ProjectDetail {
 
         // Config card
         let config_path = project.dir.join("tuxflow.toml");
-        let config_status = if config_path.exists() { "Valid" } else { "Not found" };
+        let config_status = if config_path.exists() {
+            "Valid"
+        } else {
+            "Not found"
+        };
         let config_card = Self::build_card(
             "Config",
             &format!("tuxflow.toml — {config_status}"),
@@ -94,9 +98,7 @@ impl ProjectDetail {
         container.append(settings_group.upcast_ref::<gtk4::Widget>());
 
         // Process list
-        let proc_group = adw::PreferencesGroup::builder()
-            .title("Processes")
-            .build();
+        let proc_group = adw::PreferencesGroup::builder().title("Processes").build();
 
         for name in mgr.process_names() {
             if let Some(proc) = mgr.get_process(name) {

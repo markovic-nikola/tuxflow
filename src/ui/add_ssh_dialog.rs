@@ -1,9 +1,9 @@
+use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use adw::prelude::*;
 
 use crate::config::schema::{ProcessCategory, ProcessConfig};
-use crate::config::ssh::{parse_ssh_config, SshHost};
+use crate::config::ssh::{SshHost, parse_ssh_config};
 
 pub struct AddSshDialog;
 
@@ -34,7 +34,8 @@ impl AddSshDialog {
 
         // Project selector
         let project_group = adw::PreferencesGroup::new();
-        let project_list = gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let project_list =
+            gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let project_row = adw::ComboRow::builder()
             .title("Project")
             .model(&project_list)
@@ -53,7 +54,8 @@ impl AddSshDialog {
 
         let mut picker_labels = vec!["Custom...".to_string()];
         picker_labels.extend(ssh_hosts.iter().map(|h| h.name.clone()));
-        let picker_list = gtk4::StringList::new(&picker_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let picker_list =
+            gtk4::StringList::new(&picker_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
         let host_picker_row = adw::ComboRow::builder()
             .title("SSH Config Host")
@@ -67,25 +69,16 @@ impl AddSshDialog {
         let fields_group = adw::PreferencesGroup::new();
         fields_group.set_margin_top(12);
 
-        let name_row = adw::EntryRow::builder()
-            .title("Name")
-            .build();
+        let name_row = adw::EntryRow::builder().title("Name").build();
         fields_group.add(&name_row);
 
-        let host_row = adw::EntryRow::builder()
-            .title("Host")
-            .build();
+        let host_row = adw::EntryRow::builder().title("Host").build();
         fields_group.add(&host_row);
 
-        let user_row = adw::EntryRow::builder()
-            .title("User")
-            .build();
+        let user_row = adw::EntryRow::builder().title("User").build();
         fields_group.add(&user_row);
 
-        let port_row = adw::EntryRow::builder()
-            .title("Port")
-            .text("22")
-            .build();
+        let port_row = adw::EntryRow::builder().title("Port").text("22").build();
         fields_group.add(&port_row);
 
         let identity_row = adw::EntryRow::builder()
@@ -167,9 +160,17 @@ impl AddSshDialog {
             let ssh_host = SshHost {
                 name: host.clone(),
                 hostname: Some(host.clone()),
-                user: if user.is_empty() { None } else { Some(user.clone()) },
+                user: if user.is_empty() {
+                    None
+                } else {
+                    Some(user.clone())
+                },
                 port: if port == 22 { None } else { Some(port) },
-                identity_file: if identity.is_empty() { None } else { Some(identity) },
+                identity_file: if identity.is_empty() {
+                    None
+                } else {
+                    Some(identity)
+                },
             };
             let command = ssh_host.to_ssh_command();
 
@@ -178,7 +179,14 @@ impl AddSshDialog {
                 .cloned()
                 .unwrap_or_default();
 
-            let conn_name = format!("ssh-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+            let conn_name = format!(
+                "ssh-{}",
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .split('-')
+                    .next()
+                    .unwrap_or("0")
+            );
 
             // Use user-provided name, fall back to user@host or just host
             let display = if !display_name.is_empty() {

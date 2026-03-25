@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use adw::prelude::*;
 
 use crate::config::keybindings::{
-    self, KeybindingMap, ShortcutAction, action_metadata,
-    keybinding_from_event, keybinding_to_string, is_modifier_key,
+    self, KeybindingMap, ShortcutAction, action_metadata, is_modifier_key, keybinding_from_event,
+    keybinding_to_string,
 };
 use crate::config::settings::AppSettings;
 
@@ -27,9 +27,19 @@ impl SettingsWindow {
     ) {
         let settings = Rc::new(RefCell::new(AppSettings::load()));
         let kb_map = keybinding_map.unwrap_or_else(|| {
-            Rc::new(RefCell::new(KeybindingMap::from_settings(&settings.borrow().keybindings)))
+            Rc::new(RefCell::new(KeybindingMap::from_settings(
+                &settings.borrow().keybindings,
+            )))
         });
-        Self::show_with_settings(parent, &settings, on_single_expand_changed, on_auto_hide_changed, on_terminal_theme_changed, on_font_changed, &kb_map);
+        Self::show_with_settings(
+            parent,
+            &settings,
+            on_single_expand_changed,
+            on_auto_hide_changed,
+            on_terminal_theme_changed,
+            on_font_changed,
+            &kb_map,
+        );
     }
 
     pub fn show_with_settings(
@@ -45,11 +55,13 @@ impl SettingsWindow {
         dialog.set_title("Settings");
 
         // Appearance page
-        let appearance_page = Self::build_appearance_page(settings, on_terminal_theme_changed, on_font_changed);
+        let appearance_page =
+            Self::build_appearance_page(settings, on_terminal_theme_changed, on_font_changed);
         dialog.add(&appearance_page);
 
         // Sidebar page
-        let sidebar_page = Self::build_sidebar_page(settings, on_single_expand_changed, on_auto_hide_changed);
+        let sidebar_page =
+            Self::build_sidebar_page(settings, on_single_expand_changed, on_auto_hide_changed);
         dialog.add(&sidebar_page);
 
         // Notifications page
@@ -75,16 +87,18 @@ impl SettingsWindow {
         dialog.present(Some(parent));
     }
 
-    fn build_appearance_page(settings: &SettingsRef, on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>, on_font_changed: Option<Rc<dyn Fn()>>) -> adw::PreferencesPage {
+    fn build_appearance_page(
+        settings: &SettingsRef,
+        on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
+        on_font_changed: Option<Rc<dyn Fn()>>,
+    ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Appearance")
             .icon_name("applications-graphics-symbolic")
             .build();
 
         // Theme group
-        let theme_group = adw::PreferencesGroup::builder()
-            .title("Theme")
-            .build();
+        let theme_group = adw::PreferencesGroup::builder().title("Theme").build();
 
         let theme_row = adw::ComboRow::builder()
             .title("Color Scheme")
@@ -105,9 +119,18 @@ impl SettingsWindow {
         theme_row.connect_selected_notify(move |row| {
             let manager = adw::StyleManager::default();
             let theme = match row.selected() {
-                0 => { manager.set_color_scheme(adw::ColorScheme::Default); "system" }
-                1 => { manager.set_color_scheme(adw::ColorScheme::ForceDark); "dark" }
-                2 => { manager.set_color_scheme(adw::ColorScheme::ForceLight); "light" }
+                0 => {
+                    manager.set_color_scheme(adw::ColorScheme::Default);
+                    "system"
+                }
+                1 => {
+                    manager.set_color_scheme(adw::ColorScheme::ForceDark);
+                    "dark"
+                }
+                2 => {
+                    manager.set_color_scheme(adw::ColorScheme::ForceLight);
+                    "light"
+                }
                 _ => return,
             };
             settings_ref.borrow_mut().appearance.theme = theme.to_string();
@@ -123,7 +146,9 @@ impl SettingsWindow {
             .subtitle("Customize the accent color throughout the UI")
             .model(&gtk4::StringList::new(&choices_strs))
             .build();
-        accent_row.set_selected(crate::ui::accent::color_index(&settings.borrow().appearance.accent_color));
+        accent_row.set_selected(crate::ui::accent::color_index(
+            &settings.borrow().appearance.accent_color,
+        ));
 
         let settings_ref = settings.clone();
         accent_row.connect_selected_notify(move |row| {
@@ -137,9 +162,7 @@ impl SettingsWindow {
         page.add(&theme_group);
 
         // Terminal font group
-        let font_group = adw::PreferencesGroup::builder()
-            .title("Terminal")
-            .build();
+        let font_group = adw::PreferencesGroup::builder().title("Terminal").build();
 
         let s = settings.borrow();
 
@@ -150,7 +173,9 @@ impl SettingsWindow {
             .subtitle("Color scheme for terminal output")
             .model(&gtk4::StringList::new(&theme_choices_strs))
             .build();
-        terminal_theme_row.set_selected(crate::ui::terminal_theme::theme_index(&s.appearance.terminal_theme));
+        terminal_theme_row.set_selected(crate::ui::terminal_theme::theme_index(
+            &s.appearance.terminal_theme,
+        ));
 
         let settings_ref = settings.clone();
         terminal_theme_row.connect_selected_notify(move |row| {
@@ -172,52 +197,88 @@ impl SettingsWindow {
         font_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.font_family = row.text().to_string();
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&font_row);
 
         let font_size_row = adw::SpinRow::builder()
             .title("Font Size")
-            .adjustment(&gtk4::Adjustment::new(s.appearance.font_size as f64, 6.0, 32.0, 1.0, 2.0, 0.0))
+            .adjustment(&gtk4::Adjustment::new(
+                s.appearance.font_size as f64,
+                6.0,
+                32.0,
+                1.0,
+                2.0,
+                0.0,
+            ))
             .build();
         let settings_ref = settings.clone();
         let font_cb = on_font_changed.clone();
         font_size_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.font_size = row.value() as u32;
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&font_size_row);
 
         let font_weight_row = adw::SpinRow::builder()
             .title("Font Weight")
-            .adjustment(&gtk4::Adjustment::new(s.appearance.font_weight as f64, 100.0, 900.0, 100.0, 100.0, 0.0))
+            .adjustment(&gtk4::Adjustment::new(
+                s.appearance.font_weight as f64,
+                100.0,
+                900.0,
+                100.0,
+                100.0,
+                0.0,
+            ))
             .build();
         let settings_ref = settings.clone();
         let font_cb = on_font_changed.clone();
         font_weight_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.font_weight = row.value() as u32;
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&font_weight_row);
 
         let bold_weight_row = adw::SpinRow::builder()
             .title("Bold Font Weight")
-            .adjustment(&gtk4::Adjustment::new(s.appearance.bold_font_weight as f64, 100.0, 900.0, 100.0, 100.0, 0.0))
+            .adjustment(&gtk4::Adjustment::new(
+                s.appearance.bold_font_weight as f64,
+                100.0,
+                900.0,
+                100.0,
+                100.0,
+                0.0,
+            ))
             .build();
         let settings_ref = settings.clone();
         let font_cb = on_font_changed.clone();
         bold_weight_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.bold_font_weight = row.value() as u32;
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&bold_weight_row);
 
         let line_height_row = adw::SpinRow::builder()
             .title("Line Height")
-            .adjustment(&gtk4::Adjustment::new(s.appearance.line_height, 0.8, 2.0, 0.1, 0.1, 0.0))
+            .adjustment(&gtk4::Adjustment::new(
+                s.appearance.line_height,
+                0.8,
+                2.0,
+                0.1,
+                0.1,
+                0.0,
+            ))
             .digits(1)
             .build();
         let settings_ref = settings.clone();
@@ -225,13 +286,22 @@ impl SettingsWindow {
         line_height_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.line_height = row.value();
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&line_height_row);
 
         let letter_spacing_row = adw::SpinRow::builder()
             .title("Letter Spacing")
-            .adjustment(&gtk4::Adjustment::new(s.appearance.letter_spacing, -2.0, 10.0, 0.5, 1.0, 0.0))
+            .adjustment(&gtk4::Adjustment::new(
+                s.appearance.letter_spacing,
+                -2.0,
+                10.0,
+                0.5,
+                1.0,
+                0.0,
+            ))
             .digits(1)
             .build();
         let settings_ref = settings.clone();
@@ -239,20 +309,31 @@ impl SettingsWindow {
         letter_spacing_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.letter_spacing = row.value();
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&letter_spacing_row);
 
         let scrollback_row = adw::SpinRow::builder()
             .title("Scrollback Lines")
-            .adjustment(&gtk4::Adjustment::new(s.appearance.scrollback_lines as f64, 100.0, 100000.0, 100.0, 1000.0, 0.0))
+            .adjustment(&gtk4::Adjustment::new(
+                s.appearance.scrollback_lines as f64,
+                100.0,
+                100000.0,
+                100.0,
+                1000.0,
+                0.0,
+            ))
             .build();
         let settings_ref = settings.clone();
         let font_cb = on_font_changed.clone();
         scrollback_row.connect_changed(move |row| {
             settings_ref.borrow_mut().appearance.scrollback_lines = row.value() as u32;
             settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb { cb(); }
+            if let Some(ref cb) = font_cb {
+                cb();
+            }
         });
         font_group.add(&scrollback_row);
 
@@ -305,7 +386,10 @@ impl SettingsWindow {
             .build();
         let settings_ref = settings.clone();
         notify_file_row.connect_active_notify(move |row| {
-            settings_ref.borrow_mut().notifications.on_file_watch_restart = row.is_active();
+            settings_ref
+                .borrow_mut()
+                .notifications
+                .on_file_watch_restart = row.is_active();
             settings_ref.borrow().save();
         });
         group.add(&notify_file_row);
@@ -315,15 +399,17 @@ impl SettingsWindow {
         page
     }
 
-    fn build_sidebar_page(settings: &SettingsRef, on_single_expand_changed: Option<Rc<dyn Fn(bool)>>, on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>) -> adw::PreferencesPage {
+    fn build_sidebar_page(
+        settings: &SettingsRef,
+        on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
+        on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
+    ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Sidebar")
             .icon_name("sidebar-show-symbolic")
             .build();
 
-        let display_group = adw::PreferencesGroup::builder()
-            .title("Display")
-            .build();
+        let display_group = adw::PreferencesGroup::builder().title("Display").build();
 
         let s = settings.borrow();
 
@@ -378,7 +464,9 @@ impl SettingsWindow {
 
         let project_cpu_row = adw::ComboRow::builder()
             .title("Project CPU Usage")
-            .model(&gtk4::StringList::new(&["Always", "25%", "50%", "100%", "200%", "Never"]))
+            .model(&gtk4::StringList::new(&[
+                "Always", "25%", "50%", "100%", "200%", "Never",
+            ]))
             .build();
         project_cpu_row.set_selected(proj_cpu);
         let settings_ref = settings.clone();
@@ -390,7 +478,9 @@ impl SettingsWindow {
 
         let project_mem_row = adw::ComboRow::builder()
             .title("Project Memory Usage")
-            .model(&gtk4::StringList::new(&["Always", "500MB", "1GB", "2GB", "8GB", "Never"]))
+            .model(&gtk4::StringList::new(&[
+                "Always", "500MB", "1GB", "2GB", "8GB", "Never",
+            ]))
             .build();
         project_mem_row.set_selected(proj_mem);
         let settings_ref = settings.clone();
@@ -402,7 +492,9 @@ impl SettingsWindow {
 
         let process_cpu_row = adw::ComboRow::builder()
             .title("Process CPU Usage")
-            .model(&gtk4::StringList::new(&["Always", "10%", "30%", "60%", "90%", "Never"]))
+            .model(&gtk4::StringList::new(&[
+                "Always", "10%", "30%", "60%", "90%", "Never",
+            ]))
             .build();
         process_cpu_row.set_selected(proc_cpu);
         let settings_ref = settings.clone();
@@ -414,7 +506,9 @@ impl SettingsWindow {
 
         let process_mem_row = adw::ComboRow::builder()
             .title("Process Memory Usage")
-            .model(&gtk4::StringList::new(&["Always", "100MB", "500MB", "1GB", "2GB", "Never"]))
+            .model(&gtk4::StringList::new(&[
+                "Always", "100MB", "500MB", "1GB", "2GB", "Never",
+            ]))
             .build();
         process_mem_row.set_selected(proc_mem);
         let settings_ref = settings.clone();
@@ -455,14 +549,10 @@ impl SettingsWindow {
                 continue;
             }
 
-            let group = adw::PreferencesGroup::builder()
-                .title(*category)
-                .build();
+            let group = adw::PreferencesGroup::builder().title(*category).build();
 
             for &&(action, display_name, _) in &actions_in_category {
-                let row = adw::ActionRow::builder()
-                    .title(display_name)
-                    .build();
+                let row = adw::ActionRow::builder().title(display_name).build();
 
                 let current_label = keybinding_map.borrow().display_string(action);
                 let btn = gtk4::Button::builder()
@@ -535,9 +625,7 @@ impl SettingsWindow {
         ];
 
         for (name, shortcut) in &fixed_shortcuts {
-            let row = adw::ActionRow::builder()
-                .title(*name)
-                .build();
+            let row = adw::ActionRow::builder().title(*name).build();
             let badge = gtk4::Label::builder()
                 .label(*shortcut)
                 .css_classes(["caption", "kbd-badge"])
@@ -604,13 +692,10 @@ impl SettingsWindow {
                 // Revert after 2 seconds
                 let btn_revert = btn.clone();
                 let orig = original.clone();
-                gtk4::glib::timeout_add_local_once(
-                    std::time::Duration::from_secs(2),
-                    move || {
-                        btn_revert.remove_css_class("conflict");
-                        btn_revert.set_label(&orig);
-                    },
-                );
+                gtk4::glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                    btn_revert.remove_css_class("conflict");
+                    btn_revert.set_label(&orig);
+                });
                 dialog_widget.remove_controller(controller);
                 return gtk4::glib::Propagation::Stop;
             }
@@ -619,7 +704,10 @@ impl SettingsWindow {
             let display = keybinding_to_string(&candidate);
             kb_map_ref.borrow_mut().update_binding(action, candidate);
             kb_map_ref.borrow().set_capturing(false);
-            settings_ref.borrow_mut().keybindings.set(action, display.clone());
+            settings_ref
+                .borrow_mut()
+                .keybindings
+                .set(action, display.clone());
             settings_ref.borrow().save();
 
             btn.set_label(&display);
@@ -673,12 +761,16 @@ impl SettingsWindow {
             .subtitle("Used when opening projects. Can be overridden per-project.")
             .model(&gtk4::StringList::new(&editor_labels))
             .build();
-        let editor_idx = editors.iter().position(|(cmd, _)| *cmd == s.tools.default_editor).unwrap_or(0);
+        let editor_idx = editors
+            .iter()
+            .position(|(cmd, _)| *cmd == s.tools.default_editor)
+            .unwrap_or(0);
         editor_row.set_selected(editor_idx as u32);
         let editors_owned: Vec<String> = editors.iter().map(|(cmd, _)| cmd.to_string()).collect();
         let settings_ref = settings.clone();
         editor_row.connect_selected_notify(move |row| {
-            let editor = editors_owned.get(row.selected() as usize)
+            let editor = editors_owned
+                .get(row.selected() as usize)
                 .map(|s| s.as_str())
                 .unwrap_or("xdg-open");
             settings_ref.borrow_mut().tools.default_editor = editor.to_string();
@@ -721,12 +813,17 @@ impl SettingsWindow {
             .subtitle("Used when opening projects from the sidebar.")
             .model(&gtk4::StringList::new(&terminal_labels))
             .build();
-        let terminal_idx = terminals.iter().position(|(cmd, _)| *cmd == s.tools.default_terminal).unwrap_or(0);
+        let terminal_idx = terminals
+            .iter()
+            .position(|(cmd, _)| *cmd == s.tools.default_terminal)
+            .unwrap_or(0);
         terminal_row.set_selected(terminal_idx as u32);
-        let terminals_owned: Vec<String> = terminals.iter().map(|(cmd, _)| cmd.to_string()).collect();
+        let terminals_owned: Vec<String> =
+            terminals.iter().map(|(cmd, _)| cmd.to_string()).collect();
         let settings_ref = settings.clone();
         terminal_row.connect_selected_notify(move |row| {
-            let terminal = terminals_owned.get(row.selected() as usize)
+            let terminal = terminals_owned
+                .get(row.selected() as usize)
                 .map(|s| s.as_str())
                 .unwrap_or("xdg-open");
             settings_ref.borrow_mut().tools.default_terminal = terminal.to_string();
@@ -773,10 +870,22 @@ impl SettingsWindow {
             .subtitle("7 tools")
             .build();
         let tools = [
-            ("list_processes", "List all managed processes with their current status"),
-            ("get_project_info", "Get project overview with running/total counts"),
-            ("get_process_status", "Get detailed status of a process (PID, uptime, restarts)"),
-            ("get_process_logs", "Get recent terminal output from a process"),
+            (
+                "list_processes",
+                "List all managed processes with their current status",
+            ),
+            (
+                "get_project_info",
+                "Get project overview with running/total counts",
+            ),
+            (
+                "get_process_status",
+                "Get detailed status of a process (PID, uptime, restarts)",
+            ),
+            (
+                "get_process_logs",
+                "Get recent terminal output from a process",
+            ),
             ("restart_process", "Restart a managed process"),
             ("stop_process", "Stop a running process"),
             ("start_process", "Start a stopped process"),
@@ -816,16 +925,31 @@ Global: add to ~/.claude/settings.json
 
 Auto-detects which project you're in.
 If tuxflow-mcp is not in PATH, use the full path."#;
-        Self::add_setup_row(&cli_setup, "Claude Code", ".mcp.json or ~/.claude/settings.json", claude_code_config);
+        Self::add_setup_row(
+            &cli_setup,
+            "Claude Code",
+            ".mcp.json or ~/.claude/settings.json",
+            claude_code_config,
+        );
 
         let codex_config = r#"codex --mcp-config '{"tuxflow":{"command":"tuxflow-mcp"}}'
 Or add to ~/.codex/config.toml under [mcp]"#;
-        Self::add_setup_row(&cli_setup, "Codex", "CLI flag or ~/.codex/config.toml", codex_config);
+        Self::add_setup_row(
+            &cli_setup,
+            "Codex",
+            "CLI flag or ~/.codex/config.toml",
+            codex_config,
+        );
         Self::add_setup_row(&cli_setup, "OpenCode", ".opencode/mcp.json", mcp_config);
 
         let gemini_config = r#"gemini --mcp '{"tuxflow":{"command":"tuxflow-mcp"}}'
 Or add to ~/.gemini/settings.json under mcpServers"#;
-        Self::add_setup_row(&cli_setup, "Gemini CLI", "CLI flag or ~/.gemini/settings.json", gemini_config);
+        Self::add_setup_row(
+            &cli_setup,
+            "Gemini CLI",
+            "CLI flag or ~/.gemini/settings.json",
+            gemini_config,
+        );
         Self::add_setup_row(&cli_setup, "Amp", ".amp/mcp.json", mcp_config);
 
         let aider_config = r#"Add to .aider.conf.yml:
@@ -883,7 +1007,12 @@ mcp-servers:
     }
   }
 }"#;
-        Self::add_setup_row(&ide_setup, "Claude Desktop", "claude_desktop_config.json", desktop_config);
+        Self::add_setup_row(
+            &ide_setup,
+            "Claude Desktop",
+            "claude_desktop_config.json",
+            desktop_config,
+        );
         mcp_group.add(&ide_setup);
 
         page.add(&mcp_group);
@@ -909,10 +1038,9 @@ mcp-servers:
                 display.clipboard().set_text(&text);
                 btn.set_icon_name("emblem-ok-symbolic");
                 let btn_ref = btn.clone();
-                gtk4::glib::timeout_add_local_once(
-                    std::time::Duration::from_secs(2),
-                    move || btn_ref.set_icon_name("edit-copy-symbolic"),
-                );
+                gtk4::glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                    btn_ref.set_icon_name("edit-copy-symbolic")
+                });
             }
         });
 

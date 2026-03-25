@@ -43,7 +43,12 @@ pub fn setup_drag_icon(drag_source: &gtk4::DragSource, widget: &impl IsA<gtk4::W
 }
 
 /// Move `child` in `parent` so it sits before or after `sibling`.
-pub fn reorder_in_box(parent: &gtk4::Box, child: &impl IsA<gtk4::Widget>, sibling: &impl IsA<gtk4::Widget>, before: bool) {
+pub fn reorder_in_box(
+    parent: &gtk4::Box,
+    child: &impl IsA<gtk4::Widget>,
+    sibling: &impl IsA<gtk4::Widget>,
+    before: bool,
+) {
     let child = child.upcast_ref::<gtk4::Widget>();
     let sibling = sibling.upcast_ref::<gtk4::Widget>();
     parent.remove(child);

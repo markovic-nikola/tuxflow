@@ -18,7 +18,10 @@ fn find_socket(project: Option<&str>) -> Result<PathBuf, String> {
                 }
             })
             .collect();
-        return Ok(PathBuf::from(format!("{}/tuxflow-{}.sock", base, sanitized)));
+        return Ok(PathBuf::from(format!(
+            "{}/tuxflow-{}.sock",
+            base, sanitized
+        )));
     }
 
     // Auto-discover: scan for tuxflow-*.sock files

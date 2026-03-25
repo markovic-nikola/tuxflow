@@ -38,7 +38,10 @@ impl PortDetector {
             }
             // localhost:PORT pattern
             else if let Some(port_str) = word.strip_prefix("localhost:") {
-                if let Ok(port) = port_str.trim_matches(|c: char| !c.is_numeric()).parse::<u16>() {
+                if let Ok(port) = port_str
+                    .trim_matches(|c: char| !c.is_numeric())
+                    .parse::<u16>()
+                {
                     found.push(DetectedPort {
                         port,
                         url: Some(format!("http://localhost:{port}")),
@@ -49,7 +52,10 @@ impl PortDetector {
             else if word.starts_with("0.0.0.0:") || word.starts_with("127.0.0.1:") {
                 let parts: Vec<&str> = word.splitn(2, ':').collect();
                 if parts.len() == 2 {
-                    if let Ok(port) = parts[1].trim_matches(|c: char| !c.is_numeric()).parse::<u16>() {
+                    if let Ok(port) = parts[1]
+                        .trim_matches(|c: char| !c.is_numeric())
+                        .parse::<u16>()
+                    {
                         found.push(DetectedPort {
                             port,
                             url: Some(format!("http://localhost:{port}")),

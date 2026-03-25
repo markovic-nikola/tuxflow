@@ -1,5 +1,5 @@
-use gtk4::prelude::*;
 use gtk4::gio;
+use gtk4::prelude::*;
 use libadwaita as adw;
 
 use crate::config::settings::AppSettings;

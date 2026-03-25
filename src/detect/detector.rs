@@ -62,8 +62,8 @@ pub fn detect_stacks(project_dir: &Path) -> Vec<DetectedStack> {
 
     for rule in RULES {
         if project_dir.join(rule.marker_file).exists() && seen.insert(rule.name) {
-            let content = std::fs::read_to_string(project_dir.join(rule.marker_file))
-                .unwrap_or_default();
+            let content =
+                std::fs::read_to_string(project_dir.join(rule.marker_file)).unwrap_or_default();
             let processes = (rule.detect)(project_dir, &content);
             if !processes.is_empty() {
                 stacks.push(DetectedStack {
@@ -129,8 +129,7 @@ fn detect_rust(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     // Skip "cargo run" if this project would re-launch TuxFlow itself
-    let is_self = std::env::var("TUXFLOW_CHILD").is_ok()
-        || content.contains("name = \"tuxflow\"");
+    let is_self = std::env::var("TUXFLOW_CHILD").is_ok() || content.contains("name = \"tuxflow\"");
     if !is_self {
         procs.push(make_process("cargo run", "cargo run", true));
     }

@@ -40,7 +40,11 @@ impl Workspace {
     pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
         // Avoid duplicates
         let dir_str = dir.to_string_lossy().to_string();
-        if self.projects.iter().any(|p| p.dir.to_string_lossy() == dir_str) {
+        if self
+            .projects
+            .iter()
+            .any(|p| p.dir.to_string_lossy() == dir_str)
+        {
             log::info!("Project already loaded: {}", dir.display());
             return None;
         }
@@ -79,11 +83,18 @@ impl Workspace {
             }
         } else {
             // Auto-detect
-            log::info!("No tuxflow.toml, running stack detection in {}", dir.display());
+            log::info!(
+                "No tuxflow.toml, running stack detection in {}",
+                dir.display()
+            );
             let stacks = detector::detect_stacks(dir);
             let mut mgr = manager.borrow_mut();
             for stack in &stacks {
-                log::info!("Detected stack: {} ({} commands)", stack.name, stack.suggested_processes.len());
+                log::info!(
+                    "Detected stack: {} ({} commands)",
+                    stack.name,
+                    stack.suggested_processes.len()
+                );
                 for proc_config in &stack.suggested_processes {
                     let mut pc = proc_config.clone();
                     if pc.working_dir.is_none() {
@@ -105,7 +116,8 @@ impl Workspace {
         // Filter out previously deleted processes
         {
             let mgr = manager.borrow();
-            let to_remove: Vec<String> = mgr.process_names()
+            let to_remove: Vec<String> = mgr
+                .process_names()
                 .iter()
                 .filter(|name| self.saved.is_process_deleted(&dir_string, name))
                 .cloned()
@@ -237,7 +249,11 @@ impl Workspace {
             .and_then(|p| self.saved.is_expanded(&p.dir.to_string_lossy().as_ref()))
     }
 
-    pub fn save_custom_command(&mut self, project_name: &str, config: crate::config::schema::ProcessConfig) {
+    pub fn save_custom_command(
+        &mut self,
+        project_name: &str,
+        config: crate::config::schema::ProcessConfig,
+    ) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
             let dir_str = project.dir.to_string_lossy().to_string();
             self.saved.add_custom_command(&dir_str, config);
@@ -247,7 +263,8 @@ impl Workspace {
     pub fn set_display_name(&mut self, project_name: &str, process_name: &str, display_name: &str) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
             let dir_str = project.dir.to_string_lossy().to_string();
-            self.saved.set_display_name(&dir_str, process_name, display_name);
+            self.saved
+                .set_display_name(&dir_str, process_name, display_name);
         }
     }
 
@@ -262,13 +279,23 @@ impl Workspace {
     }
 
     pub fn reorder_project(&mut self, project_name: &str, target_name: &str, before: bool) {
-        let Some(src_idx) = self.projects.iter().position(|p| p.name == project_name) else { return };
+        let Some(src_idx) = self.projects.iter().position(|p| p.name == project_name) else {
+            return;
+        };
         let project = self.projects.remove(src_idx);
-        let target_idx = self.projects.iter().position(|p| p.name == target_name).unwrap_or(0);
+        let target_idx = self
+            .projects
+            .iter()
+            .position(|p| p.name == target_name)
+            .unwrap_or(0);
         let insert_idx = if before { target_idx } else { target_idx + 1 };
         self.projects.insert(insert_idx, project);
         self.saved.reorder_to_match(
-            &self.projects.iter().map(|p| p.dir.to_string_lossy().to_string()).collect::<Vec<_>>(),
+            &self
+                .projects
+                .iter()
+                .map(|p| p.dir.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
         );
     }
 }

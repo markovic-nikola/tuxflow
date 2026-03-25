@@ -2,11 +2,11 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
-use gtk4::prelude::*;
+use adw::prelude::*;
 use gtk4::gdk;
 use gtk4::glib;
+use gtk4::prelude::*;
 use libadwaita as adw;
-use adw::prelude::*;
 use vte4::prelude::*;
 
 use crate::config::keybindings::{KeybindingMap, ShortcutAction, is_modifier_key};
@@ -38,14 +38,16 @@ impl TuxFlowWindow {
 
         // Load persisted settings
         let settings = Rc::new(RefCell::new(AppSettings::load()));
-        let keybinding_map = Rc::new(RefCell::new(
-            KeybindingMap::from_settings(&settings.borrow().keybindings),
-        ));
+        let keybinding_map = Rc::new(RefCell::new(KeybindingMap::from_settings(
+            &settings.borrow().keybindings,
+        )));
         let single_expand = Rc::new(Cell::new(settings.borrow().sidebar.single_project_expand));
 
         // Set guard env var before spawning any children
         // SAFETY: called on the main thread before spawning any child processes
-        unsafe { std::env::set_var("TUXFLOW_CHILD", "1"); }
+        unsafe {
+            std::env::set_var("TUXFLOW_CHILD", "1");
+        }
 
         // Check for orphaned processes from a previous crash
         let orphans = PidFile::orphaned_pids();
@@ -80,14 +82,30 @@ impl TuxFlowWindow {
             for dir_str in &saved_dirs {
                 let path = std::path::PathBuf::from(dir_str);
                 if path.is_dir() {
-                    Self::load_project(&ws, &sidebar, &terminal_stack, &path, &pid_file, &status_bar, &selected_process);
+                    Self::load_project(
+                        &ws,
+                        &sidebar,
+                        &terminal_stack,
+                        &path,
+                        &pid_file,
+                        &status_bar,
+                        &selected_process,
+                    );
                 }
             }
         }
 
         // Load CLI project if given (and not already loaded from saved)
         if let Some(dir) = project_dir {
-            Self::load_project(&ws, &sidebar, &terminal_stack, dir, &pid_file, &status_bar, &selected_process);
+            Self::load_project(
+                &ws,
+                &sidebar,
+                &terminal_stack,
+                dir,
+                &pid_file,
+                &status_bar,
+                &selected_process,
+            );
         }
 
         // Wire sidebar selection → terminal switch + status bar URL update
@@ -183,7 +201,22 @@ impl TuxFlowWindow {
         });
 
         // Build UI
-        let content = Self::build_content(&window, &ws, &sidebar, &terminal_stack, &selected_process, &last_selected_project, &on_single_expand_changed, &on_auto_hide_changed, &on_terminal_theme_changed, &on_font_changed, &pid_file, &status_bar, &keybinding_map, &auto_hide);
+        let content = Self::build_content(
+            &window,
+            &ws,
+            &sidebar,
+            &terminal_stack,
+            &selected_process,
+            &last_selected_project,
+            &on_single_expand_changed,
+            &on_auto_hide_changed,
+            &on_terminal_theme_changed,
+            &on_font_changed,
+            &pid_file,
+            &status_bar,
+            &keybinding_map,
+            &auto_hide,
+        );
         window.set_content(Some(&content));
 
         // Start MCP servers for loaded projects (if enabled in settings)
@@ -259,16 +292,20 @@ impl TuxFlowWindow {
         dialog.set_close_response("ignore");
 
         let parent = window.clone().upcast::<gtk4::Widget>();
-        dialog.choose(Some(&parent), gtk4::gio::Cancellable::NONE, move |response| {
-            if response == "kill" {
-                PidFile::kill_orphans(&orphans);
-                log::info!("Killed {} orphaned process(es)", count);
-            } else {
-                // Clear the stale pid file so we don't prompt again
-                PidFile::new().clear();
-                log::info!("Ignored {} orphaned process(es)", count);
-            }
-        });
+        dialog.choose(
+            Some(&parent),
+            gtk4::gio::Cancellable::NONE,
+            move |response| {
+                if response == "kill" {
+                    PidFile::kill_orphans(&orphans);
+                    log::info!("Killed {} orphaned process(es)", count);
+                } else {
+                    // Clear the stale pid file so we don't prompt again
+                    PidFile::new().clear();
+                    log::info!("Ignored {} orphaned process(es)", count);
+                }
+            },
+        );
     }
 
     /// Parse a shell window title into a short display name.
@@ -319,7 +356,9 @@ impl TuxFlowWindow {
         let ws_ref = workspace.clone();
         let proj_name = project_name.to_string();
         terminal.connect_window_title_changed(move |term| {
-            let is_auto = mgr_ref.borrow().get_process(&proc_name)
+            let is_auto = mgr_ref
+                .borrow()
+                .get_process(&proc_name)
                 .map(|p| p.config.auto_named)
                 .unwrap_or(false);
             if !is_auto {
@@ -331,7 +370,9 @@ impl TuxFlowWindow {
                     if let Some(proc) = mgr_ref.borrow_mut().get_process_mut(&proc_name) {
                         proc.config.display_name = Some(display_name.clone());
                     }
-                    ws_ref.borrow_mut().set_display_name(&proj_name, &proc_name, &display_name);
+                    ws_ref
+                        .borrow_mut()
+                        .set_display_name(&proj_name, &proc_name, &display_name);
                 }
             }
         });
@@ -386,7 +427,8 @@ impl TuxFlowWindow {
         content.set_margin_bottom(24);
 
         let project_group = adw::PreferencesGroup::new();
-        let project_list = gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        let project_list =
+            gtk4::StringList::new(&project_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let project_row = adw::ComboRow::builder()
             .title("Project")
             .model(&project_list)
@@ -498,7 +540,8 @@ impl TuxFlowWindow {
                         let qname = workspace::qualified_name(&project_name, name);
                         let skip_port_detection = matches!(
                             proc.config.category,
-                            crate::config::schema::ProcessCategory::Agent | crate::config::schema::ProcessCategory::SSH
+                            crate::config::schema::ProcessCategory::Agent
+                                | crate::config::schema::ProcessCategory::SSH
                         );
 
                         // MCP log capture state
@@ -516,8 +559,10 @@ impl TuxFlowWindow {
                                     let cols = terminal.column_count() as i64;
                                     let (text_opt, _) = terminal.text_range_format(
                                         vte4::Format::Text,
-                                        prev_row, 0,
-                                        row, cols,
+                                        prev_row,
+                                        0,
+                                        row,
+                                        cols,
                                     );
                                     if let Some(text) = text_opt {
                                         if let Ok(mut buffers) = log_buffers.lock() {
@@ -568,7 +613,12 @@ impl TuxFlowWindow {
 
             // Populate sidebar
             let saved_expanded = ws_mut.is_project_expanded(&project_name);
-            sidebar.add_project(&manager, &project_name, icon_path.as_deref(), saved_expanded);
+            sidebar.add_project(
+                &manager,
+                &project_name,
+                icon_path.as_deref(),
+                saved_expanded,
+            );
 
             // Wire auto-rename for auto_named processes on startup
             {
@@ -578,7 +628,13 @@ impl TuxFlowWindow {
                         if proc.config.auto_named {
                             let qname = workspace::qualified_name(&project_name, name);
                             Self::connect_window_title_auto_rename(
-                                &proc.terminal, &manager, name, sidebar, &qname, ws, &project_name,
+                                &proc.terminal,
+                                &manager,
+                                name,
+                                sidebar,
+                                &qname,
+                                ws,
+                                &project_name,
                             );
                         }
                     }
@@ -676,7 +732,9 @@ impl TuxFlowWindow {
                     dialog.select_folder(Some(&win), gtk4::gio::Cancellable::NONE, move |result| {
                         if let Ok(file) = result {
                             if let Some(path) = file.path() {
-                                Self::load_project(&ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2);
+                                Self::load_project(
+                                    &ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2,
+                                );
                             }
                         }
                     });
@@ -685,179 +743,336 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
-                    let project_names: Vec<String> = ws_ref.borrow().projects().iter().map(|p| p.name.clone()).collect();
-                    let best = Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
+                    let project_names: Vec<String> = ws_ref
+                        .borrow()
+                        .projects()
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let best =
+                        Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
                     let last_proj_cb = last_proj_ref.clone();
-                    AddCommandDialog::show_add_agent(&window_ref, &project_names, best.as_deref(), move |selected_project, mut config| {
-                        *last_proj_cb.borrow_mut() = Some(selected_project.to_string());
-                        let name = config.name.clone();
-                        {
-                            let ws_borrow = ws2.borrow();
-                            if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                                if config.working_dir.is_none() {
-                                    config.working_dir = Some(project.dir.to_string_lossy().to_string());
+                    AddCommandDialog::show_add_agent(
+                        &window_ref,
+                        &project_names,
+                        best.as_deref(),
+                        move |selected_project, mut config| {
+                            *last_proj_cb.borrow_mut() = Some(selected_project.to_string());
+                            let name = config.name.clone();
+                            {
+                                let ws_borrow = ws2.borrow();
+                                if let Some(project) = ws_borrow
+                                    .projects()
+                                    .iter()
+                                    .find(|p| p.name == selected_project)
+                                {
+                                    if config.working_dir.is_none() {
+                                        config.working_dir =
+                                            Some(project.dir.to_string_lossy().to_string());
+                                    }
                                 }
                             }
-                        }
-                        ws2.borrow_mut().save_custom_command(selected_project, config.clone());
+                            ws2.borrow_mut()
+                                .save_custom_command(selected_project, config.clone());
 
-                        let ws_borrow = ws2.borrow();
-                        if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                            let project_name = project.name.clone();
-                            let qname = workspace::qualified_name(&project_name, &name);
-                            let mut mgr = project.manager.borrow_mut();
-                            mgr.add_process(config);
-                            let terminal = mgr.get_process(&name).map(|p| p.terminal.clone());
-                            if let Some(ref term) = terminal {
-                                stack2.add_named(term, Some(&qname));
+                            let ws_borrow = ws2.borrow();
+                            if let Some(project) = ws_borrow
+                                .projects()
+                                .iter()
+                                .find(|p| p.name == selected_project)
+                            {
+                                let project_name = project.name.clone();
+                                let qname = workspace::qualified_name(&project_name, &name);
+                                let mut mgr = project.manager.borrow_mut();
+                                mgr.add_process(config);
+                                let terminal = mgr.get_process(&name).map(|p| p.terminal.clone());
+                                if let Some(ref term) = terminal {
+                                    stack2.add_named(term, Some(&qname));
+                                }
+                                drop(mgr);
+                                sidebar2.add_process_to_project(
+                                    &project.manager,
+                                    &project_name,
+                                    &name,
+                                    ProcessStatus::Stopped,
+                                    crate::config::schema::ProcessCategory::Agent,
+                                );
+                                crate::process::auto_restart::setup_auto_restart(
+                                    &project.manager,
+                                    &name,
+                                );
+                                project.manager.borrow_mut().spawn(&name);
+                                if let Some(ref term) = terminal {
+                                    Self::connect_window_title_auto_rename(
+                                        term,
+                                        &project.manager,
+                                        &name,
+                                        &sidebar2,
+                                        &qname,
+                                        &ws2,
+                                        &project_name,
+                                    );
+                                }
                             }
-                            drop(mgr);
-                            sidebar2.add_process_to_project(&project.manager, &project_name, &name, ProcessStatus::Stopped, crate::config::schema::ProcessCategory::Agent);
-                            crate::process::auto_restart::setup_auto_restart(&project.manager, &name);
-                            project.manager.borrow_mut().spawn(&name);
-                            if let Some(ref term) = terminal {
-                                Self::connect_window_title_auto_rename(term, &project.manager, &name, &sidebar2, &qname, &ws2, &project_name);
-                            }
-                        }
-                    });
+                        },
+                    );
                 }
                 "new_ssh" => {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
-                    let project_names: Vec<String> = ws_ref.borrow().projects().iter().map(|p| p.name.clone()).collect();
-                    let best = Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
+                    let project_names: Vec<String> = ws_ref
+                        .borrow()
+                        .projects()
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let best =
+                        Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
                     let last_proj_cb = last_proj_ref.clone();
-                    AddSshDialog::show(&window_ref, &project_names, best.as_deref(), move |selected_project, mut config| {
-                        *last_proj_cb.borrow_mut() = Some(selected_project.to_string());
-                        let name = config.name.clone();
-                        let start_with_project = config.start_with_project;
-                        {
-                            let ws_borrow = ws2.borrow();
-                            if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                                if config.working_dir.is_none() {
-                                    config.working_dir = Some(project.dir.to_string_lossy().to_string());
+                    AddSshDialog::show(
+                        &window_ref,
+                        &project_names,
+                        best.as_deref(),
+                        move |selected_project, mut config| {
+                            *last_proj_cb.borrow_mut() = Some(selected_project.to_string());
+                            let name = config.name.clone();
+                            let start_with_project = config.start_with_project;
+                            {
+                                let ws_borrow = ws2.borrow();
+                                if let Some(project) = ws_borrow
+                                    .projects()
+                                    .iter()
+                                    .find(|p| p.name == selected_project)
+                                {
+                                    if config.working_dir.is_none() {
+                                        config.working_dir =
+                                            Some(project.dir.to_string_lossy().to_string());
+                                    }
                                 }
                             }
-                        }
-                        ws2.borrow_mut().save_custom_command(selected_project, config.clone());
+                            ws2.borrow_mut()
+                                .save_custom_command(selected_project, config.clone());
 
-                        let ws_borrow = ws2.borrow();
-                        if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                            let project_name = project.name.clone();
-                            let qname = workspace::qualified_name(&project_name, &name);
-                            let mut mgr = project.manager.borrow_mut();
-                            mgr.add_process(config);
-                            let terminal = mgr.get_process(&name).map(|p| p.terminal.clone());
-                            if let Some(ref term) = terminal {
-                                stack2.add_named(term, Some(&qname));
+                            let ws_borrow = ws2.borrow();
+                            if let Some(project) = ws_borrow
+                                .projects()
+                                .iter()
+                                .find(|p| p.name == selected_project)
+                            {
+                                let project_name = project.name.clone();
+                                let qname = workspace::qualified_name(&project_name, &name);
+                                let mut mgr = project.manager.borrow_mut();
+                                mgr.add_process(config);
+                                let terminal = mgr.get_process(&name).map(|p| p.terminal.clone());
+                                if let Some(ref term) = terminal {
+                                    stack2.add_named(term, Some(&qname));
+                                }
+                                drop(mgr);
+                                sidebar2.add_process_to_project(
+                                    &project.manager,
+                                    &project_name,
+                                    &name,
+                                    ProcessStatus::Stopped,
+                                    crate::config::schema::ProcessCategory::SSH,
+                                );
+                                crate::process::auto_restart::setup_auto_restart(
+                                    &project.manager,
+                                    &name,
+                                );
+                                if start_with_project {
+                                    project.manager.borrow_mut().spawn(&name);
+                                }
+                                if let Some(ref term) = terminal {
+                                    Self::connect_window_title_auto_rename(
+                                        term,
+                                        &project.manager,
+                                        &name,
+                                        &sidebar2,
+                                        &qname,
+                                        &ws2,
+                                        &project_name,
+                                    );
+                                }
                             }
-                            drop(mgr);
-                            sidebar2.add_process_to_project(&project.manager, &project_name, &name, ProcessStatus::Stopped, crate::config::schema::ProcessCategory::SSH);
-                            crate::process::auto_restart::setup_auto_restart(&project.manager, &name);
-                            if start_with_project {
-                                project.manager.borrow_mut().spawn(&name);
-                            }
-                            if let Some(ref term) = terminal {
-                                Self::connect_window_title_auto_rename(term, &project.manager, &name, &sidebar2, &qname, &ws2, &project_name);
-                            }
-                        }
-                    });
+                        },
+                    );
                 }
                 "add_process" => {
                     let ws2 = ws_ref.clone();
                     let stack = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
-                    let project_names: Vec<String> = ws_ref.borrow().projects().iter().map(|p| p.name.clone()).collect();
-                    let best = Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
+                    let project_names: Vec<String> = ws_ref
+                        .borrow()
+                        .projects()
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let best =
+                        Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
                     let last_proj_cb = last_proj_ref.clone();
-                    AddCommandDialog::show(&window_ref, &project_names, best.as_deref(), move |selected_project, mut config| {
-                        *last_proj_cb.borrow_mut() = Some(selected_project.to_string());
-                        let category = config.category.clone();
-                        let start_with_project = config.start_with_project;
-                        let name = config.name.clone();
-                        // Default working_dir to project directory before persisting
-                        {
-                            let ws_borrow = ws2.borrow();
-                            if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                                if config.working_dir.is_none() {
-                                    config.working_dir = Some(project.dir.to_string_lossy().to_string());
+                    AddCommandDialog::show(
+                        &window_ref,
+                        &project_names,
+                        best.as_deref(),
+                        move |selected_project, mut config| {
+                            *last_proj_cb.borrow_mut() = Some(selected_project.to_string());
+                            let category = config.category.clone();
+                            let start_with_project = config.start_with_project;
+                            let name = config.name.clone();
+                            // Default working_dir to project directory before persisting
+                            {
+                                let ws_borrow = ws2.borrow();
+                                if let Some(project) = ws_borrow
+                                    .projects()
+                                    .iter()
+                                    .find(|p| p.name == selected_project)
+                                {
+                                    if config.working_dir.is_none() {
+                                        config.working_dir =
+                                            Some(project.dir.to_string_lossy().to_string());
+                                    }
                                 }
                             }
-                        }
-                        // Persist the custom command
-                        ws2.borrow_mut().save_custom_command(selected_project, config.clone());
+                            // Persist the custom command
+                            ws2.borrow_mut()
+                                .save_custom_command(selected_project, config.clone());
 
-                        let ws_borrow = ws2.borrow();
-                        if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                            let project_name = project.name.clone();
-                            let mut mgr = project.manager.borrow_mut();
-                            mgr.add_process(config);
-                            let qname = workspace::qualified_name(&project_name, &name);
-                            if let Some(proc) = mgr.get_process(&name) {
-                                stack.add_named(&proc.terminal, Some(&qname));
+                            let ws_borrow = ws2.borrow();
+                            if let Some(project) = ws_borrow
+                                .projects()
+                                .iter()
+                                .find(|p| p.name == selected_project)
+                            {
+                                let project_name = project.name.clone();
+                                let mut mgr = project.manager.borrow_mut();
+                                mgr.add_process(config);
+                                let qname = workspace::qualified_name(&project_name, &name);
+                                if let Some(proc) = mgr.get_process(&name) {
+                                    stack.add_named(&proc.terminal, Some(&qname));
+                                }
+                                let status = mgr
+                                    .get_process(&name)
+                                    .map(|p| p.status)
+                                    .unwrap_or(ProcessStatus::Stopped);
+                                drop(mgr);
+                                sidebar2.add_process_to_project(
+                                    &project.manager,
+                                    &project_name,
+                                    &name,
+                                    status,
+                                    category,
+                                );
+                                crate::process::auto_restart::setup_auto_restart(
+                                    &project.manager,
+                                    &name,
+                                );
+                                if start_with_project {
+                                    project.manager.borrow_mut().spawn(&name);
+                                    stack.set_visible_child_name(&qname);
+                                }
                             }
-                            let status = mgr.get_process(&name).map(|p| p.status).unwrap_or(ProcessStatus::Stopped);
-                            drop(mgr);
-                            sidebar2.add_process_to_project(&project.manager, &project_name, &name, status, category);
-                            crate::process::auto_restart::setup_auto_restart(&project.manager, &name);
-                            if start_with_project {
-                                project.manager.borrow_mut().spawn(&name);
-                                stack.set_visible_child_name(&qname);
-                            }
-                        }
-                    });
+                        },
+                    );
                 }
                 "new_terminal" => {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
                     let win2 = window_ref.clone();
-                    let project_names: Vec<String> = ws_ref.borrow().projects().iter().map(|p| p.name.clone()).collect();
-                    let best = Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
-                    Self::pick_project(&win2, &project_names, best.as_deref(), &last_proj_ref, move |selected_project| {
-                        let term_name = format!("terminal-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-                        let mut config = crate::config::schema::ProcessConfig {
-                            name: term_name.clone(),
-                            command: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
-                            working_dir: None,
-                            start_with_project: true,
-                            auto_restart: false,
-                            restart_when_changed: Vec::new(),
-                            env: std::collections::HashMap::new(),
-                            category: crate::config::schema::ProcessCategory::Terminal,
-                            auto_named: true,
-                            display_name: None,
-                        };
-                        // Set working_dir and persist before borrowing workspace immutably
-                        {
-                            let ws_borrow = ws2.borrow();
-                            if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                                config.working_dir = Some(project.dir.to_string_lossy().to_string());
+                    let project_names: Vec<String> = ws_ref
+                        .borrow()
+                        .projects()
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let best =
+                        Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
+                    Self::pick_project(
+                        &win2,
+                        &project_names,
+                        best.as_deref(),
+                        &last_proj_ref,
+                        move |selected_project| {
+                            let term_name = format!(
+                                "terminal-{}",
+                                uuid::Uuid::new_v4()
+                                    .to_string()
+                                    .split('-')
+                                    .next()
+                                    .unwrap_or("0")
+                            );
+                            let mut config = crate::config::schema::ProcessConfig {
+                                name: term_name.clone(),
+                                command: std::env::var("SHELL")
+                                    .unwrap_or_else(|_| "/bin/bash".to_string()),
+                                working_dir: None,
+                                start_with_project: true,
+                                auto_restart: false,
+                                restart_when_changed: Vec::new(),
+                                env: std::collections::HashMap::new(),
+                                category: crate::config::schema::ProcessCategory::Terminal,
+                                auto_named: true,
+                                display_name: None,
+                            };
+                            // Set working_dir and persist before borrowing workspace immutably
+                            {
+                                let ws_borrow = ws2.borrow();
+                                if let Some(project) = ws_borrow
+                                    .projects()
+                                    .iter()
+                                    .find(|p| p.name == selected_project)
+                                {
+                                    config.working_dir =
+                                        Some(project.dir.to_string_lossy().to_string());
+                                }
                             }
-                        }
-                        ws2.borrow_mut().save_custom_command(selected_project, config.clone());
+                            ws2.borrow_mut()
+                                .save_custom_command(selected_project, config.clone());
 
-                        let ws_borrow = ws2.borrow();
-                        if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                            let project_name = project.name.clone();
-                            let qname = workspace::qualified_name(&project_name, &term_name);
-                            let mut mgr = project.manager.borrow_mut();
-                            mgr.add_process(config);
-                            let terminal = mgr.get_process(&term_name).map(|p| p.terminal.clone());
-                            if let Some(ref term) = terminal {
-                                stack2.add_named(term, Some(&qname));
+                            let ws_borrow = ws2.borrow();
+                            if let Some(project) = ws_borrow
+                                .projects()
+                                .iter()
+                                .find(|p| p.name == selected_project)
+                            {
+                                let project_name = project.name.clone();
+                                let qname = workspace::qualified_name(&project_name, &term_name);
+                                let mut mgr = project.manager.borrow_mut();
+                                mgr.add_process(config);
+                                let terminal =
+                                    mgr.get_process(&term_name).map(|p| p.terminal.clone());
+                                if let Some(ref term) = terminal {
+                                    stack2.add_named(term, Some(&qname));
+                                }
+                                drop(mgr);
+                                // Add sidebar row before spawning so status updates are received
+                                sidebar2.add_process_to_project(
+                                    &project.manager,
+                                    &project_name,
+                                    &term_name,
+                                    ProcessStatus::Stopped,
+                                    crate::config::schema::ProcessCategory::Terminal,
+                                );
+                                crate::process::auto_restart::setup_auto_restart(
+                                    &project.manager,
+                                    &term_name,
+                                );
+                                project.manager.borrow_mut().spawn(&term_name);
+                                if let Some(ref term) = terminal {
+                                    Self::connect_window_title_auto_rename(
+                                        term,
+                                        &project.manager,
+                                        &term_name,
+                                        &sidebar2,
+                                        &qname,
+                                        &ws2,
+                                        &project_name,
+                                    );
+                                }
                             }
-                            drop(mgr);
-                            // Add sidebar row before spawning so status updates are received
-                            sidebar2.add_process_to_project(&project.manager, &project_name, &term_name, ProcessStatus::Stopped, crate::config::schema::ProcessCategory::Terminal);
-                            crate::process::auto_restart::setup_auto_restart(&project.manager, &term_name);
-                            project.manager.borrow_mut().spawn(&term_name);
-                            if let Some(ref term) = terminal {
-                                Self::connect_window_title_auto_rename(term, &project.manager, &term_name, &sidebar2, &qname, &ws2, &project_name);
-                            }
-                        }
-                    });
+                        },
+                    );
                 }
                 _ if action.starts_with("new_agent:") => {
                     let agent_type = action[10..].to_string();
@@ -865,57 +1080,104 @@ impl TuxFlowWindow {
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
                     let win2 = window_ref.clone();
-                    let project_names: Vec<String> = ws_ref.borrow().projects().iter().map(|p| p.name.clone()).collect();
-                    let best = Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
-                    Self::pick_project(&win2, &project_names, best.as_deref(), &last_proj_ref, move |selected_project| {
-                        let agent_name = format!("{agent_type}-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-                        let command = match agent_type.as_str() {
-                            "claude" => "claude".to_string(),
-                            "codex" => "codex".to_string(),
-                            "gemini" => "gemini".to_string(),
-                            _ => agent_type.to_string(),
-                        };
-                        let mut config = crate::config::schema::ProcessConfig {
-                            name: agent_name.clone(),
-                            command,
-                            working_dir: None,
-                            start_with_project: false,
-                            auto_restart: false,
-                            restart_when_changed: Vec::new(),
-                            env: std::collections::HashMap::new(),
-                            category: crate::config::schema::ProcessCategory::Agent,
-                            auto_named: true,
-                            display_name: None,
-                        };
-                        // Set working_dir and persist
-                        {
-                            let ws_borrow = ws2.borrow();
-                            if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                                config.working_dir = Some(project.dir.to_string_lossy().to_string());
+                    let project_names: Vec<String> = ws_ref
+                        .borrow()
+                        .projects()
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let best =
+                        Self::resolve_active_project(&stack_ref, &last_proj_ref, &sidebar_ref);
+                    Self::pick_project(
+                        &win2,
+                        &project_names,
+                        best.as_deref(),
+                        &last_proj_ref,
+                        move |selected_project| {
+                            let agent_name = format!(
+                                "{agent_type}-{}",
+                                uuid::Uuid::new_v4()
+                                    .to_string()
+                                    .split('-')
+                                    .next()
+                                    .unwrap_or("0")
+                            );
+                            let command = match agent_type.as_str() {
+                                "claude" => "claude".to_string(),
+                                "codex" => "codex".to_string(),
+                                "gemini" => "gemini".to_string(),
+                                _ => agent_type.to_string(),
+                            };
+                            let mut config = crate::config::schema::ProcessConfig {
+                                name: agent_name.clone(),
+                                command,
+                                working_dir: None,
+                                start_with_project: false,
+                                auto_restart: false,
+                                restart_when_changed: Vec::new(),
+                                env: std::collections::HashMap::new(),
+                                category: crate::config::schema::ProcessCategory::Agent,
+                                auto_named: true,
+                                display_name: None,
+                            };
+                            // Set working_dir and persist
+                            {
+                                let ws_borrow = ws2.borrow();
+                                if let Some(project) = ws_borrow
+                                    .projects()
+                                    .iter()
+                                    .find(|p| p.name == selected_project)
+                                {
+                                    config.working_dir =
+                                        Some(project.dir.to_string_lossy().to_string());
+                                }
                             }
-                        }
-                        ws2.borrow_mut().save_custom_command(selected_project, config.clone());
+                            ws2.borrow_mut()
+                                .save_custom_command(selected_project, config.clone());
 
-                        let ws_borrow = ws2.borrow();
-                        if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == selected_project) {
-                            let project_name = project.name.clone();
-                            let qname = workspace::qualified_name(&project_name, &agent_name);
-                            let mut mgr = project.manager.borrow_mut();
-                            mgr.add_process(config);
-                            let terminal = mgr.get_process(&agent_name).map(|p| p.terminal.clone());
-                            if let Some(ref term) = terminal {
-                                stack2.add_named(term, Some(&qname));
+                            let ws_borrow = ws2.borrow();
+                            if let Some(project) = ws_borrow
+                                .projects()
+                                .iter()
+                                .find(|p| p.name == selected_project)
+                            {
+                                let project_name = project.name.clone();
+                                let qname = workspace::qualified_name(&project_name, &agent_name);
+                                let mut mgr = project.manager.borrow_mut();
+                                mgr.add_process(config);
+                                let terminal =
+                                    mgr.get_process(&agent_name).map(|p| p.terminal.clone());
+                                if let Some(ref term) = terminal {
+                                    stack2.add_named(term, Some(&qname));
+                                }
+                                drop(mgr);
+                                // Add sidebar row before spawning so status updates are received
+                                sidebar2.add_process_to_project(
+                                    &project.manager,
+                                    &project_name,
+                                    &agent_name,
+                                    ProcessStatus::Stopped,
+                                    crate::config::schema::ProcessCategory::Agent,
+                                );
+                                crate::process::auto_restart::setup_auto_restart(
+                                    &project.manager,
+                                    &agent_name,
+                                );
+                                project.manager.borrow_mut().spawn(&agent_name);
+                                if let Some(ref term) = terminal {
+                                    Self::connect_window_title_auto_rename(
+                                        term,
+                                        &project.manager,
+                                        &agent_name,
+                                        &sidebar2,
+                                        &qname,
+                                        &ws2,
+                                        &project_name,
+                                    );
+                                }
                             }
-                            drop(mgr);
-                            // Add sidebar row before spawning so status updates are received
-                            sidebar2.add_process_to_project(&project.manager, &project_name, &agent_name, ProcessStatus::Stopped, crate::config::schema::ProcessCategory::Agent);
-                            crate::process::auto_restart::setup_auto_restart(&project.manager, &agent_name);
-                            project.manager.borrow_mut().spawn(&agent_name);
-                            if let Some(ref term) = terminal {
-                                Self::connect_window_title_auto_rename(term, &project.manager, &agent_name, &sidebar2, &qname, &ws2, &project_name);
-                            }
-                        }
-                    });
+                        },
+                    );
                 }
                 _ if action.starts_with("switch:") => {
                     let qname = &action[7..];
@@ -976,7 +1238,17 @@ impl TuxFlowWindow {
         let split_view = adw::OverlaySplitView::new();
 
         // Headerbar
-        let headerbar = Self::build_headerbar(window, &split_view, &palette, sidebar, on_single_expand_changed, on_auto_hide_changed, on_terminal_theme_changed, on_font_changed, keybinding_map);
+        let headerbar = Self::build_headerbar(
+            window,
+            &split_view,
+            &palette,
+            sidebar,
+            on_single_expand_changed,
+            on_auto_hide_changed,
+            on_terminal_theme_changed,
+            on_font_changed,
+            keybinding_map,
+        );
 
         // Shared closure to refresh status bar counts
         // Deferred to idle so it never collides with an in-progress borrow_mut on a manager
@@ -1102,7 +1374,20 @@ impl TuxFlowWindow {
         vbox.append(status_bar.widget());
 
         Self::setup_keyboard_shortcuts(
-            window, &palette, ws, terminal_stack, &split_view, selected_process, &search_bar, sidebar, on_single_expand_changed, on_auto_hide_changed, on_terminal_theme_changed, on_font_changed, keybinding_map, last_selected_project,
+            window,
+            &palette,
+            ws,
+            terminal_stack,
+            &split_view,
+            selected_process,
+            &search_bar,
+            sidebar,
+            on_single_expand_changed,
+            on_auto_hide_changed,
+            on_terminal_theme_changed,
+            on_font_changed,
+            keybinding_map,
+            last_selected_project,
         );
 
         vbox.upcast()
@@ -1248,7 +1533,10 @@ impl TuxFlowWindow {
                     }
                     ShortcutAction::NewTerminal => {
                         Self::create_terminal_in_current_project(
-                            &ws_ref, &stack_ref, &sidebar_ref, &last_proj_ref,
+                            &ws_ref,
+                            &stack_ref,
+                            &sidebar_ref,
+                            &last_proj_ref,
                         );
                     }
                 }
@@ -1333,7 +1621,9 @@ impl TuxFlowWindow {
 
         let sidebar_tooltip = format!(
             "Toggle Sidebar ({})",
-            keybinding_map.borrow().display_string(ShortcutAction::ToggleSidebar)
+            keybinding_map
+                .borrow()
+                .display_string(ShortcutAction::ToggleSidebar)
         );
         let sidebar_btn = gtk4::ToggleButton::builder()
             .icon_name("sidebar-show-symbolic")
@@ -1367,7 +1657,14 @@ impl TuxFlowWindow {
         let font_cb = on_font_changed.clone();
         let kb_map = keybinding_map.clone();
         settings_btn.connect_clicked(move |_| {
-            crate::ui::settings::settings_window::SettingsWindow::show(&window_ref, Some(single_expand_cb.clone()), Some(auto_hide_cb.clone()), Some(theme_cb.clone()), Some(font_cb.clone()), Some(kb_map.clone()));
+            crate::ui::settings::settings_window::SettingsWindow::show(
+                &window_ref,
+                Some(single_expand_cb.clone()),
+                Some(auto_hide_cb.clone()),
+                Some(theme_cb.clone()),
+                Some(font_cb.clone()),
+                Some(kb_map.clone()),
+            );
         });
 
         // Add button
@@ -1449,11 +1746,7 @@ impl TuxFlowWindow {
         }
     }
 
-    fn close_current_process(
-        ws: &WorkspaceRef,
-        stack: &gtk4::Stack,
-        sidebar: &Rc<ProjectList>,
-    ) {
+    fn close_current_process(ws: &WorkspaceRef, stack: &gtk4::Stack, sidebar: &Rc<ProjectList>) {
         let qname = match stack.visible_child_name() {
             Some(name) if name != "__welcome__" => name.to_string(),
             _ => return,
@@ -1513,7 +1806,11 @@ impl TuxFlowWindow {
 
         let term_name = format!(
             "terminal-{}",
-            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0")
+            uuid::Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("0")
         );
         let config = crate::config::schema::ProcessConfig {
             name: term_name.clone(),
@@ -1529,7 +1826,8 @@ impl TuxFlowWindow {
         };
 
         drop(ws_borrow);
-        ws.borrow_mut().save_custom_command(&project_name, config.clone());
+        ws.borrow_mut()
+            .save_custom_command(&project_name, config.clone());
 
         let ws_borrow = ws.borrow();
         if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == project_name) {
@@ -1542,14 +1840,23 @@ impl TuxFlowWindow {
             }
             drop(mgr);
             sidebar.add_process_to_project(
-                &project.manager, &project_name, &term_name,
-                ProcessStatus::Stopped, crate::config::schema::ProcessCategory::Terminal,
+                &project.manager,
+                &project_name,
+                &term_name,
+                ProcessStatus::Stopped,
+                crate::config::schema::ProcessCategory::Terminal,
             );
             crate::process::auto_restart::setup_auto_restart(&project.manager, &term_name);
             project.manager.borrow_mut().spawn(&term_name);
             if let Some(ref term) = terminal {
                 Self::connect_window_title_auto_rename(
-                    term, &project.manager, &term_name, sidebar, &qname, ws, &project_name,
+                    term,
+                    &project.manager,
+                    &term_name,
+                    sidebar,
+                    &qname,
+                    ws,
+                    &project_name,
                 );
             }
         }
@@ -1580,7 +1887,12 @@ impl TuxFlowWindow {
         sidebar.select_process(&names[new_idx]);
     }
 
-    fn switch_project_relative(ws: &WorkspaceRef, stack: &gtk4::Stack, sidebar: &Rc<ProjectList>, delta: i32) {
+    fn switch_project_relative(
+        ws: &WorkspaceRef,
+        stack: &gtk4::Stack,
+        sidebar: &Rc<ProjectList>,
+        delta: i32,
+    ) {
         // Extract target project info, then drop the workspace borrow
         // before calling sidebar.expand_project (which needs ws.borrow_mut)
         let (target_name, target_qname) = {
@@ -1604,9 +1916,10 @@ impl TuxFlowWindow {
             match projects.get(new_idx) {
                 Some(project) => {
                     let mgr = project.manager.borrow();
-                    let qname = mgr.process_names().first().map(|first_name| {
-                        workspace::qualified_name(&project.name, first_name)
-                    });
+                    let qname = mgr
+                        .process_names()
+                        .first()
+                        .map(|first_name| workspace::qualified_name(&project.name, first_name));
                     (project.name.clone(), qname)
                 }
                 None => return,
@@ -1637,9 +1950,10 @@ impl TuxFlowWindow {
                 if let Some(font) = terminal.font() {
                     let current_size = font.size() / gtk4::pango::SCALE;
                     let new_size = (current_size + delta).max(6).min(48);
-                    let new_desc = gtk4::pango::FontDescription::from_string(
-                        &format!("{} {new_size}", font.family().unwrap_or("Monospace".into())),
-                    );
+                    let new_desc = gtk4::pango::FontDescription::from_string(&format!(
+                        "{} {new_size}",
+                        font.family().unwrap_or("Monospace".into())
+                    ));
                     terminal.set_font(Some(&new_desc));
                 }
             }
@@ -1679,9 +1993,7 @@ impl TuxFlowWindow {
         project_dir: &str,
         ws: &WorkspaceRef,
     ) {
-        use crate::mcp::bridge::{
-            self, McpCommand, ProcessSnapshot, MCP_PROCESS_STATE,
-        };
+        use crate::mcp::bridge::{self, MCP_PROCESS_STATE, McpCommand, ProcessSnapshot};
 
         // Populate initial process state
         {
@@ -1785,19 +2097,11 @@ impl TuxFlowWindow {
                 let row = terminal.cursor_position().1 as i64;
                 let cols = terminal.column_count() as i64;
                 let start_row = (row - max_lines as i64).max(0);
-                let (text_opt, _) = terminal.text_range_format(
-                    vte4::Format::Text,
-                    start_row, 0,
-                    row, cols,
-                );
-                let text = text_opt
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
+                let (text_opt, _) =
+                    terminal.text_range_format(vte4::Format::Text, start_row, 0, row, cols);
+                let text = text_opt.map(|t| t.to_string()).unwrap_or_default();
                 // Filter out blank lines and take last N
-                let lines: Vec<&str> = text
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .collect();
+                let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
                 let start = lines.len().saturating_sub(max_lines);
                 let result = lines[start..].join("\n");
                 return CommandResult::Ok(result);

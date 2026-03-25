@@ -112,7 +112,8 @@ impl CommandPalette {
 
         let items = Rc::new(RefCell::new(Vec::new()));
         let on_action: Rc<RefCell<Option<Box<dyn Fn(&str)>>>> = Rc::new(RefCell::new(None));
-        let on_refresh: Rc<RefCell<Option<Box<dyn Fn(&CommandPalette)>>>> = Rc::new(RefCell::new(None));
+        let on_refresh: Rc<RefCell<Option<Box<dyn Fn(&CommandPalette)>>>> =
+            Rc::new(RefCell::new(None));
 
         // Filter on search
         let items_ref = items.clone();
@@ -339,12 +340,7 @@ impl CommandPalette {
 
     pub fn set_items(&self, new_items: Vec<PaletteItem>) {
         *self.items.borrow_mut() = new_items;
-        Self::populate_results(
-            &self.results_box,
-            &self.items.borrow(),
-            "",
-            &self.on_action,
-        );
+        Self::populate_results(&self.results_box, &self.items.borrow(), "", &self.on_action);
     }
 
     pub fn set_on_action(&self, cb: impl Fn(&str) + 'static) {
@@ -357,7 +353,9 @@ impl CommandPalette {
 
     fn refresh(&self) {
         // Remove existing navigation items
-        self.items.borrow_mut().retain(|item| item.category != "NAVIGATION");
+        self.items
+            .borrow_mut()
+            .retain(|item| item.category != "NAVIGATION");
         // Let the callback re-add current ones
         if let Some(ref cb) = *self.on_refresh.borrow() {
             cb(self);
@@ -455,12 +453,7 @@ impl CommandPalette {
             self.refresh();
             self.entry.set_text("");
             self.entry.grab_focus();
-            Self::populate_results(
-                &self.results_box,
-                &self.items.borrow(),
-                "",
-                &self.on_action,
-            );
+            Self::populate_results(&self.results_box, &self.items.borrow(), "", &self.on_action);
         }
     }
 

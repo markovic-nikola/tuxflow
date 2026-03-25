@@ -4,6 +4,8 @@ A Linux-native dev environment manager. Manage dev servers, AI coding agents, an
 
 Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 
+> **Note:** TuxFlow is in early development. Expect rough edges, missing features, and breaking changes.
+
 ## Features
 
 - **Process management** — Start, stop, restart dev servers and background tasks from one place
@@ -33,6 +35,37 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - VTE4 (vte-2.91-gtk4)
 
 ## Installation
+
+### Debian/Ubuntu (.deb)
+
+Download the latest `.deb` from [GitHub Releases](https://github.com/markovic-nikola/tuxflow/releases):
+
+```bash
+sudo dpkg -i tuxflow_*_amd64.deb
+sudo apt-get install -f  # install any missing dependencies
+```
+
+### Binary tarball
+
+Download the latest `.tar.gz` from [GitHub Releases](https://github.com/markovic-nikola/tuxflow/releases):
+
+```bash
+tar xzf tuxflow-*-x86_64-linux.tar.gz
+cd tuxflow-*-x86_64-linux
+./install.sh              # installs to /usr/local (requires sudo)
+./install.sh --user       # installs to ~/.local (no sudo)
+./install.sh --uninstall  # remove installed files
+```
+
+### AUR (Arch Linux)
+
+```bash
+yay -S tuxflow
+```
+
+### Flatpak
+
+Coming soon on [Flathub](https://flathub.org).
 
 ### Build from source
 

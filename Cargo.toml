@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "A Linux-native dev environment manager"
+authors = ["Nikola Markovic"]
+repository = "https://github.com/markovic-nikola/tuxflow"
+homepage = "https://markovic-nikola.github.io/tuxflow/"
+readme = "README.md"
 default-run = "tuxflow"
 
 [lib]
@@ -40,3 +44,47 @@ anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[package.metadata.deb]
+maintainer = "Nikola Markovic <markovic-nikola@users.noreply.github.com>"
+copyright = "2026, TuxFlow Contributors"
+depends = "$auto, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0"
+section = "devel"
+priority = "optional"
+assets = [
+	[
+		"target/release/tuxflow",
+		"usr/bin/",
+		"755",
+	],
+	[
+		"target/release/tuxflow-mcp",
+		"usr/bin/",
+		"755",
+	],
+	[
+		"data/com.tuxflow.TuxFlow.desktop",
+		"usr/share/applications/",
+		"644",
+	],
+	[
+		"data/com.tuxflow.TuxFlow.metainfo.xml",
+		"usr/share/metainfo/",
+		"644",
+	],
+	[
+		"data/icons/com.tuxflow.TuxFlow.svg",
+		"usr/share/icons/hicolor/scalable/apps/",
+		"644",
+	],
+	[
+		"README.md",
+		"usr/share/doc/tuxflow/",
+		"644",
+	],
+]
+extended-description = """\
+TuxFlow lets developers manage their entire dev environment from one window — \
+start/stop/restart dev servers, run multiple AI coding agents side by side, \
+monitor process status and resource usage, and expose an MCP server so AI agents \
+can observe and control neighboring processes."""

@@ -27,8 +27,18 @@
     </ul>
   </description>
   <launchable type="desktop-id">com.tuxflow.TuxFlow.desktop</launchable>
-  <url type="homepage">https://github.com/tuxflow/tuxflow</url>
-  <url type="bugtracker">https://github.com/tuxflow/tuxflow/issues</url>
+  <url type="homepage">https://markovic-nikola.github.io/tuxflow/</url>
+  <url type="bugtracker">https://github.com/markovic-nikola/tuxflow/issues</url>
+  <url type="vcs-browser">https://github.com/markovic-nikola/tuxflow</url>
+  <developer id="com.github.markovic-nikola">
+    <name>Nikola Markovic</name>
+  </developer>
+  <screenshots>
+    <screenshot type="default">
+      <caption>TuxFlow managing multiple development processes</caption>
+      <image>https://raw.githubusercontent.com/markovic-nikola/tuxflow/main/docs/hero.png</image>
+    </screenshot>
+  </screenshots>
   <content_rating type="oars-1.1" />
   <requires>
     <display_length compare="ge">800</display_length>
@@ -37,4 +47,11 @@
     <color type="primary" scheme_preference="dark">#1a1a2e</color>
     <color type="primary" scheme_preference="light">#e8e8f0</color>
   </branding>
+  <releases>
+    <release version="0.1.0" date="2026-03-25">
+      <description>
+        <p>Initial release of TuxFlow.</p>
+      </description>
+    </release>
+  </releases>
 </component>

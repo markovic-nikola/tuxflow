@@ -1077,8 +1077,7 @@ mcp-servers:
             .activatable(true)
             .build();
         source_row.connect_activated(|row| {
-            let launcher =
-                gtk4::UriLauncher::new("https://github.com/markovic-nikola/tuxflow");
+            let launcher = gtk4::UriLauncher::new("https://github.com/markovic-nikola/tuxflow");
             let window = row.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
             launcher.launch(window.as_ref(), gtk4::gio::Cancellable::NONE, |_| {});
         });

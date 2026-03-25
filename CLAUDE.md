@@ -102,6 +102,10 @@ packaging/
 - **Global settings:** `~/.config/tuxflow/settings.toml` (appearance, keybindings, notifications)
 - **Project state:** `~/.config/tuxflow/projects.toml` (open directories, custom commands, process order, UI state)
 
+## Formatting
+
+Always run `cargo fmt --all` after changing Rust code, before committing.
+
 ## TODO
 
 - **Split terminal view** — Currently `gtk4::Stack` (one at a time). Would need `gtk4::Paned` for side-by-side

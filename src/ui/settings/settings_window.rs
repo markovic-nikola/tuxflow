@@ -1073,8 +1073,15 @@ mcp-servers:
 
         let source_row = adw::ActionRow::builder()
             .title("Source Code")
-            .subtitle("github.com/your-user/tuxflow")
+            .subtitle("github.com/markovic-nikola/tuxflow")
+            .activatable(true)
             .build();
+        source_row.connect_activated(|row| {
+            let launcher =
+                gtk4::UriLauncher::new("https://github.com/markovic-nikola/tuxflow");
+            let window = row.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            launcher.launch(window.as_ref(), gtk4::gio::Cancellable::NONE, |_| {});
+        });
         group.add(&source_row);
 
         page.add(&group);

@@ -1016,6 +1016,18 @@ impl TuxFlowWindow {
             let refresh = refresh_counts.clone();
             move || refresh()
         });
+        sidebar.set_on_project_renamed({
+            let last_proj = last_selected_project.clone();
+            let refresh = refresh_counts.clone();
+            move |old_name, new_name| {
+                let mut lp = last_proj.borrow_mut();
+                if lp.as_deref() == Some(old_name) {
+                    *lp = Some(new_name.to_string());
+                }
+                drop(lp);
+                refresh();
+            }
+        });
         // Initial status bar refresh
         refresh_counts();
 

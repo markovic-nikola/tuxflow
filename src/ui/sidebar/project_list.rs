@@ -40,6 +40,7 @@ pub struct ProjectList {
     on_process_selected: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     on_process_deleted: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     on_counts_changed: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_project_renamed: Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>,
     workspace: Rc<RefCell<Option<WorkspaceRef>>>,
     window: Rc<RefCell<Option<libadwaita::ApplicationWindow>>>,
     single_expand: Rc<Cell<bool>>,
@@ -125,6 +126,7 @@ impl ProjectList {
             on_process_selected: Rc::new(RefCell::new(None)),
             on_process_deleted: Rc::new(RefCell::new(None)),
             on_counts_changed: Rc::new(RefCell::new(None)),
+            on_project_renamed: Rc::new(RefCell::new(None)),
             workspace: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
             single_expand,
@@ -164,6 +166,10 @@ impl ProjectList {
 
     pub fn set_on_counts_changed(&self, cb: impl Fn() + 'static) {
         *self.on_counts_changed.borrow_mut() = Some(Box::new(cb));
+    }
+
+    pub fn set_on_project_renamed(&self, cb: impl Fn(&str, &str) + 'static) {
+        *self.on_project_renamed.borrow_mut() = Some(Box::new(cb));
     }
 
     /// Add a single project to the sidebar (appends, doesn't clear)
@@ -332,6 +338,7 @@ impl ProjectList {
         let win_ref = self.window.clone();
         let container_ref = self.container.clone();
         let project_rows_ref = self.project_rows.clone();
+        let on_renamed = self.on_project_renamed.clone();
 
         project_row.set_on_context_action(move |action| {
             match action {
@@ -389,6 +396,7 @@ impl ProjectList {
                         let pname_for_closure = pname.clone();
                         let project_rows_edit = project_rows_ref.clone();
                         let container_edit = container_ref.clone();
+                        let on_renamed_cb = on_renamed.clone();
 
                         EditProjectDialog::show(
                             &win,
@@ -407,17 +415,24 @@ impl ProjectList {
                                 } else {
                                     let mut ws_mut = ws_edit.borrow_mut();
                                     ws_mut.set_project_icon(&pname_for_closure, result.icon_path.clone());
-                                    if result.name != pname_for_closure {
+                                    let renamed = result.name != pname_for_closure;
+                                    if renamed {
                                         ws_mut.rename_project(&pname_for_closure, &result.name);
                                     }
                                     drop(ws_mut);
 
                                     let rows = project_rows_edit.borrow();
                                     if let Some(row) = rows.get(&pname_for_closure) {
-                                        if result.name != pname_for_closure {
+                                        if renamed {
                                             row.set_name(&result.name);
                                         }
                                         row.set_icon(result.icon_path.as_deref());
+                                    }
+
+                                    if renamed {
+                                        if let Some(ref cb) = *on_renamed_cb.borrow() {
+                                            cb(&pname_for_closure, &result.name);
+                                        }
                                     }
                                 }
                             },

@@ -63,10 +63,6 @@ cd tuxflow-*-x86_64-linux
 yay -S tuxflow
 ```
 
-### Flatpak
-
-Coming soon on [Flathub](https://flathub.org).
-
 ### Build from source
 
 ```bash

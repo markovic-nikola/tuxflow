@@ -82,7 +82,6 @@ data/
   com.tuxflow.TuxFlow.desktop
   com.tuxflow.TuxFlow.metainfo.xml
 packaging/
-  flatpak/com.tuxflow.TuxFlow.yml
   appimage/AppImageBuilder.yml
   aur/PKGBUILD
 ```

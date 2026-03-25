@@ -1195,6 +1195,14 @@ impl TuxFlowWindow {
                 _ if action.starts_with("switch:") => {
                     let qname = &action[7..];
                     stack_ref.set_visible_child_name(qname);
+                    *sel_ref.borrow_mut() = Some(qname.to_string());
+                    sidebar_ref.select_process(qname);
+                    if let Some((proj, _)) = qname.split_once("::") {
+                        *last_proj_ref.borrow_mut() = Some(proj.to_string());
+                        sidebar_ref.set_active_project(proj);
+                    }
+                    let url = sidebar_ref.get_process_url(qname);
+                    sb_ref.set_url(url.as_deref());
                 }
                 _ => log::warn!("Unknown palette action: {action}"),
             }

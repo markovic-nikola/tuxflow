@@ -44,7 +44,9 @@ modules:
       - install -Dm755 target/release/tuxflow-mcp /app/bin/tuxflow-mcp
       - install -Dm644 data/com.tuxflow.TuxFlow.desktop /app/share/applications/com.tuxflow.TuxFlow.desktop
       - install -Dm644 data/com.tuxflow.TuxFlow.metainfo.xml /app/share/metainfo/com.tuxflow.TuxFlow.metainfo.xml
-      - install -Dm644 data/icons/com.tuxflow.TuxFlow.svg /app/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg
+      - install -Dm644 data/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg /app/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg
+      - install -Dm644 data/icons/hicolor/scalable/apps/tuxflow-logo-symbolic.svg /app/share/icons/hicolor/scalable/apps/tuxflow-logo-symbolic.svg
+      - install -Dm644 data/icons/hicolor/scalable/actions/ai-brain-symbolic.svg /app/share/icons/hicolor/scalable/actions/ai-brain-symbolic.svg
     sources:
       - type: git
         url: https://github.com/markovic-nikola/tuxflow.git

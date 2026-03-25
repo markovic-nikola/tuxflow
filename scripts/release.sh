@@ -13,15 +13,21 @@ echo "Current version: $CURRENT"
 echo "New version:     $NEW_VERSION"
 echo ""
 
-# Check for clean working tree
-if ! git diff --quiet || ! git diff --cached --quiet; then
-    echo "Error: Working tree is dirty. Commit or stash changes first."
+# Check for staged changes
+if ! git diff --cached --quiet; then
+    echo "Error: Staged changes found. Commit or unstage them first."
     exit 1
 fi
 
 # Run checks before releasing
 echo "Running checks..."
-cargo fmt --all -- --check || { echo "Error: formatting issues. Run 'cargo fmt' first."; exit 1; }
+cargo fmt --all
+# Auto-commit formatting changes if any
+if ! git diff --quiet; then
+    git add -A
+    git commit -m "cargo fmt"
+    echo "  Auto-committed formatting fixes"
+fi
 cargo clippy --all-targets -- -W clippy::all 2>&1 | grep -q "^error" && { echo "Error: clippy errors found."; exit 1; }
 cargo test --all || { echo "Error: tests failed."; exit 1; }
 echo "  All checks passed."

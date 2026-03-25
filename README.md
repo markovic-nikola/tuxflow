@@ -1,4 +1,8 @@
-# TuxFlow
+<p align="center">
+  <img src="data/icons/com.tuxflow.TuxFlow.svg" alt="TuxFlow" width="128">
+</p>
+
+<h1 align="center">TuxFlow</h1>
 
 A Linux-native dev environment manager. Manage dev servers, AI coding agents, and terminals from a single window.
 

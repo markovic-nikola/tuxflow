@@ -146,6 +146,11 @@
     min-height: 32px;
 }
 
+.update-label {
+    color: #cca700;
+    font-weight: 600;
+}
+
 /* Section header */
 .caption-heading {
     font-weight: 700;

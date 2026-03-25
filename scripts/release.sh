@@ -23,6 +23,14 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
     exit 1
 fi
 
+# Run checks before releasing
+echo "Running checks..."
+cargo fmt --all -- --check || { echo "Error: formatting issues. Run 'cargo fmt' first."; exit 1; }
+cargo clippy --all-targets -- -W clippy::all 2>&1 | grep -q "^error" && { echo "Error: clippy errors found."; exit 1; }
+cargo test --all || { echo "Error: tests failed."; exit 1; }
+echo "  All checks passed."
+echo ""
+
 TODAY=$(date +%Y-%m-%d)
 
 echo "Releasing v$NEW_VERSION..."
@@ -38,7 +46,7 @@ echo "  Updated packaging/aur/PKGBUILD"
 
 # 3. AppImage (if exists)
 if [ -f packaging/appimage/AppImageBuilder.yml ]; then
-    sed -i "s/version: .*/version: $NEW_VERSION/" packaging/appimage/AppImageBuilder.yml
+    sed -i "/app_info:/,/exec:/ s/version: .*/version: $NEW_VERSION/" packaging/appimage/AppImageBuilder.yml
     echo "  Updated packaging/appimage/AppImageBuilder.yml"
 fi
 
@@ -57,12 +65,17 @@ git commit -m "release v$NEW_VERSION"
 git tag "v$NEW_VERSION"
 echo ""
 
-read -rp "Push to origin and trigger release build? [Y/n] " confirm
+read -rp "Push to origin and trigger release build? [Y/n] " confirm < /dev/tty
 if [[ "${confirm:-Y}" =~ ^[Yy]$ ]]; then
     git push && git push --tags
     echo ""
+    COMMIT_HASH=$(git rev-parse HEAD)
     echo "Done! Release workflow will build and publish artifacts."
     echo "Watch progress at: https://github.com/markovic-nikola/tuxflow/actions"
+    echo ""
+    echo "Flathub: update commit hash in com.tuxflow.TuxFlow.yml to:"
+    echo "  commit: $COMMIT_HASH"
+    echo "Then regenerate cargo-sources.json and push to the Flathub repo."
 else
     echo ""
     echo "Committed and tagged locally. Push when ready:"

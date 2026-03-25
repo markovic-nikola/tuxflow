@@ -5,6 +5,7 @@ use gtk4::prelude::*;
 
 pub struct StatusBar {
     container: gtk4::Box,
+    update_btn: gtk4::Button,
     process_label: gtk4::Label,
     separator_label: gtk4::Label,
     global_label: gtk4::Label,
@@ -29,6 +30,7 @@ impl StatusBar {
         container.set_margin_end(8);
         container.set_margin_top(4);
         container.set_margin_bottom(4);
+        container.set_valign(gtk4::Align::Center);
 
         // Left side: resource info + process info
         let info_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
@@ -67,6 +69,14 @@ impl StatusBar {
             .visible(false)
             .build();
         info_box.append(&global_label);
+
+        // Update available button (hidden by default)
+        let update_btn = gtk4::Button::builder()
+            .label("Update available")
+            .css_classes(["flat", "caption", "update-label"])
+            .visible(false)
+            .build();
+        info_box.append(&update_btn);
 
         let status_label = gtk4::Label::builder()
             .label("")
@@ -132,6 +142,7 @@ impl StatusBar {
 
         Self {
             container,
+            update_btn,
             process_label,
             separator_label,
             global_label,
@@ -237,6 +248,21 @@ impl StatusBar {
                 self.browser_btn.set_visible(false);
             }
         }
+    }
+
+    pub fn show_update(&self, version: &str, url: &str) {
+        self.update_btn
+            .set_label(&format!("Update available: v{version}"));
+        self.update_btn
+            .set_tooltip_text(Some("Click to download the latest version"));
+        self.update_btn.set_visible(true);
+
+        let release_url = url.to_string();
+        self.update_btn.connect_clicked(move |btn| {
+            let launcher = gtk4::UriLauncher::new(&release_url);
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            launcher.launch(window.as_ref(), gtk4::gio::Cancellable::NONE, |_| {});
+        });
     }
 
     pub fn widget(&self) -> &gtk4::Box {

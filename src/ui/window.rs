@@ -76,6 +76,24 @@ impl TuxFlowWindow {
         let last_selected_project: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let status_bar = Rc::new(StatusBar::new());
 
+        // Check for updates in background
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                if let Some(update) = crate::util::update_checker::check_for_update() {
+                    let _ = tx.send(update);
+                }
+            });
+            let status_bar_ref = status_bar.clone();
+            glib::idle_add_local(move || {
+                if let Ok(update) = rx.try_recv() {
+                    status_bar_ref.show_update(&update.latest_version, &update.release_url);
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
         // Load saved projects
         {
             let saved_dirs = ws.borrow().saved_directories();

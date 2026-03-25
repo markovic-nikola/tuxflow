@@ -1,4 +1,4 @@
-version: 1
+version: 0.1.3
 script:
   - cargo build --release
   - mkdir -p AppDir/usr/bin
@@ -17,7 +17,7 @@ AppDir:
     id: com.tuxflow.TuxFlow
     name: TuxFlow
     icon: com.tuxflow.TuxFlow
-    version: latest
+    version: 0.1.3
     exec: usr/bin/tuxflow
     exec_args: $@
 

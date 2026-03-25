@@ -29,6 +29,7 @@ AppDir:
     arch: amd64
     sources:
       - sourceline: deb http://archive.ubuntu.com/ubuntu noble main universe
+        key: ubuntu-noble.gpg
     include:
       - libgtk-4-1
       - libadwaita-1-0

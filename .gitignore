@@ -6,6 +6,3 @@
 .idea/
 .vscode/
 .claude/
-*.AppImage
-AppDir/
-squashfs-root/

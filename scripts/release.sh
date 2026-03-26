@@ -42,25 +42,15 @@ echo ""
 sed -i "0,/^version = \".*\"/s//version = \"$NEW_VERSION\"/" Cargo.toml
 echo "  Updated Cargo.toml"
 
-# 2. AUR PKGBUILD
-sed -i "s/^pkgver=.*/pkgver=$NEW_VERSION/" packaging/aur/PKGBUILD
-echo "  Updated packaging/aur/PKGBUILD"
-
-# 3. AppImage (if exists)
-if [ -f packaging/appimage/AppImageBuilder.yml ]; then
-    sed -i "/app_info:/,/exec:/ s/version: .*/version: $NEW_VERSION/" packaging/appimage/AppImageBuilder.yml
-    echo "  Updated packaging/appimage/AppImageBuilder.yml"
-fi
-
-# 4. Metainfo — insert new release entry after <releases>
+# 2. Metainfo — insert new release entry after <releases>
 sed -i "/<releases>/a\\    <release version=\"$NEW_VERSION\" date=\"$TODAY\">\n      <description>\n        <p>Release $NEW_VERSION.</p>\n      </description>\n    </release>" data/com.tuxflow.TuxFlow.metainfo.xml
 echo "  Updated data/com.tuxflow.TuxFlow.metainfo.xml"
 
-# 5. Update Cargo.lock
+# 3. Update Cargo.lock
 cargo generate-lockfile 2>/dev/null || true
 echo "  Updated Cargo.lock"
 
-# 6. Commit, tag, push
+# 4. Commit, tag, push
 echo ""
 git add -A
 git commit -m "release v$NEW_VERSION"

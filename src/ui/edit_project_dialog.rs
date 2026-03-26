@@ -313,51 +313,60 @@ impl EditProjectDialog {
             *store_ref.borrow_mut() = None;
         });
 
-        // Remove button
-        let remove_btn = gtk4::Button::builder()
-            .label("Remove Project")
-            .css_classes(["destructive-action", "pill"])
+        // Action buttons
+        let btn_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(8)
             .margin_top(24)
             .halign(gtk4::Align::Center)
             .build();
-        content.append(&remove_btn);
+
+        let save_btn = gtk4::Button::builder()
+            .label("Save")
+            .css_classes(["suggested-action", "pill"])
+            .width_request(200)
+            .build();
+
+        let remove_btn = gtk4::Button::builder()
+            .label("Remove Project")
+            .css_classes(["destructive-action", "pill"])
+            .build();
+
+        btn_box.append(&save_btn);
+        btn_box.append(&remove_btn);
+        content.append(&btn_box);
 
         toolbar_view.set_content(Some(&content));
         dialog.set_child(Some(&toolbar_view));
 
-        // Track whether remove was clicked (skip the on-close save in that case)
-        let removed = Rc::new(RefCell::new(false));
-
-        // Wire remove — fires immediately, then closes
-        let dialog_ref = dialog.clone();
         let on_save = Rc::new(on_save);
+
+        // Wire save button
+        let dialog_ref = dialog.clone();
         let on_save_ref = on_save.clone();
-        let removed_ref = removed.clone();
-        remove_btn.connect_clicked(move |_| {
-            *removed_ref.borrow_mut() = true;
+        let store_ref = icon_path_store.clone();
+        save_btn.connect_clicked(move |_| {
+            let name = name_row.text().to_string();
+            if name.is_empty() {
+                return;
+            }
             on_save_ref(EditProjectResult {
+                name,
+                icon_path: store_ref.borrow().clone(),
+                remove: false,
+            });
+            dialog_ref.close();
+        });
+
+        // Wire remove button
+        let dialog_ref = dialog.clone();
+        remove_btn.connect_clicked(move |_| {
+            on_save(EditProjectResult {
                 name: String::new(),
                 icon_path: None,
                 remove: true,
             });
             dialog_ref.close();
-        });
-
-        // Apply name/icon changes when dialog closes
-        let store_ref = icon_path_store.clone();
-        dialog.connect_closed(move |_| {
-            if *removed.borrow() {
-                return;
-            }
-            let name = name_row.text().to_string();
-            if name.is_empty() {
-                return;
-            }
-            on_save(EditProjectResult {
-                name,
-                icon_path: store_ref.borrow().clone(),
-                remove: false,
-            });
         });
 
         dialog.present(Some(parent));

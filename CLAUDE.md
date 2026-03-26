@@ -81,9 +81,6 @@ data/
   icons/                   # SVG icons + hicolor hierarchy
   com.tuxflow.TuxFlow.desktop
   com.tuxflow.TuxFlow.metainfo.xml
-packaging/
-  appimage/AppImageBuilder.yml
-  aur/PKGBUILD
 ```
 
 ## Architecture Notes

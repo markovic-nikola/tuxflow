@@ -61,12 +61,6 @@ cd tuxflow-*-x86_64-linux
 ./install.sh --uninstall  # remove installed files
 ```
 
-### AUR (Arch Linux)
-
-```bash
-yay -S tuxflow
-```
-
 ### Build from source
 
 ```bash

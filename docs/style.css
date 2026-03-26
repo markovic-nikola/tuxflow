@@ -455,7 +455,7 @@ pre {
 
 /* Line numbers effect */
 pre::before {
-  content: '1\A2\A3\A4\A5';
+  content: '1\A 2\A 3\A 4\A 5';
   white-space: pre;
   color: var(--text-dim);
   font-family: var(--font-mono);

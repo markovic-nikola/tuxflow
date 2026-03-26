@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use crate::config::loader;
 use crate::config::projects::SavedProjects;
-use crate::detect::detector;
+use crate::config::schema::ProcessConfig;
+use crate::detect::detector::{self, DetectedStack};
 use crate::process::auto_restart;
 use crate::process::manager::{ProcessManager, ProcessManagerRef};
 use crate::util::icon_detector;
@@ -16,6 +17,15 @@ pub struct Project {
     pub manager: ProcessManagerRef,
     pub icon_path: Option<String>,
     pub _file_watcher: Option<FileWatcher>,
+}
+
+pub struct PreparedProject {
+    pub name: String,
+    pub dir: PathBuf,
+    pub dir_string: String,
+    pub manager: ProcessManagerRef,
+    pub stacks: Vec<DetectedStack>,
+    pub config_loaded: bool,
 }
 
 pub type WorkspaceRef = Rc<RefCell<Workspace>>;
@@ -37,8 +47,9 @@ impl Workspace {
         self.saved.directories.clone()
     }
 
-    pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
-        // Avoid duplicates
+    /// Prepare a project for loading: detect stacks but don't add detected processes yet.
+    /// Returns None if the project is already loaded.
+    pub fn prepare_project(&mut self, dir: &Path) -> Option<PreparedProject> {
         let dir_str = dir.to_string_lossy().to_string();
         if self
             .projects
@@ -57,16 +68,16 @@ impl Workspace {
 
         let dir_string = dir.to_string_lossy().to_string();
 
-        // Use saved custom name if available
         if let Some(custom_name) = self.saved.get_name(&dir_string) {
             project_name = custom_name.clone();
         }
 
-        // Try loading tuxflow.toml
+        let mut config_loaded = false;
+        let mut stacks = Vec::new();
+
         if let Some(config_path) = loader::find_config(dir) {
             match loader::load_config(&config_path) {
                 Ok(config) => {
-                    // Only use config name if no custom name override
                     if self.saved.get_name(&dir_string).is_none() {
                         project_name = config.project.name.clone();
                     }
@@ -77,31 +88,58 @@ impl Workspace {
                         }
                         mgr.add_process(proc_config);
                     }
+                    config_loaded = true;
                     log::info!("Loaded config from {}", config_path.display());
                 }
                 Err(e) => log::error!("Failed to load config: {e}"),
             }
         } else {
-            // Auto-detect
             log::info!(
                 "No tuxflow.toml, running stack detection in {}",
                 dir.display()
             );
-            let stacks = detector::detect_stacks(dir);
-            let mut mgr = manager.borrow_mut();
+            stacks = detector::detect_stacks(dir);
             for stack in &stacks {
                 log::info!(
                     "Detected stack: {} ({} commands)",
                     stack.name,
                     stack.suggested_processes.len()
                 );
-                for proc_config in &stack.suggested_processes {
-                    let mut pc = proc_config.clone();
-                    if pc.working_dir.is_none() {
-                        pc.working_dir = Some(dir_string.clone());
-                    }
-                    mgr.add_process(pc);
+            }
+        }
+
+        Some(PreparedProject {
+            name: project_name,
+            dir: dir.to_path_buf(),
+            dir_string,
+            manager,
+            stacks,
+            config_loaded,
+        })
+    }
+
+    /// Finalize a prepared project by adding selected processes and completing setup.
+    pub fn finalize_project(
+        &mut self,
+        prepared: PreparedProject,
+        selected_processes: Vec<ProcessConfig>,
+    ) -> Option<&Project> {
+        let PreparedProject {
+            name: project_name,
+            dir,
+            dir_string,
+            manager,
+            ..
+        } = prepared;
+
+        // Add the selected detected processes
+        {
+            let mut mgr = manager.borrow_mut();
+            for mut pc in selected_processes {
+                if pc.working_dir.is_none() {
+                    pc.working_dir = Some(dir_string.clone());
                 }
+                mgr.add_process(pc);
             }
         }
 
@@ -143,7 +181,7 @@ impl Workspace {
         }
 
         let icon_path = self.saved.get_icon(&dir_string).cloned().or_else(|| {
-            let detected = icon_detector::detect_icon(dir);
+            let detected = icon_detector::detect_icon(&dir);
             if let Some(ref path) = detected {
                 log::info!("Auto-detected project icon: {path}");
                 self.saved.set_icon(&dir_string, Some(path.clone()));
@@ -152,11 +190,11 @@ impl Workspace {
         });
 
         // Start file watcher for restart_when_changed patterns
-        let file_watcher = FileWatcher::new(dir, &manager);
+        let file_watcher = FileWatcher::new(&dir, &manager);
 
         let project = Project {
             name: project_name,
-            dir: dir.to_path_buf(),
+            dir,
             manager,
             icon_path,
             _file_watcher: file_watcher,
@@ -166,6 +204,17 @@ impl Workspace {
 
         self.projects.push(project);
         self.projects.last()
+    }
+
+    /// Convenience: prepare + finalize with all detected processes (used for startup/CLI loading).
+    pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
+        let prepared = self.prepare_project(dir)?;
+        let all_processes: Vec<ProcessConfig> = prepared
+            .stacks
+            .iter()
+            .flat_map(|s| s.suggested_processes.clone())
+            .collect();
+        self.finalize_project(prepared, all_processes)
     }
 
     pub fn projects(&self) -> &[Project] {

@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::config::schema::{ProcessCategory, ProcessConfig};
 
+#[derive(Clone)]
 pub struct DetectedStack {
     pub name: String,
     pub suggested_processes: Vec<ProcessConfig>,
@@ -53,6 +54,11 @@ const RULES: &[StackRule] = &[
         marker_file: "docker-compose.yaml",
         name: "Docker Compose",
         detect: detect_docker,
+    },
+    StackRule {
+        marker_file: "Makefile",
+        name: "Make",
+        detect: detect_makefile,
     },
 ];
 
@@ -185,6 +191,47 @@ fn detect_ruby(dir: &Path, _content: &str) -> Vec<ProcessConfig> {
     } else {
         vec![make_process("bundle exec", "bundle exec ruby app.rb", true)]
     }
+}
+
+fn detect_makefile(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
+    let mut procs = Vec::new();
+
+    for line in content.lines() {
+        // Match target lines like "target:" or "target: deps" but skip
+        // variable assignments (VAR = ...), comments, recipe lines (tabs),
+        // and special/pattern targets (containing %, $, /)
+        if let Some(target) = line.split(':').next() {
+            let target = target.trim();
+            if target.is_empty()
+                || line.starts_with('\t')
+                || line.starts_with('#')
+                || line.starts_with('.')
+                || line.starts_with(' ')
+                || target.contains('=')
+                || target.contains('%')
+                || target.contains('$')
+                || target.contains('/')
+            {
+                continue;
+            }
+            // Skip if the ":" is part of an assignment (e.g. "VAR := value")
+            let after_target = &line[target.len()..];
+            if after_target.starts_with(":=") || after_target.starts_with("::=") {
+                continue;
+            }
+            // Only alphanumeric, hyphens, underscores in target names
+            if target
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                let cmd = format!("make {target}");
+                let auto_start = false;
+                procs.push(make_process(&cmd, &cmd, auto_start));
+            }
+        }
+    }
+
+    procs
 }
 
 fn detect_docker(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {

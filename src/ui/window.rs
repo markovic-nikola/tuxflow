@@ -503,159 +503,270 @@ impl TuxFlowWindow {
             let project_name = project.name.clone();
             let manager = project.manager.clone();
             let icon_path = project.icon_path.clone();
+            let saved_expanded = ws_mut.is_project_expanded(&project_name);
+            drop(ws_mut);
+            Self::wire_project(
+                &project_name,
+                &manager,
+                icon_path.as_deref(),
+                saved_expanded,
+                ws,
+                sidebar,
+                terminal_stack,
+                pid_file,
+                status_bar,
+                selected_process,
+            );
+        }
+    }
 
-            // Add terminals to the stack with qualified names
-            {
-                let mgr = manager.borrow();
-                for name in mgr.process_names() {
-                    if let Some(proc) = mgr.get_process(name) {
-                        let qname = workspace::qualified_name(&project_name, name);
-                        terminal_stack.add_named(&proc.terminal, Some(&qname));
+    fn load_project_interactive(
+        parent: &impl IsA<gtk4::Widget>,
+        ws: &WorkspaceRef,
+        sidebar: &Rc<ProjectList>,
+        terminal_stack: &gtk4::Stack,
+        dir: &Path,
+        pid_file: &Rc<RefCell<PidFile>>,
+        status_bar: &Rc<StatusBar>,
+        selected_process: &Rc<RefCell<Option<String>>>,
+    ) {
+        let prepared = {
+            let mut ws_mut = ws.borrow_mut();
+            ws_mut.prepare_project(dir)
+        };
+        let Some(prepared) = prepared else { return };
+
+        let total_detected: usize = prepared
+            .stacks
+            .iter()
+            .map(|s| s.suggested_processes.len())
+            .sum();
+
+        if prepared.config_loaded || total_detected <= 5 {
+            // No dialog needed — add all detected processes directly
+            let all_processes: Vec<crate::config::schema::ProcessConfig> = prepared
+                .stacks
+                .iter()
+                .flat_map(|s| s.suggested_processes.clone())
+                .collect();
+            let mut ws_mut = ws.borrow_mut();
+            if let Some(project) = ws_mut.finalize_project(prepared, all_processes) {
+                let project_name = project.name.clone();
+                let manager = project.manager.clone();
+                let icon_path = project.icon_path.clone();
+                let saved_expanded = ws_mut.is_project_expanded(&project_name);
+                drop(ws_mut);
+                Self::wire_project(
+                    &project_name,
+                    &manager,
+                    icon_path.as_deref(),
+                    saved_expanded,
+                    ws,
+                    sidebar,
+                    terminal_stack,
+                    pid_file,
+                    status_bar,
+                    selected_process,
+                );
+            }
+        } else {
+            // Show selection dialog
+            let project_name = prepared.name.clone();
+            let stacks_for_dialog = prepared.stacks.clone();
+            let ws = ws.clone();
+            let sidebar = sidebar.clone();
+            let terminal_stack = terminal_stack.clone();
+            let pid_file = pid_file.clone();
+            let status_bar = status_bar.clone();
+            let selected_process = selected_process.clone();
+
+            crate::ui::select_commands_dialog::SelectCommandsDialog::show(
+                parent,
+                &project_name,
+                &stacks_for_dialog,
+                move |selected| {
+                    let mut ws_mut = ws.borrow_mut();
+                    if let Some(project) = ws_mut.finalize_project(prepared, selected) {
+                        let project_name = project.name.clone();
+                        let manager = project.manager.clone();
+                        let icon_path = project.icon_path.clone();
+                        let saved_expanded = ws_mut.is_project_expanded(&project_name);
+                        drop(ws_mut);
+                        Self::wire_project(
+                            &project_name,
+                            &manager,
+                            icon_path.as_deref(),
+                            saved_expanded,
+                            &ws,
+                            &sidebar,
+                            &terminal_stack,
+                            &pid_file,
+                            &status_bar,
+                            &selected_process,
+                        );
                     }
+                },
+            );
+        }
+    }
+
+    fn wire_project(
+        project_name: &str,
+        manager: &ProcessManagerRef,
+        icon_path: Option<&str>,
+        saved_expanded: Option<bool>,
+        ws: &WorkspaceRef,
+        sidebar: &Rc<ProjectList>,
+        terminal_stack: &gtk4::Stack,
+        pid_file: &Rc<RefCell<PidFile>>,
+        status_bar: &Rc<StatusBar>,
+        selected_process: &Rc<RefCell<Option<String>>>,
+    ) {
+        // Add terminals to the stack with qualified names
+        {
+            let mgr = manager.borrow();
+            for name in mgr.process_names() {
+                if let Some(proc) = mgr.get_process(name) {
+                    let qname = workspace::qualified_name(project_name, name);
+                    terminal_stack.add_named(&proc.terminal, Some(&qname));
                 }
             }
+        }
 
-            // Wire status change → sidebar update + MCP state sync
-            {
-                let sidebar_ref = sidebar.clone();
-                let pname = project_name.clone();
-                let mcp_state = crate::mcp::bridge::MCP_PROCESS_STATE.clone();
-                let mut mgr = manager.borrow_mut();
-                mgr.set_on_status_change(move |process_name, status| {
-                    let qname = workspace::qualified_name(&pname, process_name);
-                    sidebar_ref.update_process_status(&qname, status);
+        // Wire status change → sidebar update + MCP state sync
+        {
+            let sidebar_ref = sidebar.clone();
+            let pname = project_name.to_string();
+            let mcp_state = crate::mcp::bridge::MCP_PROCESS_STATE.clone();
+            let mut mgr = manager.borrow_mut();
+            mgr.set_on_status_change(move |process_name, status| {
+                let qname = workspace::qualified_name(&pname, process_name);
+                sidebar_ref.update_process_status(&qname, status);
 
-                    // Update MCP shared state
-                    if let Ok(mut state) = mcp_state.lock()
-                        && let Some(snapshot) = state.get_mut(process_name)
-                    {
-                        snapshot.status = format!("{:?}", status);
-                    }
-                });
+                // Update MCP shared state
+                if let Ok(mut state) = mcp_state.lock()
+                    && let Some(snapshot) = state.get_mut(process_name)
+                {
+                    snapshot.status = format!("{:?}", status);
+                }
+            });
 
-                let pf = pid_file.clone();
-                mgr.set_on_pid_change(move |pid, acquired| {
-                    let mut pf = pf.borrow_mut();
-                    if acquired {
-                        pf.add(pid);
-                    } else {
-                        pf.remove(pid);
-                    }
-                });
-            }
+            let pf = pid_file.clone();
+            mgr.set_on_pid_change(move |pid, acquired| {
+                let mut pf = pf.borrow_mut();
+                if acquired {
+                    pf.add(pid);
+                } else {
+                    pf.remove(pid);
+                }
+            });
+        }
 
-            // Wire port detection + MCP log capture on terminal output
-            {
-                let detector = Rc::new(RefCell::new(PortDetector::new()));
-                let mgr = manager.borrow();
-                for name in mgr.process_names() {
-                    if let Some(proc) = mgr.get_process(name) {
-                        let detector_ref = detector.clone();
-                        let sidebar_ref = sidebar.clone();
-                        let sb_ref = status_bar.clone();
-                        let sel_ref = selected_process.clone();
-                        let proc_name = name.to_string();
-                        let qname = workspace::qualified_name(&project_name, name);
-                        let skip_port_detection = matches!(
-                            proc.config.category,
-                            crate::config::schema::ProcessCategory::Agent
-                                | crate::config::schema::ProcessCategory::SSH
-                        );
+        // Wire port detection + MCP log capture on terminal output
+        {
+            let detector = Rc::new(RefCell::new(PortDetector::new()));
+            let mgr = manager.borrow();
+            for name in mgr.process_names() {
+                if let Some(proc) = mgr.get_process(name) {
+                    let detector_ref = detector.clone();
+                    let sidebar_ref = sidebar.clone();
+                    let sb_ref = status_bar.clone();
+                    let sel_ref = selected_process.clone();
+                    let proc_name = name.to_string();
+                    let qname = workspace::qualified_name(project_name, name);
+                    let skip_port_detection = matches!(
+                        proc.config.category,
+                        crate::config::schema::ProcessCategory::Agent
+                            | crate::config::schema::ProcessCategory::SSH
+                    );
 
-                        // MCP log capture state
-                        let log_buffers = crate::mcp::bridge::MCP_LOG_BUFFERS.clone();
-                        let log_proc_name = proc_name.clone();
-                        let last_row: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+                    // MCP log capture state
+                    let log_buffers = crate::mcp::bridge::MCP_LOG_BUFFERS.clone();
+                    let log_proc_name = proc_name.clone();
+                    let last_row: Rc<Cell<i64>> = Rc::new(Cell::new(0));
 
-                        proc.terminal.connect_contents_changed(move |terminal| {
-                            let row = terminal.cursor_position().1;
+                    proc.terminal.connect_contents_changed(move |terminal| {
+                        let row = terminal.cursor_position().1;
 
-                            // Capture new output lines into MCP log buffer
-                            {
-                                let prev_row = last_row.get();
-                                if row > prev_row {
-                                    let cols = terminal.column_count();
-                                    let (text_opt, _) = terminal.text_range_format(
-                                        vte4::Format::Text,
-                                        prev_row,
-                                        0,
-                                        row,
-                                        cols,
-                                    );
-                                    if let Some(text) = text_opt
-                                        && let Ok(mut buffers) = log_buffers.lock()
-                                    {
-                                        let buffer = buffers
-                                            .entry(log_proc_name.clone())
-                                            .or_insert_with(crate::mcp::bridge::LogBuffer::new);
-                                        for line in text.lines() {
-                                            if !line.trim().is_empty() {
-                                                buffer.push(line.to_string());
-                                            }
-                                        }
-                                    }
-                                    last_row.set(row);
-                                }
-                            }
-
-                            // Port detection — skip for agents, skip when not running
-                            if !skip_port_detection && sidebar_ref.is_process_running(&qname) {
-                                let start_row = (row - 5).max(0);
+                        // Capture new output lines into MCP log buffer
+                        {
+                            let prev_row = last_row.get();
+                            if row > prev_row {
                                 let cols = terminal.column_count();
-                                let (text_opt, _len) = terminal.text_range_format(
+                                let (text_opt, _) = terminal.text_range_format(
                                     vte4::Format::Text,
-                                    start_row,
+                                    prev_row,
                                     0,
                                     row,
                                     cols,
                                 );
-                                if let Some(text) = text_opt {
-                                    let mut det = detector_ref.borrow_mut();
-                                    det.scan_output(&proc_name, &text);
-                                    if let Some(port) = det.get_port(&proc_name) {
-                                        sidebar_ref.set_process_port(&qname, Some(port));
-                                    }
-                                    let url = det.get_url(&proc_name).map(|u| u.to_string());
-                                    if let Some(ref url_str) = url {
-                                        sidebar_ref.set_process_url(&qname, Some(url_str));
-                                        if sel_ref.borrow().as_deref() == Some(qname.as_str()) {
-                                            sb_ref.set_url(Some(url_str));
+                                if let Some(text) = text_opt
+                                    && let Ok(mut buffers) = log_buffers.lock()
+                                {
+                                    let buffer = buffers
+                                        .entry(log_proc_name.clone())
+                                        .or_insert_with(crate::mcp::bridge::LogBuffer::new);
+                                    for line in text.lines() {
+                                        if !line.trim().is_empty() {
+                                            buffer.push(line.to_string());
                                         }
                                     }
                                 }
+                                last_row.set(row);
                             }
-                        });
-                    }
+                        }
+
+                        // Port detection — skip for agents, skip when not running
+                        if !skip_port_detection && sidebar_ref.is_process_running(&qname) {
+                            let start_row = (row - 5).max(0);
+                            let cols = terminal.column_count();
+                            let (text_opt, _len) = terminal.text_range_format(
+                                vte4::Format::Text,
+                                start_row,
+                                0,
+                                row,
+                                cols,
+                            );
+                            if let Some(text) = text_opt {
+                                let mut det = detector_ref.borrow_mut();
+                                det.scan_output(&proc_name, &text);
+                                if let Some(port) = det.get_port(&proc_name) {
+                                    sidebar_ref.set_process_port(&qname, Some(port));
+                                }
+                                let url = det.get_url(&proc_name).map(|u| u.to_string());
+                                if let Some(ref url_str) = url {
+                                    sidebar_ref.set_process_url(&qname, Some(url_str));
+                                    if sel_ref.borrow().as_deref() == Some(qname.as_str()) {
+                                        sb_ref.set_url(Some(url_str));
+                                    }
+                                }
+                            }
+                        }
+                    });
                 }
             }
+        }
 
-            // Populate sidebar
-            let saved_expanded = ws_mut.is_project_expanded(&project_name);
-            sidebar.add_project(
-                &manager,
-                &project_name,
-                icon_path.as_deref(),
-                saved_expanded,
-            );
+        // Populate sidebar
+        sidebar.add_project(manager, project_name, icon_path, saved_expanded);
 
-            // Wire auto-rename for auto_named processes on startup
-            {
-                let mgr = manager.borrow();
-                for name in mgr.process_names() {
-                    if let Some(proc) = mgr.get_process(name)
-                        && proc.config.auto_named
-                    {
-                        let qname = workspace::qualified_name(&project_name, name);
-                        Self::connect_window_title_auto_rename(
-                            &proc.terminal,
-                            &manager,
-                            name,
-                            sidebar,
-                            &qname,
-                            ws,
-                            &project_name,
-                        );
-                    }
+        // Wire auto-rename for auto_named processes on startup
+        {
+            let mgr = manager.borrow();
+            for name in mgr.process_names() {
+                if let Some(proc) = mgr.get_process(name)
+                    && proc.config.auto_named
+                {
+                    let qname = workspace::qualified_name(project_name, name);
+                    Self::connect_window_title_auto_rename(
+                        &proc.terminal,
+                        manager,
+                        name,
+                        sidebar,
+                        &qname,
+                        ws,
+                        project_name,
+                    );
                 }
             }
         }
@@ -747,11 +858,14 @@ impl TuxFlowWindow {
                     let dialog = gtk4::FileDialog::builder()
                         .title("Open Project Directory")
                         .build();
+                    let win2 = win.clone();
                     dialog.select_folder(Some(&win), gtk4::gio::Cancellable::NONE, move |result| {
                         if let Ok(file) = result
                             && let Some(path) = file.path()
                         {
-                            Self::load_project(&ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2);
+                            Self::load_project_interactive(
+                                &win2, &ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2,
+                            );
                         }
                     });
                 }

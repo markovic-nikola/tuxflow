@@ -139,6 +139,12 @@ impl SavedProjects {
         }
     }
 
+    pub fn has_deleted_processes(&self, dir: &str) -> bool {
+        self.deleted_processes
+            .get(dir)
+            .is_some_and(|list| !list.is_empty())
+    }
+
     pub fn is_process_deleted(&self, dir: &str, process_name: &str) -> bool {
         self.deleted_processes
             .get(dir)

@@ -572,7 +572,13 @@ impl TuxFlowWindow {
         } else {
             // Show selection dialog
             let project_name = prepared.name.clone();
+            let dir_string = prepared.dir_string.clone();
             let stacks_for_dialog = prepared.stacks.clone();
+            let all_detected_names: Vec<String> = prepared
+                .stacks
+                .iter()
+                .flat_map(|s| s.suggested_processes.iter().map(|p| p.name.clone()))
+                .collect();
             let ws = ws.clone();
             let sidebar = sidebar.clone();
             let terminal_stack = terminal_stack.clone();
@@ -585,7 +591,15 @@ impl TuxFlowWindow {
                 &project_name,
                 &stacks_for_dialog,
                 move |selected| {
+                    // Mark deselected processes as deleted so they stay hidden on restart
+                    let selected_names: std::collections::HashSet<&str> =
+                        selected.iter().map(|p| p.name.as_str()).collect();
                     let mut ws_mut = ws.borrow_mut();
+                    for name in &all_detected_names {
+                        if !selected_names.contains(name.as_str()) {
+                            ws_mut.mark_process_deleted_by_dir(&dir_string, name);
+                        }
+                    }
                     if let Some(project) = ws_mut.finalize_project(prepared, selected) {
                         let project_name = project.name.clone();
                         let manager = project.manager.clone();

@@ -46,7 +46,7 @@ impl SelectCommandsDialog {
             "{total} commands detected for \"{project_name}\". Select which to add:"
         )));
         desc.add_css_class("dim-label");
-        desc.set_margin_bottom(12);
+        desc.set_margin_bottom(4);
         desc.set_wrap(true);
         content.append(&desc);
 
@@ -54,32 +54,12 @@ impl SelectCommandsDialog {
         let switches: Rc<RefCell<Vec<(adw::SwitchRow, ProcessConfig)>>> =
             Rc::new(RefCell::new(Vec::with_capacity(total)));
 
-        // Per-stack sections
-        for stack in stacks {
-            let group = adw::PreferencesGroup::builder()
-                .title(&stack.name)
-                .margin_top(8)
-                .build();
-
-            for proc_config in &stack.suggested_processes {
-                let row = adw::SwitchRow::builder()
-                    .title(&proc_config.name)
-                    .subtitle(&proc_config.command)
-                    .active(true)
-                    .build();
-                group.add(&row);
-                switches.borrow_mut().push((row, proc_config.clone()));
-            }
-
-            content.append(&group);
-        }
-
-        // Select All / Deselect All
+        // Select All / Deselect All — placed above the list for visibility
         let btn_row = gtk4::Box::builder()
             .orientation(gtk4::Orientation::Horizontal)
             .halign(gtk4::Align::Center)
             .spacing(8)
-            .margin_top(16)
+            .margin_bottom(4)
             .build();
 
         let select_all_btn = gtk4::Button::builder()
@@ -117,10 +97,30 @@ impl SelectCommandsDialog {
         let confirm_btn = gtk4::Button::builder()
             .label(&format!("Add {total} Commands"))
             .css_classes(["suggested-action", "pill"])
-            .margin_top(24)
+            .margin_bottom(8)
             .halign(gtk4::Align::Center)
             .build();
         content.append(&confirm_btn);
+
+        // Per-stack sections
+        for stack in stacks {
+            let group = adw::PreferencesGroup::builder()
+                .title(&stack.name)
+                .margin_top(8)
+                .build();
+
+            for proc_config in &stack.suggested_processes {
+                let row = adw::SwitchRow::builder()
+                    .title(&proc_config.name)
+                    .subtitle(&proc_config.command)
+                    .active(true)
+                    .build();
+                group.add(&row);
+                switches.borrow_mut().push((row, proc_config.clone()));
+            }
+
+            content.append(&group);
+        }
 
         // Update button label when switches toggle
         {
@@ -143,9 +143,7 @@ impl SelectCommandsDialog {
         dialog.set_child(Some(&toolbar_view));
 
         let dialog_ref = dialog.clone();
-        // Wrap FnOnce in Cell<Option<>> so it can be called from an Fn closure
         let on_confirm = Cell::new(Some(on_confirm));
-
         confirm_btn.connect_clicked(move |_| {
             let selected: Vec<ProcessConfig> = switches
                 .borrow()

@@ -206,15 +206,38 @@ impl Workspace {
         self.projects.last()
     }
 
-    /// Convenience: prepare + finalize with all detected processes (used for startup/CLI loading).
+    /// Convenience: prepare + finalize with detected processes (used for startup/CLI loading).
+    /// If total detected processes exceed the threshold, no config file exists, and the user
+    /// hasn't previously curated a selection, exclude Makefile targets to keep startup fast.
+    /// Projects with saved deleted_processes have been curated — include all stacks and let
+    /// finalize_project filter via the deleted list.
     pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
         let prepared = self.prepare_project(dir)?;
-        let all_processes: Vec<ProcessConfig> = prepared
+        let dir_string = dir.to_string_lossy().to_string();
+        let has_saved_state = self.saved.get_process_order(&dir_string).is_some()
+            || self.saved.has_deleted_processes(&dir_string);
+        let total: usize = prepared
             .stacks
             .iter()
-            .flat_map(|s| s.suggested_processes.clone())
-            .collect();
-        self.finalize_project(prepared, all_processes)
+            .map(|s| s.suggested_processes.len())
+            .sum();
+        let processes: Vec<ProcessConfig> =
+            if prepared.config_loaded || has_saved_state || total <= 5 {
+                prepared
+                    .stacks
+                    .iter()
+                    .flat_map(|s| s.suggested_processes.clone())
+                    .collect()
+            } else {
+                // Too many auto-detected processes on a fresh project — exclude Makefile targets
+                prepared
+                    .stacks
+                    .iter()
+                    .filter(|s| s.name != "Make")
+                    .flat_map(|s| s.suggested_processes.clone())
+                    .collect()
+            };
+        self.finalize_project(prepared, processes)
     }
 
     pub fn projects(&self) -> &[Project] {
@@ -325,6 +348,10 @@ impl Workspace {
             // Mark as deleted so auto-detected ones don't reappear
             self.saved.add_deleted_process(&dir_str, process_name);
         }
+    }
+
+    pub fn mark_process_deleted_by_dir(&mut self, dir: &str, process_name: &str) {
+        self.saved.add_deleted_process(dir, process_name);
     }
 
     pub fn reorder_project(&mut self, project_name: &str, target_name: &str, before: bool) {

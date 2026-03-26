@@ -117,14 +117,17 @@ impl ManagedProcess {
     }
 
     fn setup_url_matching(terminal: &vte4::Terminal) {
+        // PCRE2_MULTILINE is required by VTE for match_add_regex
+        const PCRE2_MULTILINE: u32 = 0x00000400;
+
         // Match HTTP/HTTPS URLs
         let url_pattern = "https?://[^\\s<>'\"]+";
-        if let Ok(regex) = vte4::Regex::for_match(url_pattern, 0) {
+        if let Ok(regex) = vte4::Regex::for_match(url_pattern, PCRE2_MULTILINE) {
             terminal.match_add_regex(&regex, 0);
         }
         // Match localhost:port
         let localhost_pattern = "localhost:\\d+";
-        if let Ok(regex) = vte4::Regex::for_match(localhost_pattern, 0) {
+        if let Ok(regex) = vte4::Regex::for_match(localhost_pattern, PCRE2_MULTILINE) {
             terminal.match_add_regex(&regex, 0);
         }
     }

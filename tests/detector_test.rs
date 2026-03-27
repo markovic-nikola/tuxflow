@@ -232,6 +232,112 @@ fn detect_multiple_stacks() {
 }
 
 #[test]
+fn detect_makefile_targets() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Makefile"),
+        "build:\n\tcargo build\n\ntest:\n\tcargo test\n\nclean:\n\trm -rf target\n",
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    assert_eq!(stacks.len(), 1);
+    assert_eq!(stacks[0].name, "Make");
+
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(names.contains(&"make build"));
+    assert!(names.contains(&"make test"));
+    assert!(names.contains(&"make clean"));
+}
+
+#[test]
+fn detect_makefile_skips_variables() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Makefile"),
+        "\
+APP_NAME := my-app\n\
+SSH_HOST = example.com\n\
+VERSION ?= 1.0\n\
+CFLAGS += -Wall\n\
+RELEASE ::= $(shell date)\n\
+\n\
+deploy:\n\
+\t@echo deploying\n\
+\n\
+build:\n\
+\tcargo build\n",
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+
+    // Should detect targets
+    assert!(names.contains(&"make deploy"));
+    assert!(names.contains(&"make build"));
+
+    // Should NOT detect variables
+    assert!(
+        !names.contains(&"make APP_NAME"),
+        "should skip := assignments"
+    );
+    assert!(
+        !names.contains(&"make SSH_HOST"),
+        "should skip = assignments"
+    );
+    assert!(
+        !names.contains(&"make VERSION"),
+        "should skip ?= assignments"
+    );
+    assert!(
+        !names.contains(&"make CFLAGS"),
+        "should skip += assignments"
+    );
+    assert!(
+        !names.contains(&"make RELEASE"),
+        "should skip ::= assignments"
+    );
+}
+
+#[test]
+fn detect_makefile_skips_special_targets() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Makefile"),
+        "\
+.PHONY: all clean\n\
+.DEFAULT_GOAL := all\n\
+\n\
+all:\n\
+\t@echo all\n\
+\n\
+# This is a comment\n\
+\trecipe-line-not-a-target:\n",
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+
+    assert!(names.contains(&"make all"));
+    assert!(!names.iter().any(|n| n.contains("PHONY")));
+    assert!(!names.iter().any(|n| n.contains("DEFAULT_GOAL")));
+}
+
+#[test]
 fn detect_empty_directory() {
     let dir = TempDir::new().unwrap();
     let stacks = detect_stacks(dir.path());

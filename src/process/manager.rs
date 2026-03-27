@@ -21,24 +21,55 @@ pub enum ProcessStatus {
 pub struct ManagedProcess {
     pub id: String,
     pub config: ProcessConfig,
-    pub terminal: vte4::Terminal,
+    pub terminal: Option<vte4::Terminal>,
     pub status: ProcessStatus,
     pub pid: Option<i32>,
     pub pid_cell: Option<Rc<RefCell<Option<i32>>>>,
     pub restart_count: u32,
     pub started_at: Option<Instant>,
+    /// Called once when the terminal is first created (lazy materialization).
+    /// The callback receives the new terminal and should connect signals,
+    /// swap the placeholder in the GTK Stack, etc.
+    pub on_materialized: Option<Box<dyn Fn(&vte4::Terminal)>>,
 }
 
 impl ManagedProcess {
     fn new(config: ProcessConfig) -> Self {
+        let id = config.name.clone();
+        Self {
+            id,
+            config,
+            terminal: None,
+            status: ProcessStatus::Stopped,
+            pid: None,
+            pid_cell: None,
+            restart_count: 0,
+            started_at: None,
+            on_materialized: None,
+        }
+    }
+
+    /// Lazily create the VTE terminal if it doesn't exist yet.
+    /// Fires the `on_materialized` callback on first creation.
+    pub fn ensure_terminal(&mut self, settings: &AppSettings) -> &vte4::Terminal {
+        if self.terminal.is_none() {
+            let terminal = Self::create_terminal(&self.config, settings);
+            if let Some(cb) = self.on_materialized.take() {
+                cb(&terminal);
+            }
+            self.terminal = Some(terminal);
+        }
+        self.terminal.as_ref().unwrap()
+    }
+
+    fn create_terminal(config: &ProcessConfig, settings: &AppSettings) -> vte4::Terminal {
         let terminal = vte4::Terminal::new();
         terminal.set_scroll_on_output(false);
         terminal.set_scroll_on_keystroke(true);
         terminal.set_vexpand(true);
         terminal.set_hexpand(true);
 
-        let settings = AppSettings::load();
-        Self::apply_settings_to_terminal(&terminal, &settings);
+        Self::apply_settings_to_terminal(&terminal, settings);
 
         crate::ui::terminal_theme::apply(&terminal, &settings.appearance.terminal_theme);
 
@@ -76,21 +107,10 @@ impl ManagedProcess {
         });
         terminal.add_controller(gesture);
 
-        let id = config.name.clone();
-
-        Self {
-            id,
-            config,
-            terminal,
-            status: ProcessStatus::Stopped,
-            pid: None,
-            pid_cell: None,
-            restart_count: 0,
-            started_at: None,
-        }
+        terminal
     }
 
-    fn apply_settings_to_terminal(terminal: &vte4::Terminal, settings: &AppSettings) {
+    pub fn apply_settings_to_terminal(terminal: &vte4::Terminal, settings: &AppSettings) {
         use gtk4::pango;
         let font_str = format!(
             "{} {}",
@@ -140,6 +160,7 @@ pub struct ProcessManager {
     order: Vec<String>,
     on_status_change: Option<Box<dyn Fn(&str, ProcessStatus)>>,
     on_pid_change: Option<Rc<dyn Fn(i32, bool)>>,
+    settings: AppSettings,
 }
 
 impl ProcessManager {
@@ -149,7 +170,12 @@ impl ProcessManager {
             order: Vec::new(),
             on_status_change: None,
             on_pid_change: None,
+            settings: AppSettings::load(),
         }))
+    }
+
+    pub fn settings(&self) -> &AppSettings {
+        &self.settings
     }
 
     pub fn set_on_status_change(&mut self, cb: impl Fn(&str, ProcessStatus) + 'static) {
@@ -168,7 +194,23 @@ impl ProcessManager {
         self.processes.insert(name, proc);
     }
 
+    /// Eagerly create the terminal for a process (used for dynamically added processes
+    /// that need to be visible immediately).
+    pub fn materialize_process(&mut self, name: &str) {
+        if let Some(proc) = self.processes.get_mut(name) {
+            proc.ensure_terminal(&self.settings);
+        }
+    }
+
     pub fn spawn(&mut self, name: &str) {
+        // Ensure terminal exists before spawning
+        {
+            let settings = self.settings.clone();
+            if let Some(proc) = self.processes.get_mut(name) {
+                proc.ensure_terminal(&settings);
+            }
+        }
+
         let Some(proc) = self.processes.get_mut(name) else {
             log::warn!("Process not found: {name}");
             return;
@@ -179,8 +221,10 @@ impl ProcessManager {
             return;
         }
 
+        let terminal = proc.terminal.as_ref().unwrap();
+
         // Reset terminal to ensure a clean PTY (needed after crash/exit)
-        proc.terminal.reset(true, true);
+        terminal.reset(true, true);
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let command = &proc.config.command;
@@ -207,7 +251,7 @@ impl ProcessManager {
         let pid_cell_ref = pid_cell.clone();
         let pid_cb = self.on_pid_change.clone();
 
-        proc.terminal.spawn_async(
+        terminal.spawn_async(
             vte4::PtyFlags::DEFAULT,
             working_dir.as_deref(),
             &argv,
@@ -267,7 +311,9 @@ impl ProcessManager {
             });
         }
 
-        proc.terminal.reset(true, true);
+        if let Some(ref terminal) = proc.terminal {
+            terminal.reset(true, true);
+        }
         proc.status = ProcessStatus::Stopped;
         proc.pid = None;
         proc.pid_cell = None;
@@ -298,15 +344,21 @@ impl ProcessManager {
         }
     }
 
-    pub fn apply_terminal_theme(&self, theme_name: &str) {
+    pub fn apply_terminal_theme(&mut self, theme_name: &str) {
+        self.settings.appearance.terminal_theme = theme_name.to_string();
         for proc in self.processes.values() {
-            crate::ui::terminal_theme::apply(&proc.terminal, theme_name);
+            if let Some(ref terminal) = proc.terminal {
+                crate::ui::terminal_theme::apply(terminal, theme_name);
+            }
         }
     }
 
-    pub fn apply_font_settings(&self, settings: &AppSettings) {
+    pub fn apply_font_settings(&mut self, settings: &AppSettings) {
+        self.settings = settings.clone();
         for proc in self.processes.values() {
-            ManagedProcess::apply_settings_to_terminal(&proc.terminal, settings);
+            if let Some(ref terminal) = proc.terminal {
+                ManagedProcess::apply_settings_to_terminal(terminal, settings);
+            }
         }
     }
 

@@ -134,6 +134,18 @@ impl TuxFlowWindow {
         let last_proj_ref = last_selected_project.clone();
         let ws_select = ws.clone();
         sidebar.set_on_process_selected(move |qname| {
+            // Materialize the VTE terminal lazily on first selection.
+            // Use try_borrow to avoid panic when this fires during a manager borrow_mut
+            // (e.g. spawn triggers status change which triggers sidebar selection).
+            if let Some((proj, proc_name)) = qname.split_once("::") {
+                let ws_borrow = ws_select.borrow();
+                if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == proj) {
+                    if let Ok(mut mgr) = project.manager.try_borrow_mut() {
+                        mgr.materialize_process(proc_name);
+                    }
+                }
+                drop(ws_borrow);
+            }
             stack_ref.set_visible_child_name(qname);
             *selected_ref.borrow_mut() = Some(qname.to_string());
             if let Some((proj, _)) = qname.split_once("::") {
@@ -204,7 +216,10 @@ impl TuxFlowWindow {
         let on_terminal_theme_changed: Rc<dyn Fn(&str)> = Rc::new(move |theme_name: &str| {
             let ws_borrow = ws_for_theme.borrow();
             for project in ws_borrow.projects() {
-                project.manager.borrow().apply_terminal_theme(theme_name);
+                project
+                    .manager
+                    .borrow_mut()
+                    .apply_terminal_theme(theme_name);
             }
         });
 
@@ -214,7 +229,7 @@ impl TuxFlowWindow {
             let settings = AppSettings::load();
             let ws_borrow = ws_for_font.borrow();
             for project in ws_borrow.projects() {
-                project.manager.borrow().apply_font_settings(&settings);
+                project.manager.borrow_mut().apply_font_settings(&settings);
             }
         });
 
@@ -354,6 +369,23 @@ impl TuxFlowWindow {
             name.to_string()
         };
         Some(truncated)
+    }
+
+    /// Connect auto-restart handler to a dynamically added process's terminal.
+    fn setup_auto_restart_for_process(manager: &ProcessManagerRef, name: &str) {
+        let auto_restart = manager
+            .borrow()
+            .get_process(name)
+            .map(|p| p.config.auto_restart)
+            .unwrap_or(false);
+        let handler =
+            crate::process::auto_restart::build_auto_restart_handler(manager, name, auto_restart);
+        let mgr = manager.borrow();
+        if let Some(proc) = mgr.get_process(name)
+            && let Some(ref terminal) = proc.terminal
+        {
+            handler(terminal);
+        }
     }
 
     /// Connect a VTE terminal's `window-title` property to auto-rename
@@ -636,14 +668,16 @@ impl TuxFlowWindow {
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
     ) {
-        // Add terminals to the stack with qualified names
+        // Add placeholders to the stack (real terminals are created lazily)
+        let detector = Rc::new(RefCell::new(PortDetector::new()));
         {
             let mgr = manager.borrow();
             for name in mgr.process_names() {
-                if let Some(proc) = mgr.get_process(name) {
-                    let qname = workspace::qualified_name(project_name, name);
-                    terminal_stack.add_named(&proc.terminal, Some(&qname));
-                }
+                let qname = workspace::qualified_name(project_name, name);
+                let placeholder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                placeholder.set_vexpand(true);
+                placeholder.set_hexpand(true);
+                terminal_stack.add_named(&placeholder, Some(&qname));
             }
         }
 
@@ -676,30 +710,69 @@ impl TuxFlowWindow {
             });
         }
 
-        // Wire port detection + MCP log capture on terminal output
+        // Build per-process on_materialized callbacks (deferred signal connections)
         {
-            let detector = Rc::new(RefCell::new(PortDetector::new()));
-            let mgr = manager.borrow();
-            for name in mgr.process_names() {
-                if let Some(proc) = mgr.get_process(name) {
-                    let detector_ref = detector.clone();
-                    let sidebar_ref = sidebar.clone();
-                    let sb_ref = status_bar.clone();
-                    let sel_ref = selected_process.clone();
-                    let proc_name = name.to_string();
-                    let qname = workspace::qualified_name(project_name, name);
-                    let skip_port_detection = matches!(
-                        proc.config.category,
-                        crate::config::schema::ProcessCategory::Agent
-                            | crate::config::schema::ProcessCategory::SSH
-                    );
+            let mut mgr = manager.borrow_mut();
+            let names: Vec<String> = mgr.process_names().to_vec();
+            for name in &names {
+                let Some(proc) = mgr.get_process(name) else {
+                    continue;
+                };
+                let skip_port_detection = matches!(
+                    proc.config.category,
+                    crate::config::schema::ProcessCategory::Agent
+                        | crate::config::schema::ProcessCategory::SSH
+                );
+                let is_auto_named = proc.config.auto_named;
+                let auto_restart_cfg = proc.config.auto_restart;
 
-                    // MCP log capture state
+                // Build the auto-restart handler
+                let auto_restart_handler = crate::process::auto_restart::build_auto_restart_handler(
+                    manager,
+                    name,
+                    auto_restart_cfg,
+                );
+
+                // Capture refs for the on_materialized closure
+                let detector_ref = detector.clone();
+                let sidebar_ref = sidebar.clone();
+                let sb_ref = status_bar.clone();
+                let sel_ref = selected_process.clone();
+                let proc_name = name.to_string();
+                let qname = workspace::qualified_name(project_name, name);
+                let stack_ref = terminal_stack.clone();
+                let mgr_ref = manager.clone();
+                let ws_ref = ws.clone();
+                let sidebar_rename = sidebar.clone();
+                let proj_name = project_name.to_string();
+                let proc_name_rename = name.to_string();
+                let qname_rename = qname.clone();
+
+                let Some(proc) = mgr.get_process_mut(name) else {
+                    continue;
+                };
+                proc.on_materialized = Some(Box::new(move |terminal: &vte4::Terminal| {
+                    // Replace placeholder in stack with real terminal
+                    if let Some(old_child) = stack_ref.child_by_name(&qname) {
+                        stack_ref.remove(&old_child);
+                    }
+                    stack_ref.add_named(terminal, Some(&qname));
+
+                    // Connect auto-restart handler
+                    auto_restart_handler(terminal);
+
+                    // Connect port detection + MCP log capture
                     let log_buffers = crate::mcp::bridge::MCP_LOG_BUFFERS.clone();
                     let log_proc_name = proc_name.clone();
                     let last_row: Rc<Cell<i64>> = Rc::new(Cell::new(0));
+                    let detector_ref = detector_ref.clone();
+                    let sidebar_ref = sidebar_ref.clone();
+                    let sb_ref = sb_ref.clone();
+                    let sel_ref = sel_ref.clone();
+                    let proc_name = proc_name.clone();
+                    let qname_contents = qname.clone();
 
-                    proc.terminal.connect_contents_changed(move |terminal| {
+                    terminal.connect_contents_changed(move |terminal| {
                         let row = terminal.cursor_position().1;
 
                         // Capture new output lines into MCP log buffer
@@ -731,7 +804,7 @@ impl TuxFlowWindow {
                         }
 
                         // Port detection — skip for agents, skip when not running
-                        if !skip_port_detection && sidebar_ref.is_process_running(&qname) {
+                        if !skip_port_detection && sidebar_ref.is_process_running(&qname_contents) {
                             let start_row = (row - 5).max(0);
                             let cols = terminal.column_count();
                             let (text_opt, _len) = terminal.text_range_format(
@@ -745,45 +818,38 @@ impl TuxFlowWindow {
                                 let mut det = detector_ref.borrow_mut();
                                 det.scan_output(&proc_name, &text);
                                 if let Some(port) = det.get_port(&proc_name) {
-                                    sidebar_ref.set_process_port(&qname, Some(port));
+                                    sidebar_ref.set_process_port(&qname_contents, Some(port));
                                 }
                                 let url = det.get_url(&proc_name).map(|u| u.to_string());
                                 if let Some(ref url_str) = url {
-                                    sidebar_ref.set_process_url(&qname, Some(url_str));
-                                    if sel_ref.borrow().as_deref() == Some(qname.as_str()) {
+                                    sidebar_ref.set_process_url(&qname_contents, Some(url_str));
+                                    if sel_ref.borrow().as_deref() == Some(qname_contents.as_str())
+                                    {
                                         sb_ref.set_url(Some(url_str));
                                     }
                                 }
                             }
                         }
                     });
-                }
+
+                    // Wire auto-rename for auto_named processes
+                    if is_auto_named {
+                        Self::connect_window_title_auto_rename(
+                            terminal,
+                            &mgr_ref,
+                            &proc_name_rename,
+                            &sidebar_rename,
+                            &qname_rename,
+                            &ws_ref,
+                            &proj_name,
+                        );
+                    }
+                }));
             }
         }
 
         // Populate sidebar
         sidebar.add_project(manager, project_name, icon_path, saved_expanded);
-
-        // Wire auto-rename for auto_named processes on startup
-        {
-            let mgr = manager.borrow();
-            for name in mgr.process_names() {
-                if let Some(proc) = mgr.get_process(name)
-                    && proc.config.auto_named
-                {
-                    let qname = workspace::qualified_name(project_name, name);
-                    Self::connect_window_title_auto_rename(
-                        &proc.terminal,
-                        manager,
-                        name,
-                        sidebar,
-                        &qname,
-                        ws,
-                        project_name,
-                    );
-                }
-            }
-        }
     }
 
     fn load_css() {
@@ -928,7 +994,9 @@ impl TuxFlowWindow {
                                 let qname = workspace::qualified_name(&project_name, &name);
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
-                                let terminal = mgr.get_process(&name).map(|p| p.terminal.clone());
+                                mgr.materialize_process(&name);
+                                let terminal =
+                                    mgr.get_process(&name).and_then(|p| p.terminal.clone());
                                 if let Some(ref term) = terminal {
                                     stack2.add_named(term, Some(&qname));
                                 }
@@ -940,10 +1008,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::Agent,
                                 );
-                                crate::process::auto_restart::setup_auto_restart(
-                                    &project.manager,
-                                    &name,
-                                );
+                                Self::setup_auto_restart_for_process(&project.manager, &name);
                                 project.manager.borrow_mut().spawn(&name);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
@@ -1006,7 +1071,9 @@ impl TuxFlowWindow {
                                 let qname = workspace::qualified_name(&project_name, &name);
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
-                                let terminal = mgr.get_process(&name).map(|p| p.terminal.clone());
+                                mgr.materialize_process(&name);
+                                let terminal =
+                                    mgr.get_process(&name).and_then(|p| p.terminal.clone());
                                 if let Some(ref term) = terminal {
                                     stack2.add_named(term, Some(&qname));
                                 }
@@ -1018,10 +1085,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::SSH,
                                 );
-                                crate::process::auto_restart::setup_auto_restart(
-                                    &project.manager,
-                                    &name,
-                                );
+                                Self::setup_auto_restart_for_process(&project.manager, &name);
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
                                 }
@@ -1088,9 +1152,12 @@ impl TuxFlowWindow {
                                 let project_name = project.name.clone();
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
+                                mgr.materialize_process(&name);
                                 let qname = workspace::qualified_name(&project_name, &name);
-                                if let Some(proc) = mgr.get_process(&name) {
-                                    stack.add_named(&proc.terminal, Some(&qname));
+                                if let Some(proc) = mgr.get_process(&name)
+                                    && let Some(ref terminal) = proc.terminal
+                                {
+                                    stack.add_named(terminal, Some(&qname));
                                 }
                                 let status = mgr
                                     .get_process(&name)
@@ -1104,10 +1171,7 @@ impl TuxFlowWindow {
                                     status,
                                     category,
                                 );
-                                crate::process::auto_restart::setup_auto_restart(
-                                    &project.manager,
-                                    &name,
-                                );
+                                Self::setup_auto_restart_for_process(&project.manager, &name);
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
                                     stack.set_visible_child_name(&qname);
@@ -1181,8 +1245,10 @@ impl TuxFlowWindow {
                                 let qname = workspace::qualified_name(&project_name, &term_name);
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
-                                let terminal =
-                                    mgr.get_process(&term_name).map(|p| p.terminal.clone());
+                                let terminal = {
+                                    mgr.materialize_process(&term_name);
+                                    mgr.get_process(&term_name).and_then(|p| p.terminal.clone())
+                                };
                                 if let Some(ref term) = terminal {
                                     stack2.add_named(term, Some(&qname));
                                 }
@@ -1195,10 +1261,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::Terminal,
                                 );
-                                crate::process::auto_restart::setup_auto_restart(
-                                    &project.manager,
-                                    &term_name,
-                                );
+                                Self::setup_auto_restart_for_process(&project.manager, &term_name);
                                 project.manager.borrow_mut().spawn(&term_name);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
@@ -1286,8 +1349,11 @@ impl TuxFlowWindow {
                                 let qname = workspace::qualified_name(&project_name, &agent_name);
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
-                                let terminal =
-                                    mgr.get_process(&agent_name).map(|p| p.terminal.clone());
+                                let terminal = {
+                                    mgr.materialize_process(&agent_name);
+                                    mgr.get_process(&agent_name)
+                                        .and_then(|p| p.terminal.clone())
+                                };
                                 if let Some(ref term) = terminal {
                                     stack2.add_named(term, Some(&qname));
                                 }
@@ -1300,10 +1366,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::Agent,
                                 );
-                                crate::process::auto_restart::setup_auto_restart(
-                                    &project.manager,
-                                    &agent_name,
-                                );
+                                Self::setup_auto_restart_for_process(&project.manager, &agent_name);
                                 project.manager.borrow_mut().spawn(&agent_name);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
@@ -1981,7 +2044,10 @@ impl TuxFlowWindow {
             let qname = workspace::qualified_name(&project_name, &term_name);
             let mut mgr = project.manager.borrow_mut();
             mgr.add_process(config);
-            let terminal = mgr.get_process(&term_name).map(|p| p.terminal.clone());
+            let terminal = {
+                mgr.materialize_process(&term_name);
+                mgr.get_process(&term_name).and_then(|p| p.terminal.clone())
+            };
             if let Some(ref term) = terminal {
                 stack.add_named(term, Some(&qname));
             }
@@ -1993,7 +2059,7 @@ impl TuxFlowWindow {
                 ProcessStatus::Stopped,
                 crate::config::schema::ProcessCategory::Terminal,
             );
-            crate::process::auto_restart::setup_auto_restart(&project.manager, &term_name);
+            Self::setup_auto_restart_for_process(&project.manager, &term_name);
             project.manager.borrow_mut().spawn(&term_name);
             if let Some(ref term) = terminal {
                 Self::connect_window_title_auto_rename(
@@ -2238,8 +2304,9 @@ impl TuxFlowWindow {
 
         for project in ws.projects() {
             let mgr = project.manager.borrow();
-            if let Some(proc) = mgr.get_process(process_name) {
-                let terminal = &proc.terminal;
+            if let Some(proc) = mgr.get_process(process_name)
+                && let Some(ref terminal) = proc.terminal
+            {
                 let row = terminal.cursor_position().1;
                 let cols = terminal.column_count();
                 let start_row = (row - max_lines as i64).max(0);

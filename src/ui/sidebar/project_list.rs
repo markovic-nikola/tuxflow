@@ -606,13 +606,17 @@ impl ProjectList {
                     select_and_highlight(&qname);
                 }
                 "clear" => {
-                    if let Some(proc) = mgr.borrow().get_process(name) {
-                        proc.terminal.reset(true, true);
+                    if let Some(proc) = mgr.borrow().get_process(name)
+                        && let Some(ref terminal) = proc.terminal
+                    {
+                        terminal.reset(true, true);
                     }
                 }
                 "redraw" => {
-                    if let Some(proc) = mgr.borrow().get_process(name) {
-                        proc.terminal.queue_draw();
+                    if let Some(proc) = mgr.borrow().get_process(name)
+                        && let Some(ref terminal) = proc.terminal
+                    {
+                        terminal.queue_draw();
                     }
                 }
                 "edit" => {

@@ -172,13 +172,7 @@ impl Workspace {
             manager.borrow_mut().apply_saved_order(saved_order);
         }
 
-        // Setup auto-restart
-        {
-            let names: Vec<String> = manager.borrow().process_names().to_vec();
-            for name in &names {
-                auto_restart::setup_auto_restart(&manager, name);
-            }
-        }
+        // Auto-restart is set up lazily via on_materialized when terminals are created
 
         let icon_path = self.saved.get_icon(&dir_string).cloned().or_else(|| {
             let detected = icon_detector::detect_icon(&dir);
@@ -207,36 +201,21 @@ impl Workspace {
     }
 
     /// Convenience: prepare + finalize with detected processes (used for startup/CLI loading).
-    /// If total detected processes exceed the threshold, no config file exists, and the user
-    /// hasn't previously curated a selection, exclude Makefile targets to keep startup fast.
-    /// Projects with saved deleted_processes have been curated — include all stacks and let
-    /// finalize_project filter via the deleted list.
+    /// Makefile targets are only included if the user previously curated them via the selection
+    /// dialog (indicated by Make-related entries in deleted_processes). Otherwise they are
+    /// excluded at startup to avoid spawning many VTE terminals for projects with large Makefiles.
     pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
         let prepared = self.prepare_project(dir)?;
         let dir_string = dir.to_string_lossy().to_string();
-        let has_saved_state = self.saved.get_process_order(&dir_string).is_some()
-            || self.saved.has_deleted_processes(&dir_string);
-        let total: usize = prepared
+        let has_make_curation = self
+            .saved
+            .has_deleted_processes_matching(&dir_string, "make ");
+        let processes: Vec<ProcessConfig> = prepared
             .stacks
             .iter()
-            .map(|s| s.suggested_processes.len())
-            .sum();
-        let processes: Vec<ProcessConfig> =
-            if prepared.config_loaded || has_saved_state || total <= 5 {
-                prepared
-                    .stacks
-                    .iter()
-                    .flat_map(|s| s.suggested_processes.clone())
-                    .collect()
-            } else {
-                // Too many auto-detected processes on a fresh project — exclude Makefile targets
-                prepared
-                    .stacks
-                    .iter()
-                    .filter(|s| s.name != "Make")
-                    .flat_map(|s| s.suggested_processes.clone())
-                    .collect()
-            };
+            .filter(|s| s.name != "Make" || prepared.config_loaded || has_make_curation)
+            .flat_map(|s| s.suggested_processes.clone())
+            .collect();
         self.finalize_project(prepared, processes)
     }
 

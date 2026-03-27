@@ -197,26 +197,31 @@ fn detect_makefile(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     for line in content.lines() {
-        // Match target lines like "target:" or "target: deps" but skip
-        // variable assignments (VAR = ...), comments, recipe lines (tabs),
-        // and special/pattern targets (containing %, $, /)
-        if let Some(target) = line.split(':').next() {
-            let target = target.trim();
+        // Skip recipe lines, comments, and lines starting with whitespace or dots
+        if line.starts_with('\t')
+            || line.starts_with('#')
+            || line.starts_with('.')
+            || line.starts_with(' ')
+            || line.is_empty()
+        {
+            continue;
+        }
+        // Skip variable assignments: lines containing = without a preceding :
+        // (covers VAR = val, VAR := val, VAR ::= val, VAR ?= val, VAR += val)
+        if let Some(eq_pos) = line.find('=') {
+            let before_eq = &line[..eq_pos];
+            if !before_eq.contains(':') || before_eq.ends_with(':') || before_eq.ends_with(':') {
+                continue;
+            }
+        }
+        // Must have a colon to be a target rule
+        if let Some(colon_pos) = line.find(':') {
+            let target = line[..colon_pos].trim();
             if target.is_empty()
-                || line.starts_with('\t')
-                || line.starts_with('#')
-                || line.starts_with('.')
-                || line.starts_with(' ')
-                || target.contains('=')
                 || target.contains('%')
                 || target.contains('$')
                 || target.contains('/')
             {
-                continue;
-            }
-            // Skip if the ":" is part of an assignment (e.g. "VAR := value")
-            let after_target = &line[target.len()..];
-            if after_target.starts_with(":=") || after_target.starts_with("::=") {
                 continue;
             }
             // Only alphanumeric, hyphens, underscores in target names
@@ -225,8 +230,7 @@ fn detect_makefile(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
                 .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
             {
                 let cmd = format!("make {target}");
-                let auto_start = false;
-                procs.push(make_process(&cmd, &cmd, auto_start));
+                procs.push(make_process(&cmd, &cmd, false));
             }
         }
     }

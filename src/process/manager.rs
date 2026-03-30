@@ -229,8 +229,10 @@ impl ProcessManager {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let command = &proc.config.command;
 
-        // Build argv: shell -c "command"
-        let argv = [shell.as_str(), "-c", command.as_str()];
+        // Build argv: shell -l -c "command"
+        // Use login shell (-l) so ~/.zshrc, ~/.bashrc, etc. are sourced,
+        // making tools installed via nvm/fnm/volta/etc. available on PATH.
+        let argv = [shell.as_str(), "-l", "-c", command.as_str()];
 
         // Build envv from config
         // When empty, VTE inherits parent env (which includes TUXFLOW_CHILD)

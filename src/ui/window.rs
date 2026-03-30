@@ -27,17 +27,21 @@ pub struct TuxFlowWindow;
 
 impl TuxFlowWindow {
     pub fn new(app: &adw::Application, project_dir: Option<&Path>) -> adw::ApplicationWindow {
+        // Load persisted settings
+        let settings = Rc::new(RefCell::new(AppSettings::load()));
+
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("TuxFlow")
-            .default_width(1200)
-            .default_height(800)
+            .default_width(settings.borrow().window.width)
+            .default_height(settings.borrow().window.height)
             .build();
 
-        Self::load_css();
+        if settings.borrow().window.maximized {
+            window.maximize();
+        }
 
-        // Load persisted settings
-        let settings = Rc::new(RefCell::new(AppSettings::load()));
+        Self::load_css();
         let keybinding_map = Rc::new(RefCell::new(KeybindingMap::from_settings(
             &settings.borrow().keybindings,
         )));
@@ -292,10 +296,27 @@ impl TuxFlowWindow {
             );
         }
 
-        // Kill all child processes when the window closes
+        // Kill all child processes and save window state when the window closes
         let ws_shutdown = ws.clone();
         let pid_file_shutdown = pid_file.clone();
-        window.connect_close_request(move |_| {
+        let settings_shutdown = settings.clone();
+        window.connect_close_request(move |win| {
+            // Save window size and maximized state
+            {
+                let mut s = settings_shutdown.borrow_mut();
+                s.window.maximized = win.is_maximized();
+                // Only update size when not maximized, so we preserve the
+                // un-maximized dimensions for next launch
+                if !win.is_maximized() {
+                    let w = win.width();
+                    let h = win.height();
+                    if w > 0 && h > 0 {
+                        s.window.width = w;
+                        s.window.height = h;
+                    }
+                }
+                s.save();
+            }
             let ws_borrow = ws_shutdown.borrow();
             for project in ws_borrow.projects() {
                 project.manager.borrow_mut().stop_all();

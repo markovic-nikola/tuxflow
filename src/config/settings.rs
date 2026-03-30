@@ -15,6 +15,15 @@ pub struct AppSettings {
     pub tools: ToolSettings,
     pub keybindings: KeybindingsSettings,
     pub integrations: IntegrationSettings,
+    pub window: WindowSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowSettings {
+    pub width: i32,
+    pub height: i32,
+    pub maximized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +128,16 @@ impl Default for ToolSettings {
 impl Default for IntegrationSettings {
     fn default() -> Self {
         Self { mcp_enabled: true }
+    }
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            width: 1200,
+            height: 800,
+            maximized: false,
+        }
     }
 }
 

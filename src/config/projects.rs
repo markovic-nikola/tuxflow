@@ -154,8 +154,7 @@ impl SavedProjects {
     pub fn is_process_deleted(&self, dir: &str, process_name: &str) -> bool {
         self.deleted_processes
             .get(dir)
-            .map(|list| list.iter().any(|n| n == process_name))
-            .unwrap_or(false)
+            .is_some_and(|list| list.iter().any(|n| n == process_name))
     }
 
     pub fn add_custom_command(&mut self, dir: &str, config: ProcessConfig) {

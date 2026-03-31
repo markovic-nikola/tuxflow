@@ -14,9 +14,9 @@ const ACCENT_COLORS: &[AccentColor] = &[
     AccentColor {
         name: "green",
         label: "Green (Default)",
-        bg: "",
-        fg: "",
-        accent: "",
+        bg: "#2ea043",
+        fg: "#ffffff",
+        accent: "#3fb950",
     },
     AccentColor {
         name: "blue",

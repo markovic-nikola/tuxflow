@@ -51,6 +51,14 @@ impl TuxFlowWindow {
         // SAFETY: called on the main thread before spawning any child processes
         unsafe {
             std::env::set_var("TUXFLOW_CHILD", "1");
+            // Tell child programs about the terminal's fg/bg so they pick
+            // colors with enough contrast (e.g. Claude Code / Ink / chalk).
+            let theme_name = &settings.borrow().appearance.terminal_theme;
+            if crate::ui::terminal_theme::is_dark_theme(theme_name) {
+                std::env::set_var("COLORFGBG", "15;0");
+            } else {
+                std::env::set_var("COLORFGBG", "0;15");
+            }
         }
 
         // Check for orphaned processes from a previous crash
@@ -224,6 +232,15 @@ impl TuxFlowWindow {
                     .manager
                     .borrow_mut()
                     .apply_terminal_theme(theme_name);
+            }
+            // Update COLORFGBG so newly spawned processes pick the right colors
+            // SAFETY: called on the main GTK thread
+            unsafe {
+                if crate::ui::terminal_theme::is_dark_theme(theme_name) {
+                    std::env::set_var("COLORFGBG", "15;0");
+                } else {
+                    std::env::set_var("COLORFGBG", "0;15");
+                }
             }
         });
 
@@ -582,6 +599,7 @@ impl TuxFlowWindow {
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
     ) {
         let prepared = {
             let mut ws_mut = ws.borrow_mut();
@@ -621,6 +639,8 @@ impl TuxFlowWindow {
                     status_bar,
                     selected_process,
                 );
+                *last_selected_project.borrow_mut() = Some(project_name.clone());
+                sidebar.expand_project(&project_name);
             }
         } else {
             // Show selection dialog
@@ -638,6 +658,7 @@ impl TuxFlowWindow {
             let pid_file = pid_file.clone();
             let status_bar = status_bar.clone();
             let selected_process = selected_process.clone();
+            let last_selected_project = last_selected_project.clone();
 
             crate::ui::select_commands_dialog::SelectCommandsDialog::show(
                 parent,
@@ -671,6 +692,8 @@ impl TuxFlowWindow {
                             &status_bar,
                             &selected_process,
                         );
+                        *last_selected_project.borrow_mut() = Some(project_name.clone());
+                        sidebar.expand_project(&project_name);
                     }
                 },
             );
@@ -956,6 +979,7 @@ impl TuxFlowWindow {
                     let pf2 = pf_ref.clone();
                     let sb2 = sb_ref.clone();
                     let sel2 = sel_ref.clone();
+                    let last_proj2 = last_proj_ref.clone();
                     let dialog = gtk4::FileDialog::builder()
                         .title("Open Project Directory")
                         .build();
@@ -965,7 +989,15 @@ impl TuxFlowWindow {
                             && let Some(path) = file.path()
                         {
                             Self::load_project_interactive(
-                                &win2, &ws2, &sidebar2, &stack2, &path, &pf2, &sb2, &sel2,
+                                &win2,
+                                &ws2,
+                                &sidebar2,
+                                &stack2,
+                                &path,
+                                &pf2,
+                                &sb2,
+                                &sel2,
+                                &last_proj2,
                             );
                         }
                     });
@@ -1029,6 +1061,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::Agent,
                                 );
+                                sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &name);
                                 project.manager.borrow_mut().spawn(&name);
                                 if let Some(ref term) = terminal {
@@ -1106,6 +1139,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::SSH,
                                 );
+                                sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &name);
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
@@ -1192,6 +1226,7 @@ impl TuxFlowWindow {
                                     status,
                                     category,
                                 );
+                                sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &name);
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
@@ -1282,6 +1317,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::Terminal,
                                 );
+                                sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &term_name);
                                 project.manager.borrow_mut().spawn(&term_name);
                                 if let Some(ref term) = terminal {
@@ -1387,6 +1423,7 @@ impl TuxFlowWindow {
                                     ProcessStatus::Stopped,
                                     crate::config::schema::ProcessCategory::Agent,
                                 );
+                                sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &agent_name);
                                 project.manager.borrow_mut().spawn(&agent_name);
                                 if let Some(ref term) = terminal {
@@ -1469,7 +1506,7 @@ impl TuxFlowWindow {
         let split_view = adw::OverlaySplitView::new();
 
         // Headerbar
-        let headerbar = Self::build_headerbar(
+        let (headerbar, title_label) = Self::build_headerbar(
             window,
             &split_view,
             &palette,
@@ -1556,13 +1593,21 @@ impl TuxFlowWindow {
         // Terminal search bar
         let search_bar = Rc::new(TerminalSearch::new());
 
-        // Update search bar terminal when stack child changes
+        // Update search bar terminal and window title when stack child changes
         let search_ref = search_bar.clone();
+        let title_ref = title_label.clone();
         terminal_stack.connect_visible_child_notify(move |stack| {
             if let Some(child) = stack.visible_child()
                 && let Ok(terminal) = child.downcast::<vte4::Terminal>()
             {
                 search_ref.set_terminal(&terminal);
+            }
+            if let Some(name) = stack.visible_child_name() {
+                if let Some((proj, _)) = name.split_once("::") {
+                    title_ref.set_label(proj);
+                }
+            } else {
+                title_ref.set_label("TuxFlow");
             }
         });
 
@@ -1847,7 +1892,7 @@ impl TuxFlowWindow {
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
-    ) -> adw::HeaderBar {
+    ) -> (adw::HeaderBar, gtk4::Label) {
         let headerbar = adw::HeaderBar::new();
 
         let sidebar_tooltip = format!(
@@ -1925,7 +1970,7 @@ impl TuxFlowWindow {
 
         headerbar.set_title_widget(Some(&title_box));
 
-        headerbar
+        (headerbar, title_label)
     }
 
     fn all_qualified_names(ws: &WorkspaceRef) -> Vec<String> {

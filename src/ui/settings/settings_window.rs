@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk4::pango;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
@@ -188,19 +189,60 @@ impl SettingsWindow {
         });
         font_group.add(&terminal_theme_row);
 
-        let font_row = adw::EntryRow::builder()
+        let font_row = adw::ActionRow::builder()
             .title("Font Family")
-            .text(&s.appearance.font_family)
+            .subtitle(&s.appearance.font_family)
+            .activatable(true)
             .build();
-        let settings_ref = settings.clone();
-        let font_cb = on_font_changed.clone();
-        font_row.connect_changed(move |row| {
-            settings_ref.borrow_mut().appearance.font_family = row.text().to_string();
-            settings_ref.borrow().save();
-            if let Some(ref cb) = font_cb {
-                cb();
-            }
-        });
+        let font_row_suffix = gtk4::Image::from_icon_name("go-next-symbolic");
+        font_row.add_suffix(&font_row_suffix);
+        {
+            let settings_ref = settings.clone();
+            let font_cb = on_font_changed.clone();
+            let font_row_ref = font_row.clone();
+            font_row.connect_activated(move |row| {
+                let win_ref = row.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+                let dialog = gtk4::FontDialog::builder().build();
+
+                // Set current font as initial selection
+                let current = settings_ref.borrow().appearance.font_family.clone();
+                let current_size = settings_ref.borrow().appearance.font_size;
+                let initial =
+                    pango::FontDescription::from_string(&format!("{current} {current_size}"));
+
+                let sr = settings_ref.clone();
+                let cb = font_cb.clone();
+                let row = font_row_ref.clone();
+                dialog.choose_font(
+                    win_ref.as_ref(),
+                    Some(&initial),
+                    gtk4::gio::Cancellable::NONE,
+                    move |result| {
+                        if let Ok(font_desc) = result {
+                            let family = font_desc
+                                .family()
+                                .map(|f| f.to_string())
+                                .unwrap_or_default();
+                            if !family.is_empty() {
+                                row.set_subtitle(&family);
+                                let mut s = sr.borrow_mut();
+                                s.appearance.font_family = family;
+                                // Also update size if the user changed it in the picker
+                                let picked_size = font_desc.size() / pango::SCALE;
+                                if picked_size > 0 {
+                                    s.appearance.font_size = picked_size as u32;
+                                }
+                                s.save();
+                                drop(s);
+                                if let Some(ref cb) = cb {
+                                    cb();
+                                }
+                            }
+                        }
+                    },
+                );
+            });
+        }
         font_group.add(&font_row);
 
         let font_size_row = adw::SpinRow::builder()

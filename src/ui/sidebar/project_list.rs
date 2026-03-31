@@ -382,6 +382,10 @@ impl ProjectList {
         let container_ref = self.container.clone();
         let project_rows_ref = self.project_rows.clone();
         let on_renamed = self.on_project_renamed.clone();
+        let sections_ref = self.sections.clone();
+        let proc_rows_ref = self.process_rows.clone();
+        let proc_statuses_ref = self.process_statuses.clone();
+        let selected_qname_ref = self.selected_qname.clone();
 
         project_row.set_on_context_action(move |action| match action {
             "start_all" => {
@@ -443,6 +447,10 @@ impl ProjectList {
                     let project_rows_edit = project_rows_ref.clone();
                     let container_edit = container_ref.clone();
                     let on_renamed_cb = on_renamed.clone();
+                    let sections_edit = sections_ref.clone();
+                    let proc_rows_edit = proc_rows_ref.clone();
+                    let proc_statuses_edit = proc_statuses_ref.clone();
+                    let selected_qname_edit = selected_qname_ref.clone();
 
                     EditProjectDialog::show(
                         &win,
@@ -468,16 +476,102 @@ impl ProjectList {
                                 }
                                 drop(ws_mut);
 
-                                let rows = project_rows_edit.borrow();
-                                if let Some(row) = rows.get(&pname_for_closure) {
-                                    if renamed {
-                                        row.set_name(&result.name);
+                                {
+                                    let rows = project_rows_edit.borrow();
+                                    if let Some(row) = rows.get(&pname_for_closure) {
+                                        if renamed {
+                                            row.set_name(&result.name);
+                                        }
+                                        row.set_icon(result.icon_path.as_deref());
                                     }
-                                    row.set_icon(result.icon_path.as_deref());
                                 }
 
-                                if renamed && let Some(ref cb) = *on_renamed_cb.borrow() {
-                                    cb(&pname_for_closure, &result.name);
+                                if renamed {
+                                    // Update all internal HashMap keys and section data
+                                    let old_prefix = format!("{}::", pname_for_closure);
+                                    let new_prefix = format!("{}::", result.name);
+
+                                    // Update project_rows key
+                                    {
+                                        let mut rows = project_rows_edit.borrow_mut();
+                                        if let Some(row) = rows.remove(&*pname_for_closure) {
+                                            rows.insert(result.name.clone(), row);
+                                        }
+                                    }
+
+                                    // Update sections
+                                    {
+                                        let mut sections = sections_edit.borrow_mut();
+                                        for section in sections.iter_mut() {
+                                            if section.project_name == *pname_for_closure {
+                                                section.project_name = result.name.clone();
+                                                for qname in &mut section.process_names {
+                                                    if let Some(proc) =
+                                                        qname.strip_prefix(&old_prefix)
+                                                    {
+                                                        *qname = format!("{new_prefix}{proc}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Update process_rows keys and DnD widget names
+                                    {
+                                        let mut rows = proc_rows_edit.borrow_mut();
+                                        let old_keys: Vec<String> = rows
+                                            .keys()
+                                            .filter(|k| k.starts_with(&old_prefix))
+                                            .cloned()
+                                            .collect();
+                                        for old_key in old_keys {
+                                            if let Some(row) = rows.remove(&old_key) {
+                                                if let Some(proc) =
+                                                    old_key.strip_prefix(&old_prefix)
+                                                {
+                                                    let new_qname = format!("{new_prefix}{proc}");
+                                                    row.widget().set_widget_name(&new_qname);
+                                                    rows.insert(new_qname, row);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Update process_statuses keys
+                                    {
+                                        let mut statuses = proc_statuses_edit.borrow_mut();
+                                        let old_keys: Vec<String> = statuses
+                                            .keys()
+                                            .filter(|k| k.starts_with(&old_prefix))
+                                            .cloned()
+                                            .collect();
+                                        for old_key in old_keys {
+                                            if let Some(status) = statuses.remove(&old_key) {
+                                                if let Some(proc) =
+                                                    old_key.strip_prefix(&old_prefix)
+                                                {
+                                                    statuses.insert(
+                                                        format!("{new_prefix}{proc}"),
+                                                        status,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Update selected_qname
+                                    {
+                                        let mut selected = selected_qname_edit.borrow_mut();
+                                        if let Some(ref qname) = *selected {
+                                            if let Some(proc) = qname.strip_prefix(&old_prefix) {
+                                                *selected = Some(format!("{new_prefix}{proc}"));
+                                            }
+                                        }
+                                    }
+
+                                    if let Some(ref cb) = *on_renamed_cb.borrow() {
+                                        cb(&pname_for_closure, &result.name);
+                                    }
                                 }
                             }
                         },
@@ -902,13 +996,16 @@ impl ProjectList {
     }
 
     fn connect_row_dnd(&self, row: &ProcessRow, manager: &ProcessManagerRef, qualified_name: &str) {
+        // Store the qname on the widget so DnD handlers can read the current
+        // value even after a project rename updates it.
+        row.widget().set_widget_name(qualified_name);
+
         let proc_drag_source = gtk4::DragSource::new();
         proc_drag_source.set_actions(gdk::DragAction::MOVE);
-        let qname_drag = qualified_name.to_string();
+        let drag_widget = row.widget().clone();
         proc_drag_source.connect_prepare(move |_, _, _| {
-            Some(gdk::ContentProvider::for_value(&glib::Value::from(
-                &qname_drag,
-            )))
+            let qname = drag_widget.widget_name().to_string();
+            Some(gdk::ContentProvider::for_value(&glib::Value::from(&qname)))
         });
         dnd::setup_drag_icon(&proc_drag_source, row.widget());
         row.widget().add_controller(proc_drag_source);
@@ -923,7 +1020,7 @@ impl ProjectList {
         proc_drop_target.connect_leave(move |_| {
             dnd::clear_drop_indicator(&row_widget2);
         });
-        let qname_drop = qualified_name.to_string();
+        let drop_widget = row.widget().clone();
         let sections_ref = self.sections.clone();
         let process_rows_ref = self.process_rows.clone();
         let mgr_ref = manager.clone();
@@ -932,6 +1029,7 @@ impl ProjectList {
             let Ok(dragged_qname) = value.get::<String>() else {
                 return false;
             };
+            let qname_drop = drop_widget.widget_name().to_string();
             if dragged_qname == qname_drop {
                 return false;
             }

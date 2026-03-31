@@ -300,3 +300,13 @@
 .welcome-page description {
     opacity: 0.6;
 }
+
+/* Green Save/confirm buttons */
+.suggested-action.pill {
+    background: #2ea043;
+    color: #ffffff;
+}
+
+.suggested-action.pill:hover {
+    background: #3fb950;
+}

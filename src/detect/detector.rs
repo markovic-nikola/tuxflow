@@ -158,10 +158,16 @@ fn detect_go(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {
     ]
 }
 
+fn is_composer_lifecycle_hook(name: &str) -> bool {
+    name.starts_with("pre-")
+        || name.starts_with("post-")
+        || name.starts_with("pre_")
+        || name.starts_with("post_")
+}
+
 fn detect_php(dir: &Path, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
-    // Check if it's Laravel
     if let Ok(composer) = serde_json::from_str::<serde_json::Value>(content) {
         let is_laravel = composer
             .get("require")
@@ -176,6 +182,17 @@ fn detect_php(dir: &Path, content: &str) -> Vec<ProcessConfig> {
             procs.push(make_process("queue", "php artisan queue:work", false));
         } else {
             procs.push(make_process("PHP server", "php -S localhost:8000", true));
+        }
+
+        // Detect composer scripts (skip lifecycle hooks)
+        if let Some(scripts) = composer.get("scripts").and_then(|s| s.as_object()) {
+            for key in scripts.keys() {
+                if is_composer_lifecycle_hook(key) {
+                    continue;
+                }
+                let cmd = format!("composer {key}");
+                procs.push(make_process(&cmd, &cmd, false));
+            }
         }
     }
 

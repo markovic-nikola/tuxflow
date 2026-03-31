@@ -66,6 +66,7 @@ impl ManagedProcess {
         let terminal = vte4::Terminal::new();
         terminal.set_scroll_on_output(false);
         terminal.set_scroll_on_keystroke(true);
+        terminal.set_clear_background(true);
         terminal.set_vexpand(true);
         terminal.set_hexpand(true);
 
@@ -122,9 +123,13 @@ impl ManagedProcess {
         ));
         terminal.set_font(Some(&font_desc));
         terminal.set_scrollback_lines(settings.appearance.scrollback_lines as i64);
-        if (settings.appearance.line_height - 1.0).abs() > f64::EPSILON {
-            terminal.set_cell_height_scale(settings.appearance.line_height);
-        }
+        // NOTE: set_cell_height_scale causes rendering artifacts in VTE —
+        // ghost fragments of erased text remain in the inter-line gap pixels.
+        // Disabled until VTE fixes this upstream. Line height setting is kept
+        // in the UI but has no effect.
+        // if (settings.appearance.line_height - 1.0).abs() > f64::EPSILON {
+        //     terminal.set_cell_height_scale(settings.appearance.line_height);
+        // }
         if settings.appearance.letter_spacing.abs() > f64::EPSILON {
             terminal.set_cell_width_scale(1.0 + settings.appearance.letter_spacing / 10.0);
         }

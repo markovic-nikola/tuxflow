@@ -263,6 +263,13 @@ pub fn apply(terminal: &vte4::Terminal, name: &str) {
     terminal.set_color_cursor_foreground(Some(&theme.background));
 }
 
+pub fn is_dark_theme(name: &str) -> bool {
+    let theme = THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0]);
+    let bg = &theme.background;
+    // Luminance approximation
+    (0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()) < 0.5
+}
+
 pub fn theme_choices() -> Vec<&'static str> {
     THEMES.iter().map(|t| t.label).collect()
 }

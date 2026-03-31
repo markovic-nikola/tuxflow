@@ -144,6 +144,11 @@ impl Workspace {
         }
 
         // Load user-added custom commands
+        let custom_names: std::collections::HashSet<String> = self
+            .saved
+            .get_custom_commands(&dir_string)
+            .map(|cmds| cmds.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
         if let Some(custom_cmds) = self.saved.get_custom_commands(&dir_string) {
             let mut mgr = manager.borrow_mut();
             for cmd in custom_cmds.clone() {
@@ -151,13 +156,18 @@ impl Workspace {
             }
         }
 
-        // Filter out previously deleted processes
+        // Filter out previously deleted auto-detected processes.
+        // Only auto-detected processes (not in custom_commands) are filtered,
+        // and matching is by name only — names are unique within a project.
         {
             let mgr = manager.borrow();
             let to_remove: Vec<String> = mgr
                 .process_names()
                 .iter()
-                .filter(|name| self.saved.is_process_deleted(&dir_string, name))
+                .filter(|name| {
+                    !custom_names.contains(*name)
+                        && self.saved.is_process_deleted(&dir_string, name)
+                })
                 .cloned()
                 .collect();
             drop(mgr);

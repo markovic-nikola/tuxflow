@@ -185,12 +185,33 @@ impl StatusBar {
         }
     }
 
-    pub fn set_global_info(&self, running: usize, total: usize, has_project: bool) {
+    pub fn set_global_info(
+        &self,
+        running: usize,
+        total: usize,
+        has_project: bool,
+        running_names: &[(String, Vec<String>)],
+    ) {
         if total > 0 {
             self.global_label
                 .set_label(&format!("Total {running}/{total}"));
             self.global_label.set_visible(true);
             self.separator_label.set_visible(has_project);
+
+            if running > 0 {
+                let tooltip: Vec<String> = running_names
+                    .iter()
+                    .filter(|(_, procs)| !procs.is_empty())
+                    .map(|(project, procs)| {
+                        let list = procs.join(", ");
+                        format!("{project}: {list}")
+                    })
+                    .collect();
+                self.global_label
+                    .set_tooltip_text(Some(&tooltip.join("\n")));
+            } else {
+                self.global_label.set_tooltip_text(None);
+            }
         } else {
             self.global_label.set_visible(false);
             self.separator_label.set_visible(false);

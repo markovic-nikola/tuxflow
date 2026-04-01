@@ -175,6 +175,7 @@ impl TuxFlowWindow {
                     let mut global_t = 0usize;
                     let mut proj_r = 0usize;
                     let mut proj_t = 0usize;
+                    let mut running_names = Vec::new();
                     for project in ws_borrow.projects() {
                         let mgr = project.manager.borrow();
                         let r = mgr.running_count();
@@ -185,9 +186,14 @@ impl TuxFlowWindow {
                             proj_r = r;
                             proj_t = t;
                         }
+                        let names: Vec<String> =
+                            mgr.running_names().into_iter().map(String::from).collect();
+                        if !names.is_empty() {
+                            running_names.push((project.name.clone(), names));
+                        }
                     }
                     sb_idle.set_project_info(Some(&proj_owned), proj_r, proj_t);
-                    sb_idle.set_global_info(global_r, global_t, true);
+                    sb_idle.set_global_info(global_r, global_t, true, &running_names);
                 });
             }
             let url = sidebar_ref.get_process_url(qname);
@@ -1456,6 +1462,9 @@ impl TuxFlowWindow {
                 _ => log::warn!("Unknown palette action: {action}"),
             }
             palette_ref.hide();
+            if let Some(child) = stack_ref.visible_child() {
+                child.grab_focus();
+            }
         });
 
         // Status bar actions
@@ -1535,6 +1544,7 @@ impl TuxFlowWindow {
                     let mut global_t = 0usize;
                     let mut proj_r = 0usize;
                     let mut proj_t = 0usize;
+                    let mut running_names = Vec::new();
                     for project in ws_borrow.projects() {
                         let mgr = project.manager.borrow();
                         let r = mgr.running_count();
@@ -1545,10 +1555,15 @@ impl TuxFlowWindow {
                             proj_r = r;
                             proj_t = t;
                         }
+                        let names: Vec<String> =
+                            mgr.running_names().into_iter().map(String::from).collect();
+                        if !names.is_empty() {
+                            running_names.push((project.name.clone(), names));
+                        }
                     }
                     let has_project = selected_proj.is_some();
                     sb.set_project_info(selected_proj.as_deref(), proj_r, proj_t);
-                    sb.set_global_info(global_r, global_t, has_project);
+                    sb.set_global_info(global_r, global_t, has_project, &running_names);
                 });
             })
         };
@@ -1873,6 +1888,9 @@ impl TuxFlowWindow {
             // Hardcoded: Escape — close palette
             if keyval == gdk::Key::Escape && palette_ref.is_visible() {
                 palette_ref.hide();
+                if let Some(child) = stack_ref.visible_child() {
+                    child.grab_focus();
+                }
                 return gtk4::glib::Propagation::Stop;
             }
 
@@ -1974,12 +1992,21 @@ impl TuxFlowWindow {
     }
 
     fn all_qualified_names(ws: &WorkspaceRef) -> Vec<String> {
+        use crate::config::schema::ProcessCategory;
+        let category_order = [
+            ProcessCategory::Agent,
+            ProcessCategory::Command,
+            ProcessCategory::Terminal,
+            ProcessCategory::SSH,
+        ];
         let ws_borrow = ws.borrow();
         let mut names = Vec::new();
         for project in ws_borrow.projects() {
             let mgr = project.manager.borrow();
-            for name in mgr.process_names() {
-                names.push(workspace::qualified_name(&project.name, name));
+            for cat in &category_order {
+                for proc in mgr.processes_by_category(cat.clone()) {
+                    names.push(workspace::qualified_name(&project.name, &proc.config.name));
+                }
             }
         }
         names
@@ -2148,7 +2175,28 @@ impl TuxFlowWindow {
         sidebar: &Rc<ProjectList>,
         delta: i32,
     ) {
-        let names = Self::all_qualified_names(ws);
+        use crate::config::schema::ProcessCategory;
+        let category_order = [
+            ProcessCategory::Agent,
+            ProcessCategory::Command,
+            ProcessCategory::Terminal,
+            ProcessCategory::SSH,
+        ];
+        let names: Vec<String> = {
+            let ws_borrow = ws.borrow();
+            let mut names = Vec::new();
+            for project in ws_borrow.projects() {
+                let mgr = project.manager.borrow();
+                for cat in &category_order {
+                    for proc in mgr.processes_by_category(cat.clone()) {
+                        if proc.status == ProcessStatus::Running {
+                            names.push(workspace::qualified_name(&project.name, &proc.config.name));
+                        }
+                    }
+                }
+            }
+            names
+        };
         if names.is_empty() {
             return;
         }

@@ -680,9 +680,14 @@ impl ProjectList {
                     cb(qname);
                 }
             };
+            log::info!("Row action: name={name}, action={action}, qname={qname}");
             match action {
                 "toggle" => {
                     let mut mgr = mgr.borrow_mut();
+                    log::info!(
+                        "Toggle: looking up process '{name}', exists={}",
+                        mgr.get_process(name).is_some()
+                    );
                     if let Some(proc) = mgr.get_process(name) {
                         if proc.status == ProcessStatus::Running {
                             mgr.kill(name);
@@ -896,6 +901,7 @@ impl ProjectList {
                     });
                 }
                 "delete" => {
+                    log::info!("Delete: name={name}, qname={qname}");
                     let display_name = name.to_string();
                     let process_name = name.to_string();
                     let dialog = adw::AlertDialog::builder()

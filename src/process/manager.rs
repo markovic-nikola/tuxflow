@@ -195,7 +195,9 @@ impl ProcessManager {
     pub fn add_process(&mut self, config: ProcessConfig) {
         let name = config.name.clone();
         let proc = ManagedProcess::new(config);
-        self.order.push(name.clone());
+        if !self.processes.contains_key(&name) {
+            self.order.push(name.clone());
+        }
         self.processes.insert(name, proc);
     }
 
@@ -394,6 +396,18 @@ impl ProcessManager {
             .values()
             .filter(|p| p.status == ProcessStatus::Running)
             .count()
+    }
+
+    pub fn running_names(&self) -> Vec<&str> {
+        self.order
+            .iter()
+            .filter_map(|name| {
+                self.processes
+                    .get(name)
+                    .filter(|p| p.status == ProcessStatus::Running)
+                    .map(|_| name.as_str())
+            })
+            .collect()
     }
 
     pub fn total_count(&self) -> usize {

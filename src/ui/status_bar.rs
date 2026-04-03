@@ -14,6 +14,7 @@ pub struct StatusBar {
     memory_label: gtk4::Label,
     follow_btn: gtk4::Button,
     focus_btn: gtk4::Button,
+    git_btn: gtk4::Button,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
@@ -96,6 +97,8 @@ impl StatusBar {
 
         let focus_btn = Self::make_button("Focus", "focus-windows-symbolic");
         let follow_btn = Self::make_button("Follow Output", "go-bottom-symbolic");
+        let git_btn = Self::make_button("Git Changes", "send-to-symbolic");
+        git_btn.set_visible(false);
         let browser_btn = Self::make_button("Open in Browser", "external-link-symbolic");
         browser_btn.set_visible(false);
         let clear_btn = Self::make_button("Clear", "edit-clear-symbolic");
@@ -103,6 +106,7 @@ impl StatusBar {
         stop_btn.add_css_class("btn-stop");
         let restart_btn = Self::make_button("Restart", "view-refresh-symbolic");
 
+        actions.append(&git_btn);
         actions.append(&focus_btn);
         actions.append(&follow_btn);
         actions.append(&browser_btn);
@@ -151,6 +155,7 @@ impl StatusBar {
             memory_label,
             follow_btn,
             focus_btn,
+            git_btn,
             browser_btn,
             clear_btn,
             stop_btn,
@@ -284,6 +289,14 @@ impl StatusBar {
             let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
             launcher.launch(window.as_ref(), gtk4::gio::Cancellable::NONE, |_| {});
         });
+    }
+
+    pub fn set_git_available(&self, available: bool) {
+        self.git_btn.set_visible(available);
+    }
+
+    pub fn connect_git_changes(&self, cb: impl Fn(&gtk4::Button) + 'static) {
+        self.git_btn.connect_clicked(move |btn| cb(btn));
     }
 
     pub fn widget(&self) -> &gtk4::Box {

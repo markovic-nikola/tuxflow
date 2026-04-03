@@ -16,6 +16,7 @@ use crate::process::pid_file::PidFile;
 use crate::ui::add_command_dialog::AddCommandDialog;
 use crate::ui::add_ssh_dialog::AddSshDialog;
 use crate::ui::command_palette::CommandPalette;
+use crate::ui::git_changes_dialog::GitChangesDialog;
 use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::terminal_search::TerminalSearch;
@@ -1070,6 +1071,7 @@ impl TuxFlowWindow {
                                 sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &name);
                                 project.manager.borrow_mut().spawn(&name);
+                                stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
                                         term,
@@ -1150,6 +1152,7 @@ impl TuxFlowWindow {
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
                                 }
+                                stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
                                         term,
@@ -1236,8 +1239,8 @@ impl TuxFlowWindow {
                                 Self::setup_auto_restart_for_process(&project.manager, &name);
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
-                                    stack.set_visible_child_name(&qname);
                                 }
+                                stack.set_visible_child_name(&qname);
                             }
                         },
                     );
@@ -1326,6 +1329,7 @@ impl TuxFlowWindow {
                                 sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &term_name);
                                 project.manager.borrow_mut().spawn(&term_name);
+                                stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
                                         term,
@@ -1432,6 +1436,7 @@ impl TuxFlowWindow {
                                 sidebar2.expand_project(&project_name);
                                 Self::setup_auto_restart_for_process(&project.manager, &agent_name);
                                 project.manager.borrow_mut().spawn(&agent_name);
+                                stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
                                     Self::connect_window_title_auto_rename(
                                         term,
@@ -1605,12 +1610,30 @@ impl TuxFlowWindow {
             sv_ref.set_show_sidebar(!sv_ref.shows_sidebar());
         });
 
+        // Git changes button
+        let ws_git = ws.clone();
+        let stack_git = terminal_stack.clone();
+        let last_proj_git = last_selected_project.clone();
+        let sidebar_git = sidebar.clone();
+        status_bar.connect_git_changes(move |btn| {
+            let project_name =
+                Self::resolve_active_project(&stack_git, &last_proj_git, &sidebar_git);
+            if let Some(proj_name) = project_name {
+                let ws_borrow = ws_git.borrow();
+                if let Some(dir) = ws_borrow.get_project_dir(&proj_name) {
+                    GitChangesDialog::show(btn, &dir);
+                }
+            }
+        });
+
         // Terminal search bar
         let search_bar = Rc::new(TerminalSearch::new());
 
         // Update search bar terminal and window title when stack child changes
         let search_ref = search_bar.clone();
         let title_ref = title_label.clone();
+        let ws_vis = ws.clone();
+        let sb_vis = status_bar.clone();
         terminal_stack.connect_visible_child_notify(move |stack| {
             if let Some(child) = stack.visible_child()
                 && let Ok(terminal) = child.downcast::<vte4::Terminal>()
@@ -1620,9 +1643,15 @@ impl TuxFlowWindow {
             if let Some(name) = stack.visible_child_name() {
                 if let Some((proj, _)) = name.split_once("::") {
                     title_ref.set_label(proj);
+                    let has_git = ws_vis
+                        .borrow()
+                        .get_project_dir(proj)
+                        .is_some_and(|dir| dir.join(".git").exists());
+                    sb_vis.set_git_available(has_git);
                 }
             } else {
                 title_ref.set_label("TuxFlow");
+                sb_vis.set_git_available(false);
             }
         });
 
@@ -2212,6 +2241,9 @@ impl TuxFlowWindow {
         stack.set_visible_child_name(&names[new_idx]);
         *selected.borrow_mut() = Some(names[new_idx].clone());
         sidebar.select_process(&names[new_idx]);
+        if let Some(child) = stack.visible_child() {
+            child.grab_focus();
+        }
     }
 
     fn switch_project_relative(

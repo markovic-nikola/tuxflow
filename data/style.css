@@ -301,6 +301,52 @@
     opacity: 0.6;
 }
 
+/* Git changes dialog */
+.git-status-modified {
+    color: #dcdcaa;
+    font-weight: 700;
+    font-size: 11px;
+    min-width: 18px;
+}
+
+.git-status-added {
+    color: #73c991;
+    font-weight: 700;
+    font-size: 11px;
+    min-width: 18px;
+}
+
+.git-status-deleted {
+    color: #f14c4c;
+    font-weight: 700;
+    font-size: 11px;
+    min-width: 18px;
+}
+
+.git-status-untracked {
+    color: #6c6c6c;
+    font-weight: 700;
+    font-size: 11px;
+    min-width: 18px;
+}
+
+.git-file-row {
+    padding: 4px 8px;
+}
+
+.git-push-btn {
+    background: #1f6feb;
+    color: #ffffff;
+}
+
+.git-push-btn:hover {
+    background: #388bfd;
+}
+
+.git-push-btn:disabled {
+    opacity: 0.4;
+}
+
 /* Green Save/confirm buttons */
 .suggested-action.pill {
     background: #2ea043;

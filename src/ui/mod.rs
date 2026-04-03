@@ -3,6 +3,7 @@ pub mod add_command_dialog;
 pub mod add_ssh_dialog;
 pub mod command_palette;
 pub mod edit_project_dialog;
+pub mod git_changes_dialog;
 pub mod project_detail;
 pub mod select_commands_dialog;
 pub mod settings;

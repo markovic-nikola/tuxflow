@@ -236,10 +236,12 @@ impl ProcessManager {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let command = &proc.config.command;
 
-        // Build argv: shell -l -c "command"
-        // Use login shell (-l) so ~/.zshrc, ~/.bashrc, etc. are sourced,
-        // making tools installed via nvm/fnm/volta/etc. available on PATH.
-        let argv = [shell.as_str(), "-l", "-c", command.as_str()];
+        // Build argv: shell -li -c "command"
+        // Use login (-l) + interactive (-i) shell so all profile scripts are
+        // sourced. zsh only reads ~/.zshrc for interactive shells, and many
+        // users set PATH there (nvm, go, cargo, etc.), so -i is required.
+        // The VTE PTY already provides a terminal, so -i is safe here.
+        let argv = [shell.as_str(), "-li", "-c", command.as_str()];
 
         // Build envv: merge parent environment with config overrides.
         // VTE treats a non-empty envv as the *complete* environment, so we must

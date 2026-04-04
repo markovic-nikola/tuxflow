@@ -241,14 +241,28 @@ impl ProcessManager {
         // making tools installed via nvm/fnm/volta/etc. available on PATH.
         let argv = [shell.as_str(), "-l", "-c", command.as_str()];
 
-        // Build envv from config
-        // When empty, VTE inherits parent env (which includes TUXFLOW_CHILD)
-        let env_strings: Vec<String> = proc
+        // Build envv: merge parent environment with config overrides.
+        // VTE treats a non-empty envv as the *complete* environment, so we must
+        // always include the full parent env. When launched from a .desktop file
+        // the parent env is minimal, but -l above ensures the shell sources its
+        // login profile (PATH, nvm, etc.).
+        let config_env: std::collections::HashMap<&str, &str> = proc
             .config
             .env
             .iter()
-            .map(|(k, v)| format!("{k}={v}"))
+            .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
+        let env_strings: Vec<String> = if config_env.is_empty() {
+            // No overrides — pass empty envv so VTE inherits parent env as-is
+            Vec::new()
+        } else {
+            // Start with parent env, then overlay config values
+            let mut merged: std::collections::HashMap<String, String> = std::env::vars().collect();
+            for (k, v) in &config_env {
+                merged.insert(k.to_string(), v.to_string());
+            }
+            merged.iter().map(|(k, v)| format!("{k}={v}")).collect()
+        };
         let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
 
         let working_dir = proc.config.working_dir.clone();

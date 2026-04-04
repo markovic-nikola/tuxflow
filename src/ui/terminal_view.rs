@@ -40,7 +40,7 @@ impl TerminalView {
         terminal.spawn_async(
             vte4::PtyFlags::DEFAULT,
             None,                         // working directory (inherit)
-            &[&shell],                    // argv
+            &[&shell, "-l"],              // argv: login shell so profile is sourced
             &[],                          // envv (inherit)
             glib::SpawnFlags::DEFAULT,    // spawn flags
             || {},                        // child_setup

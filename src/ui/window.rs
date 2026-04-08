@@ -38,8 +38,41 @@ impl TuxFlowWindow {
             .default_height(settings.borrow().window.height)
             .build();
 
-        if settings.borrow().window.maximized {
-            window.maximize();
+        // Restore window monitor and position/maximize state
+        {
+            let maximized = settings.borrow().window.maximized;
+            let saved_x = settings.borrow().window.x;
+            let saved_y = settings.borrow().window.y;
+            let saved_monitor = settings.borrow().window.monitor.clone();
+            if let Some(ref connector) = saved_monitor {
+                let connector = connector.clone();
+                let do_maximize = maximized;
+                window.connect_realize(move |win| {
+                    if !do_maximize {
+                        set_x11_position_hint(win, saved_x, saved_y);
+                    }
+                });
+                let connector2 = settings.borrow().window.monitor.clone();
+                window.connect_map(move |win| {
+                    let win = win.clone();
+                    let connector = connector2.clone();
+                    let do_maximize = do_maximize;
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(200),
+                        move || {
+                            restore_window_placement(
+                                &win,
+                                saved_x,
+                                saved_y,
+                                connector.as_deref(),
+                                do_maximize,
+                            );
+                        },
+                    );
+                });
+            } else if maximized {
+                window.maximize();
+            }
         }
 
         Self::load_css();
@@ -325,12 +358,10 @@ impl TuxFlowWindow {
         let pid_file_shutdown = pid_file.clone();
         let settings_shutdown = settings.clone();
         window.connect_close_request(move |win| {
-            // Save window size and maximized state
+            // Save window size, position, and maximized state
             {
                 let mut s = settings_shutdown.borrow_mut();
                 s.window.maximized = win.is_maximized();
-                // Only update size when not maximized, so we preserve the
-                // un-maximized dimensions for next launch
                 if !win.is_maximized() {
                     let w = win.width();
                     let h = win.height();
@@ -338,6 +369,17 @@ impl TuxFlowWindow {
                         s.window.width = w;
                         s.window.height = h;
                     }
+                }
+                // Save monitor name (works on both X11 and Wayland)
+                if let Some(surface) = win.surface() {
+                    let display = surface.display();
+                    if let Some(monitor) = display.monitor_at_surface(&surface) {
+                        s.window.monitor = monitor.connector().map(|c| c.to_string());
+                    }
+                }
+                // Save absolute position (X11 only)
+                if !win.is_maximized() {
+                    save_window_position(win, &mut s);
                 }
                 s.save();
             }
@@ -482,10 +524,14 @@ impl TuxFlowWindow {
         last_project: &Rc<RefCell<Option<String>>>,
         sidebar: &Rc<ProjectList>,
     ) -> Option<String> {
-        stack
-            .visible_child_name()
-            .and_then(|name| name.split_once("::").map(|(proj, _)| proj.to_string()))
-            .or_else(|| last_project.borrow().clone())
+        last_project
+            .borrow()
+            .clone()
+            .or_else(|| {
+                stack
+                    .visible_child_name()
+                    .and_then(|name| name.split_once("::").map(|(proj, _)| proj.to_string()))
+            })
             .or_else(|| sidebar.last_expanded_project())
     }
 
@@ -2468,4 +2514,172 @@ impl TuxFlowWindow {
         }
         CommandResult::Error(format!("Process '{}' not found", process_name))
     }
+}
+
+/// Set X11 WM position hints before the window is mapped, so the WM respects our position.
+/// Must be called from connect_realize (before the window is mapped). No-op on Wayland.
+fn set_x11_position_hint(win: &adw::ApplicationWindow, saved_x: Option<i32>, saved_y: Option<i32>) {
+    let (Some(x), Some(y)) = (saved_x, saved_y) else {
+        return;
+    };
+    let Some(surface) = win.surface() else {
+        return;
+    };
+    let Ok(x11_surface) = surface.downcast::<gdk4_x11::X11Surface>() else {
+        return;
+    };
+    let x11_display = x11_surface
+        .display()
+        .downcast::<gdk4_x11::X11Display>()
+        .expect("X11Surface must have X11Display");
+    unsafe {
+        let xdisplay = x11_display.xdisplay() as *mut x11::xlib::Display;
+        let xwindow = x11_surface.xid();
+        let hints = x11::xlib::XAllocSizeHints();
+        if !hints.is_null() {
+            (*hints).flags = x11::xlib::PPosition | x11::xlib::USPosition;
+            (*hints).x = x;
+            (*hints).y = y;
+            x11::xlib::XSetWMNormalHints(xdisplay, xwindow, hints);
+            x11::xlib::XFree(hints as *mut _);
+        }
+    }
+}
+
+/// Save window position using X11 APIs. No-op on Wayland.
+fn save_window_position(win: &adw::ApplicationWindow, s: &mut AppSettings) {
+    let Some(surface) = win.surface() else {
+        return;
+    };
+    let Ok(x11_surface) = surface.downcast::<gdk4_x11::X11Surface>() else {
+        return;
+    };
+    let x11_display = x11_surface
+        .display()
+        .downcast::<gdk4_x11::X11Display>()
+        .expect("X11Surface must have X11Display");
+    unsafe {
+        let xdisplay = x11_display.xdisplay();
+        let xwindow = x11_surface.xid();
+        let root = x11::xlib::XDefaultRootWindow(xdisplay as *mut _);
+        let mut x: i32 = 0;
+        let mut y: i32 = 0;
+        let mut child: x11::xlib::Window = 0;
+        x11::xlib::XTranslateCoordinates(
+            xdisplay as *mut _,
+            xwindow,
+            root,
+            0,
+            0,
+            &mut x,
+            &mut y,
+            &mut child,
+        );
+        s.window.x = Some(x);
+        s.window.y = Some(y);
+    }
+}
+
+/// Restore window placement: exact position on X11, monitor hint on Wayland.
+/// If `do_maximize` is true, the window will be maximized after moving to the correct monitor.
+fn restore_window_placement(
+    win: &adw::ApplicationWindow,
+    saved_x: Option<i32>,
+    saved_y: Option<i32>,
+    saved_monitor: Option<&str>,
+    do_maximize: bool,
+) {
+    let Some(surface) = win.surface() else {
+        return;
+    };
+    let display = surface.display();
+
+    // Find the target monitor by connector name
+    let target_monitor = saved_monitor.and_then(|c| find_monitor_by_connector(&display, c));
+
+    // Check if already on the correct monitor
+    let already_correct = match (&target_monitor, saved_monitor) {
+        (Some(_), Some(connector)) => {
+            display
+                .monitor_at_surface(&surface)
+                .and_then(|m| m.connector().map(|c| c.to_string()))
+                .as_deref()
+                == Some(connector)
+        }
+        _ => true,
+    };
+
+    // X11: try exact positioning for non-maximized windows
+    if !do_maximize {
+        if let Ok(x11_surface) = surface.clone().downcast::<gdk4_x11::X11Surface>() {
+            if let (Some(x), Some(y)) = (saved_x, saved_y) {
+                let monitors = display.monitors();
+                let on_screen = (0..monitors.n_items()).any(|i| {
+                    monitors
+                        .item(i)
+                        .and_then(|m| m.downcast::<gdk::Monitor>().ok())
+                        .is_some_and(|monitor| {
+                            let geo = monitor.geometry();
+                            x >= geo.x()
+                                && x < geo.x() + geo.width()
+                                && y >= geo.y()
+                                && y < geo.y() + geo.height()
+                        })
+                });
+                if on_screen {
+                    log::debug!("X11: Moving window to ({x}, {y})");
+                    let x11_display = display
+                        .downcast::<gdk4_x11::X11Display>()
+                        .expect("X11Surface must have X11Display");
+                    unsafe {
+                        let xdisplay = x11_display.xdisplay() as *mut x11::xlib::Display;
+                        let xwindow = x11_surface.xid();
+                        x11::xlib::XMoveWindow(xdisplay, xwindow, x, y);
+                        x11::xlib::XFlush(xdisplay);
+                    }
+                    return;
+                }
+                log::info!("Saved window position ({x}, {y}) is off-screen, ignoring");
+            }
+            return;
+        }
+    }
+
+    // Move to the correct monitor (works on both X11 and Wayland)
+    if !already_correct {
+        if let Some(ref monitor) = target_monitor {
+            let connector = saved_monitor.unwrap_or("unknown");
+            log::debug!("Moving window to monitor '{connector}' via fullscreen toggle");
+            let gtk_win: &gtk4::Window = win.upcast_ref();
+            gtk_win.fullscreen_on_monitor(monitor);
+            let win = win.clone();
+            let do_maximize = do_maximize;
+            glib::idle_add_local_once(move || {
+                win.unfullscreen();
+                if do_maximize {
+                    win.maximize();
+                }
+            });
+            return;
+        }
+        if let Some(connector) = saved_monitor {
+            log::info!("Saved monitor '{connector}' not found, letting WM decide placement");
+        }
+    }
+
+    // If already on the correct monitor, just maximize if needed
+    if do_maximize {
+        win.maximize();
+    }
+}
+
+/// Find a monitor by its connector name (e.g. "HDMI-1", "DP-2", "eDP-1").
+fn find_monitor_by_connector(display: &gdk::Display, connector: &str) -> Option<gdk::Monitor> {
+    let monitors = display.monitors();
+    (0..monitors.n_items()).find_map(|i| {
+        monitors
+            .item(i)
+            .and_then(|m| m.downcast::<gdk::Monitor>().ok())
+            .filter(|m| m.connector().as_deref() == Some(connector))
+    })
 }

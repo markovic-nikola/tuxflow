@@ -24,6 +24,8 @@ path = "src/bin/tuxflow-mcp.rs"
 
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_14"] }
+gdk4-x11 = { version = "0.11", features = ["xlib"] }
+x11 = { version = "2.21", features = ["xlib"] }
 libadwaita = { version = "0.9", features = ["v1_5"] }
 vte4 = { version = "0.10", features = ["v0_76"] }
 serde = { version = "1", features = ["derive"] }

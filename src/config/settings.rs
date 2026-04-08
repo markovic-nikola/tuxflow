@@ -24,6 +24,9 @@ pub struct WindowSettings {
     pub width: i32,
     pub height: i32,
     pub maximized: bool,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub monitor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +140,9 @@ impl Default for WindowSettings {
             width: 1200,
             height: 800,
             maximized: false,
+            x: None,
+            y: None,
+            monitor: None,
         }
     }
 }

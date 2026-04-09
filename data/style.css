@@ -347,6 +347,19 @@
     opacity: 0.4;
 }
 
+.git-pull-btn {
+    background: #d29922;
+    color: #ffffff;
+}
+
+.git-pull-btn:hover {
+    background: #e3b341;
+}
+
+.git-pull-btn:disabled {
+    opacity: 0.4;
+}
+
 /* Green Save/confirm buttons */
 .suggested-action.pill {
     background: #2ea043;

@@ -16,7 +16,7 @@ use crate::process::pid_file::PidFile;
 use crate::ui::add_command_dialog::AddCommandDialog;
 use crate::ui::add_ssh_dialog::AddSshDialog;
 use crate::ui::command_palette::CommandPalette;
-use crate::ui::git_changes_dialog::GitChangesDialog;
+use crate::ui::git_changes_dialog::{GitChangesDialog, commits_behind, git_fetch};
 use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::terminal_search::TerminalSearch;
@@ -1689,17 +1689,75 @@ impl TuxFlowWindow {
             if let Some(name) = stack.visible_child_name() {
                 if let Some((proj, _)) = name.split_once("::") {
                     title_ref.set_label(proj);
-                    let has_git = ws_vis
-                        .borrow()
-                        .get_project_dir(proj)
-                        .is_some_and(|dir| dir.join(".git").exists());
+                    let ws_borrow = ws_vis.borrow();
+                    let dir_opt = ws_borrow.get_project_dir(proj);
+                    let has_git = dir_opt.as_ref().is_some_and(|d| d.join(".git").exists());
                     sb_vis.set_git_available(has_git);
+                    if has_git {
+                        if let Some(dir) = dir_opt {
+                            let dir = dir.clone();
+                            let sb = sb_vis.clone();
+                            let (tx, rx) = std::sync::mpsc::channel::<usize>();
+                            std::thread::spawn(move || {
+                                git_fetch(&dir);
+                                let _ = tx.send(commits_behind(&dir));
+                            });
+                            glib::idle_add_local(move || {
+                                if let Ok(behind) = rx.try_recv() {
+                                    sb.set_git_pull_indicator(behind);
+                                    return glib::ControlFlow::Break;
+                                }
+                                glib::ControlFlow::Continue
+                            });
+                        }
+                    } else {
+                        sb_vis.set_git_pull_indicator(0);
+                    }
                 }
             } else {
                 title_ref.set_label("TuxFlow");
                 sb_vis.set_git_available(false);
+                sb_vis.set_git_pull_indicator(0);
             }
         });
+
+        // Poll git pull indicator every 60 seconds
+        {
+            let ws_poll = ws.clone();
+            let sb_poll = status_bar.clone();
+            let stack_poll = terminal_stack.clone();
+            let last_proj_poll = last_selected_project.clone();
+            let sidebar_poll = sidebar.clone();
+            glib::timeout_add_seconds_local(60, move || {
+                let project_name = TuxFlowWindow::resolve_active_project(
+                    &stack_poll,
+                    &last_proj_poll,
+                    &sidebar_poll,
+                );
+                if let Some(proj_name) = project_name {
+                    let ws_borrow = ws_poll.borrow();
+                    if let Some(dir) = ws_borrow.get_project_dir(&proj_name) {
+                        if dir.join(".git").exists() {
+                            let dir = dir.clone();
+                            let sb = sb_poll.clone();
+                            let (tx, rx) = std::sync::mpsc::channel::<usize>();
+                            std::thread::spawn(move || {
+                                git_fetch(&dir);
+                                let _ = tx.send(commits_behind(&dir));
+                            });
+                            glib::idle_add_local(move || {
+                                if let Ok(behind) = rx.try_recv() {
+                                    sb.set_git_pull_indicator(behind);
+                                    return glib::ControlFlow::Break;
+                                }
+                                glib::ControlFlow::Continue
+                            });
+                        }
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
 
         let content_overlay = gtk4::Overlay::new();
         content_overlay.set_child(Some(terminal_stack));

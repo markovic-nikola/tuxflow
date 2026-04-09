@@ -131,6 +131,20 @@ fn commits_ahead(project_dir: &Path) -> usize {
     }
 }
 
+pub fn commits_behind(project_dir: &Path) -> usize {
+    let output = std::process::Command::new("git")
+        .args(["rev-list", "--count", "HEAD..@{u}"])
+        .current_dir(project_dir)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
 fn update_push_button(btn: &gtk4::Button, ahead: usize) {
     if ahead > 0 {
         btn.set_label(&format!("Push ({ahead})"));
@@ -139,6 +153,23 @@ fn update_push_button(btn: &gtk4::Button, ahead: usize) {
         btn.set_label("Push");
         btn.set_sensitive(false);
     }
+}
+
+fn update_pull_button(btn: &gtk4::Button, behind: usize) {
+    if behind > 0 {
+        btn.set_label(&format!("Pull ({behind})"));
+        btn.set_visible(true);
+    } else {
+        btn.set_label("Pull");
+        btn.set_visible(false);
+    }
+}
+
+pub fn git_fetch(project_dir: &Path) {
+    let _ = std::process::Command::new("git")
+        .args(["fetch"])
+        .current_dir(project_dir)
+        .output();
 }
 
 fn run_git_command(project_dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -447,6 +478,12 @@ impl GitChangesDialog {
             .sensitive(false)
             .build();
 
+        let pull_btn = gtk4::Button::builder()
+            .label("Pull")
+            .css_classes(["git-pull-btn"])
+            .visible(false)
+            .build();
+
         let push_btn = gtk4::Button::builder()
             .label("Push")
             .css_classes(["git-push-btn"])
@@ -454,6 +491,7 @@ impl GitChangesDialog {
 
         bottom_bar.append(&commit_entry);
         bottom_bar.append(&commit_btn);
+        bottom_bar.append(&pull_btn);
         bottom_bar.append(&push_btn);
         toolbar_view.add_bottom_bar(&bottom_bar);
 
@@ -463,17 +501,22 @@ impl GitChangesDialog {
         let files_store = std::rc::Rc::new(std::cell::RefCell::new(Vec::<ChangedFile>::new()));
         let dir = project_dir.to_path_buf();
 
-        // Initial push status
+        // Initial push/pull status
         {
             let dir_init = dir.clone();
             let push_btn_init = push_btn.clone();
-            let (tx, rx) = mpsc::channel::<usize>();
+            let pull_btn_init = pull_btn.clone();
+            let (tx, rx) = mpsc::channel::<(usize, usize)>();
             std::thread::spawn(move || {
-                let _ = tx.send(commits_ahead(&dir_init));
+                git_fetch(&dir_init);
+                let ahead = commits_ahead(&dir_init);
+                let behind = commits_behind(&dir_init);
+                let _ = tx.send((ahead, behind));
             });
             glib::idle_add_local(move || {
-                if let Ok(ahead) = rx.try_recv() {
+                if let Ok((ahead, behind)) = rx.try_recv() {
                     update_push_button(&push_btn_init, ahead);
+                    update_pull_button(&pull_btn_init, behind);
                     return glib::ControlFlow::Break;
                 }
                 glib::ControlFlow::Continue
@@ -657,6 +700,68 @@ impl GitChangesDialog {
             });
         });
 
+        // Pull button
+        let pulling = Rc::new(Cell::new(false));
+        let dir_pull = dir.clone();
+        let dialog_pull = dialog.clone();
+        let pull_btn_pull = pull_btn.clone();
+        let push_btn_pull = push_btn.clone();
+        let pulling_click = pulling.clone();
+        let listbox_pull = listbox.clone();
+        let stack_pull = content_stack.clone();
+        let diff_view_pull = diff_view.clone();
+        let files_store_pull = files_store.clone();
+        pull_btn.connect_clicked(move |btn| {
+            pulling_click.set(true);
+            btn.set_label("Pulling...");
+            btn.set_sensitive(false);
+            let dir = dir_pull.clone();
+            let dlg = dialog_pull.clone();
+            let pb_push = push_btn_pull.clone();
+            let pb_pull = pull_btn_pull.clone();
+            let lb = listbox_pull.clone();
+            let cs = stack_pull.clone();
+            let dv = diff_view_pull.clone();
+            let fs = files_store_pull.clone();
+            let (tx, rx) = mpsc::channel::<Result<(usize, usize), String>>();
+            std::thread::spawn(move || match run_git_command(&dir, &["pull"]) {
+                Ok(_) => {
+                    let ahead = commits_ahead(&dir);
+                    let behind = commits_behind(&dir);
+                    let _ = tx.send(Ok((ahead, behind)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            });
+            let pulling_done = pulling_click.clone();
+            let dir_reload = dir_pull.clone();
+            glib::idle_add_local(move || {
+                if let Ok(result) = rx.try_recv() {
+                    pulling_done.set(false);
+                    match result {
+                        Ok((ahead, behind)) => {
+                            update_push_button(&pb_push, ahead);
+                            update_pull_button(&pb_pull, behind);
+                            GitChangesDialog::load_files(
+                                dir_reload.clone(),
+                                lb.clone(),
+                                cs.clone(),
+                                dv.clone(),
+                                fs.clone(),
+                            );
+                        }
+                        Err(err) => {
+                            pb_pull.set_sensitive(true);
+                            show_error_dialog(&dlg, "Pull Failed", &err);
+                        }
+                    }
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        });
+
         dialog.present(Some(parent));
 
         // Auto-refresh: poll git status every 2 seconds
@@ -668,12 +773,15 @@ impl GitChangesDialog {
 
         let poll_dir = project_dir.to_path_buf();
         let last_hash = Rc::new(Cell::new(0u64));
+        let fetch_counter = Rc::new(Cell::new(0u32));
         let poll_listbox = listbox.clone();
         let poll_stack = content_stack.clone();
         let poll_diff = diff_view.clone();
         let poll_files = files_store.clone();
         let poll_push = push_btn.clone();
+        let poll_pull = pull_btn.clone();
         let poll_pushing = pushing.clone();
+        let poll_pulling = pulling.clone();
         glib::timeout_add_seconds_local(2, move || {
             if !alive.get() {
                 return glib::ControlFlow::Break;
@@ -687,13 +795,23 @@ impl GitChangesDialog {
             let dv = poll_diff.clone();
             let fs = poll_files.clone();
             let pb = poll_push.clone();
+            let pl = poll_pull.clone();
             let is_pushing = poll_pushing.clone();
+            let is_pulling = poll_pulling.clone();
 
-            let (tx, rx) = mpsc::channel::<(u64, usize)>();
+            let fetch_tick = fetch_counter.get();
+            fetch_counter.set(fetch_tick + 1);
+
+            let (tx, rx) = mpsc::channel::<(u64, usize, usize)>();
             std::thread::spawn(move || {
+                // Fetch every ~30 seconds (15 ticks * 2 seconds)
+                if fetch_tick % 15 == 0 {
+                    git_fetch(&dir);
+                }
                 let hash = git_status_hash(&dir);
                 let ahead = commits_ahead(&dir);
-                let _ = tx.send((hash, ahead));
+                let behind = commits_behind(&dir);
+                let _ = tx.send((hash, ahead, behind));
             });
 
             let dir2 = poll_dir.clone();
@@ -701,9 +819,12 @@ impl GitChangesDialog {
                 if !alive_ref.get() {
                     return glib::ControlFlow::Break;
                 }
-                if let Ok((hash, ahead)) = rx.try_recv() {
+                if let Ok((hash, ahead, behind)) = rx.try_recv() {
                     if !is_pushing.get() {
                         update_push_button(&pb, ahead);
+                    }
+                    if !is_pulling.get() {
+                        update_pull_button(&pl, behind);
                     }
                     let prev = hash_ref.get();
                     hash_ref.set(hash);

@@ -259,6 +259,10 @@ impl Workspace {
         }
     }
 
+    pub fn set_project_name(&mut self, dir: &str, name: &str) {
+        self.saved.set_name(dir, name);
+    }
+
     pub fn rename_project(&mut self, old_name: &str, new_name: &str) {
         if let Some(project) = self.projects.iter_mut().find(|p| p.name == old_name) {
             let dir_str = project.dir.to_string_lossy().to_string();

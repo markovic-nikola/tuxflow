@@ -461,22 +461,59 @@ impl GitChangesDialog {
         toolbar_view.set_content(Some(&content_stack));
 
         // Bottom bar: commit message + action buttons
-        let bottom_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let bottom_bar = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         bottom_bar.set_margin_start(8);
         bottom_bar.set_margin_end(8);
         bottom_bar.set_margin_top(8);
         bottom_bar.set_margin_bottom(8);
 
-        let commit_entry = gtk4::Entry::builder()
-            .placeholder_text("Commit message...")
-            .hexpand(true)
+        // Multi-line commit message input
+        let commit_textview = gtk4::TextView::builder()
+            .wrap_mode(gtk4::WrapMode::WordChar)
+            .accepts_tab(false)
+            .top_margin(8)
+            .bottom_margin(8)
+            .left_margin(8)
+            .right_margin(8)
             .build();
+        commit_textview.add_css_class("commit-textview");
+
+        let commit_scroll = gtk4::ScrolledWindow::builder()
+            .child(&commit_textview)
+            .hexpand(true)
+            .min_content_height(72)
+            .max_content_height(72)
+            .has_frame(true)
+            .build();
+
+        // Placeholder label via overlay
+        let placeholder_label = gtk4::Label::builder()
+            .label("Commit message...")
+            .halign(gtk4::Align::Start)
+            .valign(gtk4::Align::Start)
+            .margin_start(12)
+            .margin_top(10)
+            .css_classes(["dim-label"])
+            .can_target(false)
+            .build();
+
+        let commit_overlay = gtk4::Overlay::new();
+        commit_overlay.set_child(Some(&commit_scroll));
+        commit_overlay.add_overlay(&placeholder_label);
+
+        bottom_bar.append(&commit_overlay);
+
+        // Button row
+        let buttons_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
 
         let commit_btn = gtk4::Button::builder()
             .label("Commit")
             .css_classes(["suggested-action"])
             .sensitive(false)
             .build();
+
+        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
 
         let pull_btn = gtk4::Button::builder()
             .label("Pull")
@@ -489,10 +526,12 @@ impl GitChangesDialog {
             .css_classes(["git-push-btn"])
             .build();
 
-        bottom_bar.append(&commit_entry);
-        bottom_bar.append(&commit_btn);
-        bottom_bar.append(&pull_btn);
-        bottom_bar.append(&push_btn);
+        buttons_row.append(&commit_btn);
+        buttons_row.append(&spacer);
+        buttons_row.append(&pull_btn);
+        buttons_row.append(&push_btn);
+
+        bottom_bar.append(&buttons_row);
         toolbar_view.add_bottom_bar(&bottom_bar);
 
         dialog.set_child(Some(&toolbar_view));
@@ -588,19 +627,29 @@ impl GitChangesDialog {
             );
         });
 
-        // Commit entry enables/disables commit button
+        // Commit textview enables/disables commit button + placeholder
         let commit_btn_ref = commit_btn.clone();
-        commit_entry.connect_changed(move |entry| {
-            commit_btn_ref.set_sensitive(!entry.text().is_empty());
+        let placeholder_ref = placeholder_label.clone();
+        let buffer = commit_textview.buffer();
+        buffer.connect_changed(move |buf| {
+            let text = buf.text(&buf.start_iter(), &buf.end_iter(), false);
+            let is_empty = text.trim().is_empty();
+            commit_btn_ref.set_sensitive(!is_empty);
+            placeholder_ref.set_visible(is_empty);
         });
 
         // Commit button: stages all + commits
         let dir_commit = dir.clone();
         let dialog_commit = dialog.clone();
-        let entry_commit = commit_entry.clone();
+        let buffer_commit = commit_textview.buffer();
         let push_btn_commit = push_btn.clone();
         commit_btn.connect_clicked(move |btn| {
-            let msg = entry_commit.text().to_string();
+            let msg = {
+                let buf = &buffer_commit;
+                buf.text(&buf.start_iter(), &buf.end_iter(), false)
+                    .trim()
+                    .to_string()
+            };
             if msg.is_empty() {
                 return;
             }
@@ -608,7 +657,7 @@ impl GitChangesDialog {
             btn.set_sensitive(false);
             let dir = dir_commit.clone();
             let dlg = dialog_commit.clone();
-            let entry = entry_commit.clone();
+            let buf = buffer_commit.clone();
             let pb = push_btn_commit.clone();
             let cb = btn.clone();
             let (tx, rx) = mpsc::channel::<Result<usize, String>>();
@@ -628,7 +677,7 @@ impl GitChangesDialog {
                     cb.set_label("Commit");
                     match result {
                         Ok(ahead) => {
-                            entry.set_text("");
+                            buf.set_text("");
                             update_push_button(&pb, ahead);
                         }
                         Err(err) => {

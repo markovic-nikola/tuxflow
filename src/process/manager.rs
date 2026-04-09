@@ -31,6 +31,11 @@ pub struct ManagedProcess {
     /// The callback receives the new terminal and should connect signals,
     /// swap the placeholder in the GTK Stack, etc.
     pub on_materialized: Option<Box<dyn Fn(&vte4::Terminal)>>,
+    /// Shared name cell used by the auto-restart handler so it tracks renames.
+    pub name_cell: Option<crate::process::auto_restart::ProcessNameCell>,
+    /// Shared qualified name cell (project::process) so on_materialized and
+    /// signal handlers track renames.
+    pub qname_cell: Option<Rc<RefCell<String>>>,
 }
 
 impl ManagedProcess {
@@ -46,6 +51,8 @@ impl ManagedProcess {
             restart_count: 0,
             started_at: None,
             on_materialized: None,
+            name_cell: None,
+            qname_cell: None,
         }
     }
 
@@ -320,19 +327,43 @@ impl ProcessManager {
             return;
         }
 
-        // Kill the child process tree via its PID
+        // Kill the entire process tree rooted at the spawned PID.
+        // VTE spawns `shell -li -c "command"`, and the child command may fork
+        // further processes (e.g., npm → node). Sending SIGTERM to just the
+        // process group (-pid) may miss child processes that created their own
+        // process groups. We collect all descendant PIDs via /proc and signal
+        // each one individually.
         if let Some(ref pid_cell) = proc.pid_cell
             && let Some(pid) = *pid_cell.borrow()
         {
             if let Some(ref cb) = self.on_pid_change {
                 cb(pid, false);
             }
-            let neg_pid = nix::unistd::Pid::from_raw(-pid);
-            // SIGTERM the entire process group
-            let _ = nix::sys::signal::kill(neg_pid, nix::sys::signal::Signal::SIGTERM);
+            let all_pids = collect_process_tree(pid);
+            // SIGTERM all processes in the tree (children first, then root)
+            for &p in all_pids.iter().rev() {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(p),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
+            // Also signal the process group in case some children share it
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
             // Force kill after a delay in case SIGTERM is ignored
             glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
-                let _ = nix::sys::signal::kill(neg_pid, nix::sys::signal::Signal::SIGKILL);
+                for &p in all_pids.iter().rev() {
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(p),
+                        nix::sys::signal::Signal::SIGKILL,
+                    );
+                }
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
             });
         }
 
@@ -488,6 +519,14 @@ impl ProcessManager {
         if let Some(mut proc) = self.processes.remove(old_name) {
             proc.config = new_config;
             proc.id = new_name.clone();
+
+            // Update the shared name cell so auto-restart handlers track the rename
+            if name_changed {
+                if let Some(ref cell) = proc.name_cell {
+                    *cell.borrow_mut() = new_name.clone();
+                }
+            }
+
             self.processes.insert(new_name.clone(), proc);
 
             if name_changed && let Some(entry) = self.order.iter_mut().find(|n| *n == old_name) {
@@ -522,4 +561,49 @@ impl ProcessManager {
                 .unwrap_or(usize::MAX)
         });
     }
+}
+
+/// Walk /proc to collect all PIDs in the process tree rooted at `root_pid`.
+/// Used by both `ProcessManager::kill` and `PidFile::kill_orphans`.
+/// Returns the root followed by all descendants (breadth-first).
+pub fn collect_process_tree(root_pid: i32) -> Vec<i32> {
+    use std::collections::VecDeque;
+    use std::fs;
+
+    // Build a map of parent → children by scanning /proc
+    let mut children_map: HashMap<i32, Vec<i32>> = HashMap::new();
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+                continue;
+            };
+            let stat_path = entry.path().join("stat");
+            if let Ok(stat) = fs::read_to_string(&stat_path) {
+                // Format: pid (comm) state ppid ...
+                // comm can contain spaces/parens, so find the last ')' first
+                if let Some(after_comm) = stat.rfind(')') {
+                    let fields: Vec<&str> = stat[after_comm + 2..].split_whitespace().collect();
+                    // fields[0] = state, fields[1] = ppid
+                    if let Some(ppid) = fields.get(1).and_then(|s| s.parse::<i32>().ok()) {
+                        children_map.entry(ppid).or_default().push(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    // BFS from root_pid
+    let mut result = vec![root_pid];
+    let mut queue = VecDeque::new();
+    queue.push_back(root_pid);
+    while let Some(pid) = queue.pop_front() {
+        if let Some(kids) = children_map.get(&pid) {
+            for &kid in kids {
+                result.push(kid);
+                queue.push_back(kid);
+            }
+        }
+    }
+    result
 }

@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gtk4::glib;
 use vte4::prelude::*;
 
@@ -7,26 +10,29 @@ use crate::util::notifications;
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const BASE_DELAY_MS: u32 = 1000;
 
-/// Returns a closure that connects exit-detection signals to the given terminal.
-/// Call this when the terminal is materialized (lazily created).
-///
-/// Connects both `child_exited` (primary) and `eof` (fallback) signals to
-/// reliably detect when a spawned process finishes.
+/// Shared name cell that allows the auto-restart handler to track renames.
+pub type ProcessNameCell = Rc<RefCell<String>>;
+
+/// Returns a closure that connects exit-detection signals to the given terminal,
+/// plus a shared name cell. When the process is renamed, update the cell so the
+/// signal handlers use the current name instead of the stale original.
 pub fn build_auto_restart_handler(
     manager: &ProcessManagerRef,
     process_name: &str,
     auto_restart: bool,
-) -> Box<dyn Fn(&vte4::Terminal)> {
+) -> (Box<dyn Fn(&vte4::Terminal)>, ProcessNameCell) {
     let manager_ref = manager.clone();
-    let name = process_name.to_string();
+    let name_cell: ProcessNameCell = Rc::new(RefCell::new(process_name.to_string()));
+    let name_cell_ret = name_cell.clone();
 
-    Box::new(move |terminal: &vte4::Terminal| {
+    let handler = Box::new(move |terminal: &vte4::Terminal| {
         // --- child_exited: primary exit handler (carries exit status) ---
         {
             let manager_ref = manager_ref.clone();
-            let name = name.clone();
+            let name_cell = name_cell.clone();
 
             terminal.connect_child_exited(move |_terminal, status| {
+                let name = name_cell.borrow().clone();
                 log::debug!("child_exited fired for {name} with status {status}");
                 handle_process_exit(&manager_ref, &name, Some(status), auto_restart);
             });
@@ -35,9 +41,10 @@ pub fn build_auto_restart_handler(
         // --- eof: fallback for when child_exited doesn't fire ---
         {
             let manager_ref = manager_ref.clone();
-            let name = name.clone();
+            let name_cell = name_cell.clone();
 
             terminal.connect_eof(move |_terminal| {
+                let name = name_cell.borrow().clone();
                 let mgr = manager_ref.borrow();
                 let is_running = mgr
                     .get_process(&name)
@@ -54,7 +61,9 @@ pub fn build_auto_restart_handler(
                 }
             });
         }
-    })
+    });
+
+    (handler, name_cell_ret)
 }
 
 /// Unified exit handler used by both `child_exited` and `eof` signals.

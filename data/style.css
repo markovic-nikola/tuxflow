@@ -360,6 +360,14 @@
     opacity: 0.4;
 }
 
+.commit-textview {
+    font-size: 13px;
+}
+
+.commit-textview text {
+    background: transparent;
+}
+
 /* Green Save/confirm buttons */
 .suggested-action.pill {
     background: #2ea043;

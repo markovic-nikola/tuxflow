@@ -16,6 +16,10 @@ pub struct ProcessRow {
     is_terminal: bool,
     is_running: Cell<bool>,
     name_label: gtk4::Label,
+    /// Shared name used by button callbacks so they track renames.
+    action_name: Rc<RefCell<String>>,
+    /// Shared qualified name (project::process) for context actions.
+    pub qualified_name: Rc<RefCell<String>>,
     cpu_label: gtk4::Label,
     memory_label: gtk4::Label,
     port_label: gtk4::Label,
@@ -139,37 +143,38 @@ impl ProcessRow {
         container.append(&stop_button);
 
         let on_context_action: ActionCallback = Rc::new(RefCell::new(None));
+        let action_name: Rc<RefCell<String>> = Rc::new(RefCell::new(name.to_string()));
 
         // Wire play button to trigger "toggle" action
         let on_action_ref = on_context_action.clone();
-        let name_owned = name.to_string();
+        let aname = action_name.clone();
         play_button.connect_clicked(move |_| {
             if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_owned, "toggle");
+                cb(&aname.borrow(), "toggle");
             }
         });
 
         // Wire restart button
         let on_action_ref = on_context_action.clone();
-        let name_owned = name.to_string();
+        let aname = action_name.clone();
         restart_button.connect_clicked(move |_| {
             if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_owned, "restart");
+                cb(&aname.borrow(), "restart");
             }
         });
 
         // Wire stop button
         let on_action_ref = on_context_action.clone();
-        let name_owned = name.to_string();
+        let aname = action_name.clone();
         stop_button.connect_clicked(move |_| {
             if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_owned, "stop");
+                cb(&aname.borrow(), "stop");
             }
         });
 
         // Right-click context menu
         let (popover, _menu, browser_section) =
-            Self::build_context_menu(name, command, &on_context_action, &url);
+            Self::build_context_menu(name, command, &on_context_action, &url, &action_name);
         popover.set_parent(&container);
 
         let gesture = gtk4::GestureClick::builder()
@@ -193,6 +198,8 @@ impl ProcessRow {
             is_terminal,
             is_running: Cell::new(false),
             name_label,
+            action_name,
+            qualified_name: Rc::new(RefCell::new(String::new())),
             cpu_label,
             memory_label,
             port_label,
@@ -206,10 +213,11 @@ impl ProcessRow {
     }
 
     fn build_context_menu(
-        process_name: &str,
+        _process_name: &str,
         command: &str,
         on_action: &ActionCallback,
         url: &Rc<RefCell<Option<String>>>,
+        action_name: &Rc<RefCell<String>>,
     ) -> (gtk4::PopoverMenu, gio::Menu, gio::Menu) {
         let menu = gio::Menu::new();
 
@@ -246,17 +254,16 @@ impl ProcessRow {
         popover.add_child(&delete_btn, "delete-button");
 
         let action_group = gio::SimpleActionGroup::new();
-        let name = process_name.to_string();
 
-        // Helper to create context actions
-        let add_action = |action_name: &str, action_str: &str| {
+        // Helper to create context actions — reads from shared action_name
+        let add_action = |action_name_str: &str, action_str: &str| {
             let on_action_ref = on_action.clone();
-            let name_ref = name.clone();
+            let aname = action_name.clone();
             let action_owned = action_str.to_string();
-            let action = gio::SimpleAction::new(action_name, None);
+            let action = gio::SimpleAction::new(action_name_str, None);
             action.connect_activate(move |_, _| {
                 if let Some(ref cb) = *on_action_ref.borrow() {
-                    cb(&name_ref, &action_owned);
+                    cb(&aname.borrow(), &action_owned);
                 }
             });
             action_group.add_action(&action);
@@ -270,12 +277,12 @@ impl ProcessRow {
 
         // Wire delete button directly (custom widget, not in action group)
         let on_action_ref = on_action.clone();
-        let name_ref = name.clone();
+        let aname = action_name.clone();
         let popover_ref = popover.clone();
         delete_btn.connect_clicked(move |_| {
             popover_ref.popdown();
             if let Some(ref cb) = *on_action_ref.borrow() {
-                cb(&name_ref, "delete");
+                cb(&aname.borrow(), "delete");
             }
         });
 
@@ -441,6 +448,12 @@ impl ProcessRow {
 
     pub fn set_name(&self, name: &str) {
         self.name_label.set_label(name);
+    }
+
+    /// Update the internal process name used by button/menu actions.
+    /// Call this when the process is renamed (not for display_name changes).
+    pub fn set_action_name(&self, name: &str) {
+        *self.action_name.borrow_mut() = name.to_string();
     }
 
     pub fn set_command_tooltip(&self, command: &str) {

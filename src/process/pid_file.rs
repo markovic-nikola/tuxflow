@@ -40,23 +40,39 @@ impl PidFile {
             .collect()
     }
 
-    /// Kill a list of orphaned PIDs (SIGTERM then SIGKILL).
+    /// Kill a list of orphaned PIDs and their entire process trees (SIGTERM then SIGKILL).
     pub fn kill_orphans(pids: &[i32]) {
+        let all_pids: Vec<i32> = pids
+            .iter()
+            .flat_map(|&pid| super::manager::collect_process_tree(pid))
+            .collect();
+        for &pid in all_pids.iter().rev() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+        }
+        // Also signal process groups
         for &pid in pids {
-            let neg = nix::unistd::Pid::from_raw(-pid);
-            let pos = nix::unistd::Pid::from_raw(pid);
-            // Try process group first, fall back to single process
-            let _ = nix::sys::signal::kill(neg, nix::sys::signal::Signal::SIGTERM);
-            let _ = nix::sys::signal::kill(pos, nix::sys::signal::Signal::SIGTERM);
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-pid),
+                nix::sys::signal::Signal::SIGTERM,
+            );
         }
         // Force kill after a short delay
-        let pids_owned: Vec<i32> = pids.to_vec();
+        let root_pids: Vec<i32> = pids.to_vec();
         gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
-            for pid in &pids_owned {
-                let neg = nix::unistd::Pid::from_raw(-pid);
-                let pos = nix::unistd::Pid::from_raw(*pid);
-                let _ = nix::sys::signal::kill(neg, nix::sys::signal::Signal::SIGKILL);
-                let _ = nix::sys::signal::kill(pos, nix::sys::signal::Signal::SIGKILL);
+            for &pid in all_pids.iter().rev() {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            for &pid in &root_pids {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
             }
         });
         // Clean up the stale pid file

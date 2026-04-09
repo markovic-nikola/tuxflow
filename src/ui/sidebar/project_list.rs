@@ -41,6 +41,7 @@ pub struct ProjectList {
     on_process_deleted: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     on_counts_changed: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_project_renamed: Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>,
+    on_process_renamed: Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>,
     workspace: Rc<RefCell<Option<WorkspaceRef>>>,
     window: Rc<RefCell<Option<libadwaita::ApplicationWindow>>>,
     single_expand: Rc<Cell<bool>>,
@@ -127,6 +128,7 @@ impl ProjectList {
             on_process_deleted: Rc::new(RefCell::new(None)),
             on_counts_changed: Rc::new(RefCell::new(None)),
             on_project_renamed: Rc::new(RefCell::new(None)),
+            on_process_renamed: Rc::new(RefCell::new(None)),
             workspace: Rc::new(RefCell::new(None)),
             window: Rc::new(RefCell::new(None)),
             single_expand,
@@ -170,6 +172,11 @@ impl ProjectList {
 
     pub fn set_on_project_renamed(&self, cb: impl Fn(&str, &str) + 'static) {
         *self.on_project_renamed.borrow_mut() = Some(Box::new(cb));
+    }
+
+    /// Callback fired when a process is renamed: (old_qname, new_qname).
+    pub fn set_on_process_renamed(&self, cb: impl Fn(&str, &str) + 'static) {
+        *self.on_process_renamed.borrow_mut() = Some(Box::new(cb));
     }
 
     /// Add a single project to the sidebar (appends, doesn't clear)
@@ -335,6 +342,7 @@ impl ProjectList {
                     &self.process_statuses,
                     &self.on_process_deleted,
                     &self.on_counts_changed,
+                    &self.on_process_renamed,
                     &self.window,
                     &self.workspace,
                     &self.selected_qname,
@@ -645,23 +653,27 @@ impl ProjectList {
         process_statuses: &Rc<RefCell<HashMap<String, ProcessStatus>>>,
         on_process_deleted: &Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
         on_counts_changed: &Rc<RefCell<Option<Box<dyn Fn()>>>>,
+        on_process_renamed: &Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>,
         window: &Rc<RefCell<Option<adw::ApplicationWindow>>>,
         workspace: &Rc<RefCell<Option<WorkspaceRef>>>,
         selected_qname: &Rc<RefCell<Option<String>>>,
     ) {
         let mgr = manager.clone();
-        let qname = qualified_name.to_string();
+        row.qualified_name.replace(qualified_name.to_string());
+        let qname_cell = row.qualified_name.clone();
         let select_cb = on_selected.clone();
         let process_rows_ref = process_rows.clone();
         let sections_ref = sections.clone();
         let statuses_ref = process_statuses.clone();
         let on_deleted_ref = on_process_deleted.clone();
         let on_counts_ref = on_counts_changed.clone();
+        let on_renamed_ref = on_process_renamed.clone();
         let win_ref = window.clone();
         let ws_ref = workspace.clone();
         let selected_ref = selected_qname.clone();
         let rows_for_highlight = process_rows.clone();
         row.set_on_context_action(move |name, action| {
+            let qname = qname_cell.borrow().clone();
             let select_and_highlight = |qname: &str| {
                 // Update sidebar highlight
                 let rows = rows_for_highlight.borrow();
@@ -683,25 +695,32 @@ impl ProjectList {
             log::info!("Row action: name={name}, action={action}, qname={qname}");
             match action {
                 "toggle" => {
-                    let mut mgr = mgr.borrow_mut();
-                    log::info!(
-                        "Toggle: looking up process '{name}', exists={}",
-                        mgr.get_process(name).is_some()
-                    );
-                    if let Some(proc) = mgr.get_process(name) {
-                        if proc.status == ProcessStatus::Running {
-                            mgr.kill(name);
+                    let should_select = {
+                        let mut mgr = mgr.borrow_mut();
+                        if let Some(proc) = mgr.get_process(name) {
+                            if proc.status == ProcessStatus::Running {
+                                mgr.kill(name);
+                                false
+                            } else {
+                                mgr.spawn(name);
+                                true
+                            }
                         } else {
-                            mgr.spawn(name);
-                            select_and_highlight(&qname);
+                            log::warn!("Toggle: process '{name}' not found");
+                            false
                         }
+                    };
+                    if should_select {
+                        select_and_highlight(&qname);
                     }
                 }
                 "stop" => {
                     mgr.borrow_mut().kill(name);
                 }
                 "restart" => {
-                    mgr.borrow_mut().restart(name);
+                    {
+                        mgr.borrow_mut().restart(name);
+                    }
                     select_and_highlight(&qname);
                 }
                 "clear" => {
@@ -725,10 +744,12 @@ impl ProjectList {
                     let rows_edit = process_rows_ref.clone();
                     let sections_edit = sections_ref.clone();
                     let statuses_edit = statuses_ref.clone();
+                    let selected_edit = selected_ref.clone();
                     let ws_edit = ws_ref.clone();
                     let select_edit = select_cb.clone();
                     let on_deleted_edit = on_deleted_ref.clone();
                     let on_counts_edit = on_counts_ref.clone();
+                    let on_renamed_edit = on_renamed_ref.clone();
                     let win_edit = win_ref.clone();
 
                     // Defer to idle to avoid RefCell conflicts when triggered
@@ -760,6 +781,23 @@ impl ProjectList {
                                             .borrow_mut()
                                             .update_process_config(&old_name, new_config.clone());
 
+                                        // Update the shared qname cell so on_materialized
+                                        // and signal handlers use the new qualified name
+                                        if name_changed {
+                                            if let Some((proj, _)) = old_qname.split_once("::") {
+                                                let new_qn =
+                                                    workspace::qualified_name(proj, &new_name);
+                                                let mgr_borrow = mgr_edit.borrow();
+                                                if let Some(proc) =
+                                                    mgr_borrow.get_process(&new_name)
+                                                {
+                                                    if let Some(ref cell) = proc.qname_cell {
+                                                        *cell.borrow_mut() = new_qn;
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // Persist: remove old, save new
                                         if let Some((proj_name, _)) = old_qname.split_once("::")
                                             && let Some(ref ws) = *ws_edit.borrow()
@@ -784,7 +822,9 @@ impl ProjectList {
 
                                             if let Some(row) = rows.remove(&old_qname) {
                                                 row.set_name(&new_name);
+                                                row.set_action_name(&new_name);
                                                 row.set_command_tooltip(&new_command);
+                                                row.qualified_name.replace(new_qname.clone());
                                                 rows.insert(new_qname.clone(), row);
                                             }
 
@@ -804,6 +844,18 @@ impl ProjectList {
                                             let mut statuses = statuses_edit.borrow_mut();
                                             if let Some(status) = statuses.remove(&old_qname) {
                                                 statuses.insert(new_qname.clone(), status);
+                                            }
+
+                                            // Update selected qname if this row was selected
+                                            let mut sel = selected_edit.borrow_mut();
+                                            if sel.as_deref() == Some(&old_qname) {
+                                                *sel = Some(new_qname.clone());
+                                            }
+                                            drop(sel);
+
+                                            // Notify listeners (e.g. terminal stack rename)
+                                            if let Some(ref cb) = *on_renamed_edit.borrow() {
+                                                cb(&old_qname, &new_qname);
                                             }
                                         } else {
                                             if let Some(row) = rows.get(&old_qname) {
@@ -1165,6 +1217,7 @@ impl ProjectList {
             &self.process_statuses,
             &self.on_process_deleted,
             &self.on_counts_changed,
+            &self.on_process_renamed,
             &self.window,
             &self.workspace,
             &self.selected_qname,

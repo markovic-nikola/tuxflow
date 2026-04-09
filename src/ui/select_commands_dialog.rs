@@ -15,7 +15,7 @@ impl SelectCommandsDialog {
         parent: &impl IsA<gtk4::Widget>,
         project_name: &str,
         stacks: &[DetectedStack],
-        on_confirm: impl FnOnce(Vec<ProcessConfig>) + 'static,
+        on_confirm: impl FnOnce(String, Vec<ProcessConfig>) + 'static,
     ) {
         let total: usize = stacks.iter().map(|s| s.suggested_processes.len()).sum();
 
@@ -41,11 +41,21 @@ impl SelectCommandsDialog {
         content.set_margin_top(12);
         content.set_margin_bottom(24);
 
+        // Project name field
+        let name_group = adw::PreferencesGroup::new();
+        let name_row = adw::EntryRow::builder()
+            .title("Project Name")
+            .text(project_name)
+            .build();
+        name_group.add(&name_row);
+        content.append(&name_group);
+
         // Description
         let desc = gtk4::Label::new(Some(&format!(
-            "{total} commands detected for \"{project_name}\". Select which to add:"
+            "{total} commands detected. Select which to add:"
         )));
         desc.add_css_class("dim-label");
+        desc.set_margin_top(8);
         desc.set_margin_bottom(4);
         desc.set_wrap(true);
         content.append(&desc);
@@ -145,6 +155,10 @@ impl SelectCommandsDialog {
         let dialog_ref = dialog.clone();
         let on_confirm = Cell::new(Some(on_confirm));
         confirm_btn.connect_clicked(move |_| {
+            let name = name_row.text().to_string();
+            if name.is_empty() {
+                return;
+            }
             let selected: Vec<ProcessConfig> = switches
                 .borrow()
                 .iter()
@@ -152,7 +166,7 @@ impl SelectCommandsDialog {
                 .map(|(_, config)| config.clone())
                 .collect();
             if let Some(cb) = on_confirm.take() {
-                cb(selected);
+                cb(name, selected);
             }
             dialog_ref.close();
         });

@@ -248,6 +248,20 @@ impl TuxFlowWindow {
             }
         });
 
+        // Wire process rename → update terminal stack child name
+        let stack_ref = terminal_stack.clone();
+        let selected_ref = selected_process.clone();
+        sidebar.set_on_process_renamed(move |old_qname, new_qname| {
+            if let Some(child) = stack_ref.child_by_name(old_qname) {
+                let page = stack_ref.page(&child);
+                page.set_name(new_qname);
+            }
+            let mut sel = selected_ref.borrow_mut();
+            if sel.as_deref() == Some(old_qname) {
+                *sel = Some(new_qname.to_string());
+            }
+        });
+
         // Build settings change callback for accordion mode
         let sidebar_for_cb = sidebar.clone();
         let single_expand_for_cb = single_expand.clone();
@@ -465,13 +479,14 @@ impl TuxFlowWindow {
             .get_process(name)
             .map(|p| p.config.auto_restart)
             .unwrap_or(false);
-        let handler =
+        let (handler, name_cell) =
             crate::process::auto_restart::build_auto_restart_handler(manager, name, auto_restart);
-        let mgr = manager.borrow();
-        if let Some(proc) = mgr.get_process(name)
-            && let Some(ref terminal) = proc.terminal
-        {
-            handler(terminal);
+        let mut mgr = manager.borrow_mut();
+        if let Some(proc) = mgr.get_process_mut(name) {
+            proc.name_cell = Some(name_cell);
+            if let Some(ref terminal) = proc.terminal {
+                handler(terminal);
+            }
         }
     }
 
@@ -667,34 +682,51 @@ impl TuxFlowWindow {
             .sum();
 
         if prepared.config_loaded || total_detected <= 5 {
-            // No dialog needed — add all detected processes directly
+            // Show a small dialog to let the user rename before adding
             let all_processes: Vec<crate::config::schema::ProcessConfig> = prepared
                 .stacks
                 .iter()
                 .flat_map(|s| s.suggested_processes.clone())
                 .collect();
-            let mut ws_mut = ws.borrow_mut();
-            if let Some(project) = ws_mut.finalize_project(prepared, all_processes) {
-                let project_name = project.name.clone();
-                let manager = project.manager.clone();
-                let icon_path = project.icon_path.clone();
-                let saved_expanded = ws_mut.is_project_expanded(&project_name);
-                drop(ws_mut);
-                Self::wire_project(
-                    &project_name,
-                    &manager,
-                    icon_path.as_deref(),
-                    saved_expanded,
-                    ws,
-                    sidebar,
-                    terminal_stack,
-                    pid_file,
-                    status_bar,
-                    selected_process,
-                );
-                *last_selected_project.borrow_mut() = Some(project_name.clone());
-                sidebar.expand_project(&project_name);
-            }
+            let project_name = prepared.name.clone();
+            let dir_string = prepared.dir_string.clone();
+            let ws = ws.clone();
+            let sidebar = sidebar.clone();
+            let terminal_stack = terminal_stack.clone();
+            let pid_file = pid_file.clone();
+            let status_bar = status_bar.clone();
+            let selected_process = selected_process.clone();
+            let last_selected_project = last_selected_project.clone();
+
+            Self::show_confirm_project_dialog(parent, &project_name, move |custom_name| {
+                let mut ws_mut = ws.borrow_mut();
+                let mut prepared = prepared;
+                if custom_name != prepared.name {
+                    ws_mut.set_project_name(&dir_string, &custom_name);
+                    prepared.name = custom_name;
+                }
+                if let Some(project) = ws_mut.finalize_project(prepared, all_processes) {
+                    let project_name = project.name.clone();
+                    let manager = project.manager.clone();
+                    let icon_path = project.icon_path.clone();
+                    let saved_expanded = ws_mut.is_project_expanded(&project_name);
+                    drop(ws_mut);
+                    Self::wire_project(
+                        &project_name,
+                        &manager,
+                        icon_path.as_deref(),
+                        saved_expanded,
+                        &ws,
+                        &sidebar,
+                        &terminal_stack,
+                        &pid_file,
+                        &status_bar,
+                        &selected_process,
+                    );
+                    *last_selected_project.borrow_mut() = Some(project_name.clone());
+                    sidebar.expand_project(&project_name);
+                }
+            });
         } else {
             // Show selection dialog
             let project_name = prepared.name.clone();
@@ -717,7 +749,7 @@ impl TuxFlowWindow {
                 parent,
                 &project_name,
                 &stacks_for_dialog,
-                move |selected| {
+                move |custom_name, selected| {
                     // Mark deselected processes as deleted so they stay hidden on restart
                     let selected_names: std::collections::HashSet<&str> =
                         selected.iter().map(|p| p.name.as_str()).collect();
@@ -726,6 +758,12 @@ impl TuxFlowWindow {
                         if !selected_names.contains(name.as_str()) {
                             ws_mut.mark_process_deleted_by_dir(&dir_string, name);
                         }
+                    }
+                    // Apply custom name if user changed it
+                    let mut prepared = prepared;
+                    if custom_name != prepared.name {
+                        ws_mut.set_project_name(&dir_string, &custom_name);
+                        prepared.name = custom_name;
                     }
                     if let Some(project) = ws_mut.finalize_project(prepared, selected) {
                         let project_name = project.name.clone();
@@ -751,6 +789,62 @@ impl TuxFlowWindow {
                 },
             );
         }
+    }
+
+    fn show_confirm_project_dialog(
+        parent: &impl IsA<gtk4::Widget>,
+        project_name: &str,
+        on_confirm: impl FnOnce(String) + 'static,
+    ) {
+        let dialog = adw::Dialog::builder()
+            .title("Add Project")
+            .content_width(350)
+            .content_height(150)
+            .build();
+
+        let toolbar_view = adw::ToolbarView::new();
+        let headerbar = adw::HeaderBar::new();
+        toolbar_view.add_top_bar(&headerbar);
+
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        content.set_margin_start(24);
+        content.set_margin_end(24);
+        content.set_margin_top(12);
+        content.set_margin_bottom(24);
+
+        let name_group = adw::PreferencesGroup::new();
+        let name_row = adw::EntryRow::builder()
+            .title("Project Name")
+            .text(project_name)
+            .build();
+        name_group.add(&name_row);
+        content.append(&name_group);
+
+        let add_btn = gtk4::Button::builder()
+            .label("Add Project")
+            .css_classes(["suggested-action", "pill"])
+            .margin_top(24)
+            .halign(gtk4::Align::Center)
+            .build();
+        content.append(&add_btn);
+
+        toolbar_view.set_content(Some(&content));
+        dialog.set_child(Some(&toolbar_view));
+
+        let dialog_ref = dialog.clone();
+        let on_confirm = std::cell::Cell::new(Some(on_confirm));
+        add_btn.connect_clicked(move |_| {
+            let name = name_row.text().to_string();
+            if name.is_empty() {
+                return;
+            }
+            if let Some(cb) = on_confirm.take() {
+                cb(name);
+            }
+            dialog_ref.close();
+        });
+
+        dialog.present(Some(parent));
     }
 
     fn wire_project(
@@ -823,12 +917,13 @@ impl TuxFlowWindow {
                 let is_auto_named = proc.config.auto_named;
                 let auto_restart_cfg = proc.config.auto_restart;
 
-                // Build the auto-restart handler
-                let auto_restart_handler = crate::process::auto_restart::build_auto_restart_handler(
-                    manager,
-                    name,
-                    auto_restart_cfg,
-                );
+                // Build the auto-restart handler (returns a shared name cell for rename tracking)
+                let (auto_restart_handler, name_cell) =
+                    crate::process::auto_restart::build_auto_restart_handler(
+                        manager,
+                        name,
+                        auto_restart_cfg,
+                    );
 
                 // Capture refs for the on_materialized closure
                 let detector_ref = detector.clone();
@@ -845,15 +940,21 @@ impl TuxFlowWindow {
                 let proc_name_rename = name.to_string();
                 let qname_rename = qname.clone();
 
+                let qname_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(qname.clone()));
+                let qname_cell_mat = qname_cell.clone();
+
                 let Some(proc) = mgr.get_process_mut(name) else {
                     continue;
                 };
+                proc.name_cell = Some(name_cell);
+                proc.qname_cell = Some(qname_cell);
                 proc.on_materialized = Some(Box::new(move |terminal: &vte4::Terminal| {
                     // Replace placeholder in stack with real terminal
-                    if let Some(old_child) = stack_ref.child_by_name(&qname) {
+                    let current_qname = qname_cell_mat.borrow().clone();
+                    if let Some(old_child) = stack_ref.child_by_name(&current_qname) {
                         stack_ref.remove(&old_child);
                     }
-                    stack_ref.add_named(terminal, Some(&qname));
+                    stack_ref.add_named(terminal, Some(&current_qname));
 
                     // Connect auto-restart handler
                     auto_restart_handler(terminal);
@@ -867,9 +968,10 @@ impl TuxFlowWindow {
                     let sb_ref = sb_ref.clone();
                     let sel_ref = sel_ref.clone();
                     let proc_name = proc_name.clone();
-                    let qname_contents = qname.clone();
+                    let qname_cell_cc = qname_cell_mat.clone();
 
                     terminal.connect_contents_changed(move |terminal| {
+                        let qname_contents = qname_cell_cc.borrow().clone();
                         let row = terminal.cursor_position().1;
 
                         // Capture new output lines into MCP log buffer

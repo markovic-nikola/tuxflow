@@ -15,6 +15,7 @@ pub struct StatusBar {
     follow_btn: gtk4::Button,
     focus_btn: gtk4::Button,
     git_btn: gtk4::Button,
+    git_pull_dot: gtk4::DrawingArea,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
@@ -98,7 +99,33 @@ impl StatusBar {
         let focus_btn = Self::make_button("Focus", "focus-windows-symbolic");
         let follow_btn = Self::make_button("Follow Output", "go-bottom-symbolic");
         let git_btn = Self::make_button("Git Changes", "send-to-symbolic");
-        git_btn.set_visible(false);
+
+        let git_pull_dot = gtk4::DrawingArea::builder()
+            .visible(false)
+            .content_width(8)
+            .content_height(8)
+            .halign(gtk4::Align::End)
+            .valign(gtk4::Align::Start)
+            .margin_top(5)
+            .can_target(false)
+            .build();
+        git_pull_dot.set_draw_func(|_, cr, w, h| {
+            cr.set_source_rgb(0.824, 0.600, 0.133); // #d29922
+            cr.arc(
+                w as f64 / 2.0,
+                h as f64 / 2.0,
+                4.0,
+                0.0,
+                2.0 * std::f64::consts::PI,
+            );
+            let _ = cr.fill();
+        });
+
+        let git_box = gtk4::Overlay::new();
+        git_box.set_child(Some(&git_btn));
+        git_box.add_overlay(&git_pull_dot);
+        git_box.set_visible(false);
+
         let browser_btn = Self::make_button("Open in Browser", "external-link-symbolic");
         browser_btn.set_visible(false);
         let clear_btn = Self::make_button("Clear", "edit-clear-symbolic");
@@ -106,7 +133,7 @@ impl StatusBar {
         stop_btn.add_css_class("btn-stop");
         let restart_btn = Self::make_button("Restart", "view-refresh-symbolic");
 
-        actions.append(&git_btn);
+        actions.append(&git_box);
         actions.append(&focus_btn);
         actions.append(&follow_btn);
         actions.append(&browser_btn);
@@ -156,6 +183,7 @@ impl StatusBar {
             follow_btn,
             focus_btn,
             git_btn,
+            git_pull_dot,
             browser_btn,
             clear_btn,
             stop_btn,
@@ -292,7 +320,19 @@ impl StatusBar {
     }
 
     pub fn set_git_available(&self, available: bool) {
-        self.git_btn.set_visible(available);
+        if let Some(parent) = self.git_btn.parent() {
+            parent.set_visible(available);
+        }
+    }
+
+    pub fn set_git_pull_indicator(&self, behind: usize) {
+        self.git_pull_dot.set_visible(behind > 0);
+        if behind > 0 {
+            self.git_btn
+                .set_tooltip_text(Some(&format!("Git Changes ({behind} to pull)")));
+        } else {
+            self.git_btn.set_tooltip_text(Some("Git Changes"));
+        }
     }
 
     pub fn connect_git_changes(&self, cb: impl Fn(&gtk4::Button) + 'static) {

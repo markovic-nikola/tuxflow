@@ -1606,8 +1606,13 @@ impl TuxFlowWindow {
                     *sel_ref.borrow_mut() = Some(qname.to_string());
                     sidebar_ref.select_process(qname);
                     if let Some((proj, _)) = qname.split_once("::") {
-                        *last_proj_ref.borrow_mut() = Some(proj.to_string());
                         sidebar_ref.set_active_project(proj);
+                        Self::refresh_status_bar_for_project(
+                            &ws_ref,
+                            &sb_ref,
+                            &last_proj_ref,
+                            proj,
+                        );
                     }
                     let url = sidebar_ref.get_process_url(qname);
                     sb_ref.set_url(url.as_deref());
@@ -1914,6 +1919,7 @@ impl TuxFlowWindow {
             on_font_changed,
             keybinding_map,
             last_selected_project,
+            status_bar,
         );
 
         vbox.upcast()
@@ -1934,6 +1940,7 @@ impl TuxFlowWindow {
         on_font_changed: &Rc<dyn Fn()>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
+        status_bar: &Rc<StatusBar>,
     ) {
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -1952,6 +1959,7 @@ impl TuxFlowWindow {
         let font_cb = on_font_changed.clone();
         let kb_map = keybinding_map.clone();
         let last_proj_ref = last_selected_project.clone();
+        let sb_ref = status_bar.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
             // Skip all shortcuts while settings key capture is active
@@ -2018,10 +2026,26 @@ impl TuxFlowWindow {
                         }
                     }
                     ShortcutAction::PrevProcess => {
-                        Self::switch_relative(&ws_ref, &stack_ref, &selected_ref, &sidebar_ref, -1);
+                        Self::switch_relative(
+                            &ws_ref,
+                            &stack_ref,
+                            &selected_ref,
+                            &sidebar_ref,
+                            &sb_ref,
+                            &last_proj_ref,
+                            -1,
+                        );
                     }
                     ShortcutAction::NextProcess => {
-                        Self::switch_relative(&ws_ref, &stack_ref, &selected_ref, &sidebar_ref, 1);
+                        Self::switch_relative(
+                            &ws_ref,
+                            &stack_ref,
+                            &selected_ref,
+                            &sidebar_ref,
+                            &sb_ref,
+                            &last_proj_ref,
+                            1,
+                        );
                     }
                     ShortcutAction::FontIncrease => {
                         Self::adjust_font_size(&stack_ref, 1);
@@ -2049,10 +2073,24 @@ impl TuxFlowWindow {
                         Self::close_current_process(&ws_ref, &stack_ref, &sidebar_ref);
                     }
                     ShortcutAction::PrevProject => {
-                        Self::switch_project_relative(&ws_ref, &stack_ref, &sidebar_ref, -1);
+                        Self::switch_project_relative(
+                            &ws_ref,
+                            &stack_ref,
+                            &sidebar_ref,
+                            &sb_ref,
+                            &last_proj_ref,
+                            -1,
+                        );
                     }
                     ShortcutAction::NextProject => {
-                        Self::switch_project_relative(&ws_ref, &stack_ref, &sidebar_ref, 1);
+                        Self::switch_project_relative(
+                            &ws_ref,
+                            &stack_ref,
+                            &sidebar_ref,
+                            &sb_ref,
+                            &last_proj_ref,
+                            1,
+                        );
                     }
                     ShortcutAction::ToggleSidebar => {
                         sv_ref.set_show_sidebar(!sv_ref.shows_sidebar());
@@ -2095,7 +2133,14 @@ impl TuxFlowWindow {
                     _ => None,
                 };
                 if let Some(i) = idx {
-                    Self::switch_to_nth_global(&ws_ref, &stack_ref, i);
+                    Self::switch_to_nth_global(
+                        &ws_ref,
+                        &stack_ref,
+                        &sidebar_ref,
+                        &sb_ref,
+                        &last_proj_ref,
+                        i,
+                    );
                     return gtk4::glib::Propagation::Stop;
                 }
             }
@@ -2115,7 +2160,14 @@ impl TuxFlowWindow {
                     _ => None,
                 };
                 if let Some(idx) = project_idx {
-                    Self::switch_to_project(&ws_ref, &stack_ref, idx);
+                    Self::switch_to_project(
+                        &ws_ref,
+                        &stack_ref,
+                        &sidebar_ref,
+                        &sb_ref,
+                        &last_proj_ref,
+                        idx,
+                    );
                     return gtk4::glib::Propagation::Stop;
                 }
             }
@@ -2403,11 +2455,51 @@ impl TuxFlowWindow {
         }
     }
 
+    fn refresh_status_bar_for_project(
+        ws: &WorkspaceRef,
+        status_bar: &Rc<StatusBar>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
+        project_name: &str,
+    ) {
+        *last_selected_project.borrow_mut() = Some(project_name.to_string());
+        let ws_inner = ws.clone();
+        let sb = status_bar.clone();
+        let proj_owned = project_name.to_string();
+        glib::idle_add_local_once(move || {
+            let ws_borrow = ws_inner.borrow();
+            let mut global_r = 0usize;
+            let mut global_t = 0usize;
+            let mut proj_r = 0usize;
+            let mut proj_t = 0usize;
+            let mut running_names = Vec::new();
+            for project in ws_borrow.projects() {
+                let mgr = project.manager.borrow();
+                let r = mgr.running_count();
+                let t = mgr.total_count();
+                global_r += r;
+                global_t += t;
+                if project.name == proj_owned {
+                    proj_r = r;
+                    proj_t = t;
+                }
+                let names: Vec<String> =
+                    mgr.running_names().into_iter().map(String::from).collect();
+                if !names.is_empty() {
+                    running_names.push((project.name.clone(), names));
+                }
+            }
+            sb.set_project_info(Some(&proj_owned), proj_r, proj_t);
+            sb.set_global_info(global_r, global_t, true, &running_names);
+        });
+    }
+
     fn switch_relative(
         ws: &WorkspaceRef,
         stack: &gtk4::Stack,
         selected: &Rc<RefCell<Option<String>>>,
         sidebar: &Rc<ProjectList>,
+        status_bar: &Rc<StatusBar>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
         delta: i32,
     ) {
         use crate::config::schema::ProcessCategory;
@@ -2447,6 +2539,10 @@ impl TuxFlowWindow {
         stack.set_visible_child_name(&names[new_idx]);
         *selected.borrow_mut() = Some(names[new_idx].clone());
         sidebar.select_process(&names[new_idx]);
+        if let Some((proj, _)) = names[new_idx].split_once("::") {
+            sidebar.set_active_project(proj);
+            Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, proj);
+        }
         if let Some(child) = stack.visible_child() {
             child.grab_focus();
         }
@@ -2456,6 +2552,8 @@ impl TuxFlowWindow {
         ws: &WorkspaceRef,
         stack: &gtk4::Stack,
         sidebar: &Rc<ProjectList>,
+        status_bar: &Rc<StatusBar>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
         delta: i32,
     ) {
         // Extract target project info, then drop the workspace borrow
@@ -2496,16 +2594,34 @@ impl TuxFlowWindow {
         }
         sidebar.expand_project(&target_name);
         sidebar.set_active_project(&target_name);
+        Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &target_name);
     }
 
-    fn switch_to_project(ws: &WorkspaceRef, stack: &gtk4::Stack, project_idx: usize) {
-        let ws_borrow = ws.borrow();
-        if let Some(project) = ws_borrow.projects().get(project_idx) {
-            let mgr = project.manager.borrow();
-            if let Some(first_name) = mgr.process_names().first() {
-                let qname = workspace::qualified_name(&project.name, first_name);
-                stack.set_visible_child_name(&qname);
+    fn switch_to_project(
+        ws: &WorkspaceRef,
+        stack: &gtk4::Stack,
+        sidebar: &Rc<ProjectList>,
+        status_bar: &Rc<StatusBar>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
+        project_idx: usize,
+    ) {
+        let project_name = {
+            let ws_borrow = ws.borrow();
+            if let Some(project) = ws_borrow.projects().get(project_idx) {
+                let mgr = project.manager.borrow();
+                if let Some(first_name) = mgr.process_names().first() {
+                    let qname = workspace::qualified_name(&project.name, first_name);
+                    stack.set_visible_child_name(&qname);
+                }
+                Some(project.name.clone())
+            } else {
+                None
             }
+        };
+        if let Some(name) = project_name {
+            sidebar.expand_project(&name);
+            sidebar.set_active_project(&name);
+            Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &name);
         }
     }
 
@@ -2524,19 +2640,38 @@ impl TuxFlowWindow {
         }
     }
 
-    fn switch_to_nth_global(ws: &WorkspaceRef, stack: &gtk4::Stack, n: usize) {
-        let ws_borrow = ws.borrow();
-        let mut idx = 0;
-        for project in ws_borrow.projects() {
-            let mgr = project.manager.borrow();
-            for name in mgr.process_names() {
-                if idx == n {
-                    let qname = workspace::qualified_name(&project.name, name);
-                    stack.set_visible_child_name(&qname);
-                    return;
+    fn switch_to_nth_global(
+        ws: &WorkspaceRef,
+        stack: &gtk4::Stack,
+        sidebar: &Rc<ProjectList>,
+        status_bar: &Rc<StatusBar>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
+        n: usize,
+    ) {
+        let project_name = {
+            let ws_borrow = ws.borrow();
+            let mut idx = 0;
+            let mut found = None;
+            for project in ws_borrow.projects() {
+                let mgr = project.manager.borrow();
+                for name in mgr.process_names() {
+                    if idx == n {
+                        let qname = workspace::qualified_name(&project.name, name);
+                        stack.set_visible_child_name(&qname);
+                        found = Some(project.name.clone());
+                        break;
+                    }
+                    idx += 1;
                 }
-                idx += 1;
+                if found.is_some() {
+                    break;
+                }
             }
+            found
+        };
+        if let Some(name) = project_name {
+            sidebar.set_active_project(&name);
+            Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &name);
         }
     }
 

@@ -691,6 +691,26 @@ impl GitChangesDialog {
             });
         });
 
+        // Ctrl+Enter in the commit TextView fires the Commit button. Plain
+        // Enter still inserts a newline (default TextView behavior). We
+        // check is_sensitive() because emit_clicked bypasses the button's
+        // sensitivity gate — this respects the existing "buffer empty" and
+        // "commit in flight" guards without re-implementing them.
+        let commit_btn_shortcut = commit_btn.clone();
+        let key_controller = gtk4::EventControllerKey::new();
+        key_controller.connect_key_pressed(move |_, keyval, _, state| {
+            if keyval == gtk4::gdk::Key::Return
+                && state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+            {
+                if commit_btn_shortcut.is_sensitive() {
+                    commit_btn_shortcut.emit_clicked();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        commit_textview.add_controller(key_controller);
+
         // Push button
         let pushing = Rc::new(Cell::new(false));
         let dir_push = dir.clone();

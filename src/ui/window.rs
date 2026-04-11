@@ -193,6 +193,13 @@ impl TuxFlowWindow {
                 drop(ws_borrow);
             }
             stack_ref.set_visible_child_name(qname);
+            // Focus the newly-visible terminal so Enter/typing goes
+            // straight to the PTY instead of being swallowed by whatever
+            // widget had focus before the click (the sidebar row itself,
+            // or a status-bar button like the git button).
+            if let Some(child) = stack_ref.visible_child() {
+                child.grab_focus();
+            }
             *selected_ref.borrow_mut() = Some(qname.to_string());
             if let Some((proj, _)) = qname.split_once("::") {
                 *last_proj_ref.borrow_mut() = Some(proj.to_string());
@@ -2595,6 +2602,9 @@ impl TuxFlowWindow {
         sidebar.expand_project(&target_name);
         sidebar.set_active_project(&target_name);
         Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &target_name);
+        if let Some(child) = stack.visible_child() {
+            child.grab_focus();
+        }
     }
 
     fn switch_to_project(
@@ -2622,6 +2632,9 @@ impl TuxFlowWindow {
             sidebar.expand_project(&name);
             sidebar.set_active_project(&name);
             Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &name);
+        }
+        if let Some(child) = stack.visible_child() {
+            child.grab_focus();
         }
     }
 
@@ -2672,6 +2685,9 @@ impl TuxFlowWindow {
         if let Some(name) = project_name {
             sidebar.set_active_project(&name);
             Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &name);
+        }
+        if let Some(child) = stack.visible_child() {
+            child.grab_focus();
         }
     }
 

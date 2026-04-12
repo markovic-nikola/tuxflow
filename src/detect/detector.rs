@@ -83,6 +83,25 @@ pub fn detect_stacks(project_dir: &Path) -> Vec<DetectedStack> {
     stacks
 }
 
+/// Conservative detection for loading previously-added projects at startup.
+/// Returns the narrower set the selection dialog used before npm-script expansion —
+/// avoids silently introducing commands the user has never seen for existing projects.
+/// The full `detect_stacks` path remains in use for the "add new project" dialog.
+pub fn detect_stacks_conservative(project_dir: &Path) -> Vec<DetectedStack> {
+    let mut stacks = detect_stacks(project_dir);
+    for stack in &mut stacks {
+        if stack.name == "Node.js" {
+            let has_dev = stack.suggested_processes.iter().any(|p| p.name == "dev");
+            stack.suggested_processes.retain(|p| match p.name.as_str() {
+                "dev" | "build" | "test" => true,
+                "start" => !has_dev,
+                _ => false,
+            });
+        }
+    }
+    stacks
+}
+
 fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
     ProcessConfig {
         name: name.to_string(),
@@ -98,34 +117,56 @@ fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
     }
 }
 
+enum PackageManager {
+    Npm,
+    Yarn,
+    Pnpm,
+    Bun,
+}
+
+impl PackageManager {
+    fn detect(dir: &Path) -> Self {
+        if dir.join("yarn.lock").exists() {
+            Self::Yarn
+        } else if dir.join("pnpm-lock.yaml").exists() {
+            Self::Pnpm
+        } else if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+            Self::Bun
+        } else {
+            Self::Npm
+        }
+    }
+
+    fn run_command(&self, script: &str) -> String {
+        match self {
+            // yarn/bun shorthand lifecycle scripts (dev, start, build, test) skip `run`;
+            // everything else needs the explicit `run` form to survive colons etc.
+            Self::Yarn => format!("yarn {script}"),
+            Self::Bun => format!("bun run {script}"),
+            Self::Pnpm => format!("pnpm {script}"),
+            Self::Npm => match script {
+                "start" => "npm start".to_string(),
+                "test" => "npm test".to_string(),
+                _ => format!("npm run {script}"),
+            },
+        }
+    }
+}
+
 fn detect_nodejs(dir: &Path, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
-    // Parse scripts from package.json
-    if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(content)
-        && let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object())
-    {
-        if scripts.contains_key("dev") {
-            let cmd = if dir.join("yarn.lock").exists() {
-                "yarn dev"
-            } else if dir.join("pnpm-lock.yaml").exists() {
-                "pnpm dev"
-            } else if dir.join("bun.lockb").exists() {
-                "bun dev"
-            } else {
-                "npm run dev"
-            };
-            procs.push(make_process("dev", cmd, true));
-        }
-        if scripts.contains_key("start") && !scripts.contains_key("dev") {
-            procs.push(make_process("start", "npm start", true));
-        }
-        if scripts.contains_key("build") {
-            procs.push(make_process("build", "npm run build", false));
-        }
-        if scripts.contains_key("test") {
-            procs.push(make_process("test", "npm test", false));
-        }
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(content) else {
+        return procs;
+    };
+    let Some(scripts) = pkg.get("scripts").and_then(|s| s.as_object()) else {
+        return procs;
+    };
+
+    let pm = PackageManager::detect(dir);
+
+    for key in scripts.keys() {
+        procs.push(make_process(key, &pm.run_command(key), false));
     }
 
     procs

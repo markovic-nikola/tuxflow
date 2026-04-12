@@ -55,6 +55,51 @@ fn detect_nodejs_yarn() {
 }
 
 #[test]
+fn detect_nodejs_bun_modern_lockfile() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite","dev:server":"bun server.js","db:reset":"rm db"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("bun.lock"), "").unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let by_name = |name: &str| -> String {
+        stacks[0]
+            .suggested_processes
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("missing script {name}"))
+            .command
+            .clone()
+    };
+
+    assert_eq!(by_name("dev"), "bun run dev");
+    assert_eq!(by_name("dev:server"), "bun run dev:server");
+    assert_eq!(by_name("db:reset"), "bun run db:reset");
+}
+
+#[test]
+fn detect_nodejs_includes_custom_scripts() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite","lint":"eslint .","db:reset":"rm db"}}"#,
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    let names: Vec<&str> = stacks[0]
+        .suggested_processes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(names.contains(&"lint"));
+    assert!(names.contains(&"db:reset"));
+}
+
+#[test]
 fn detect_nodejs_pnpm() {
     let dir = TempDir::new().unwrap();
     fs::write(

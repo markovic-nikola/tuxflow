@@ -48,8 +48,20 @@ impl Workspace {
     }
 
     /// Prepare a project for loading: detect stacks but don't add detected processes yet.
-    /// Returns None if the project is already loaded.
+    /// Returns None if the project is already loaded. Uses the full detector (every script
+    /// in package.json); see `prepare_project_conservative` for the startup variant.
     pub fn prepare_project(&mut self, dir: &Path) -> Option<PreparedProject> {
+        self.prepare_project_inner(dir, false)
+    }
+
+    /// Like `prepare_project` but uses the conservative detector — the narrower pre-expansion
+    /// set for legacy projects at startup, so previously-loaded projects don't gain scripts
+    /// the user never saw.
+    pub fn prepare_project_conservative(&mut self, dir: &Path) -> Option<PreparedProject> {
+        self.prepare_project_inner(dir, true)
+    }
+
+    fn prepare_project_inner(&mut self, dir: &Path, conservative: bool) -> Option<PreparedProject> {
         let dir_str = dir.to_string_lossy().to_string();
         if self
             .projects
@@ -98,7 +110,11 @@ impl Workspace {
                 "No tuxflow.toml, running stack detection in {}",
                 dir.display()
             );
-            stacks = detector::detect_stacks(dir);
+            stacks = if conservative {
+                detector::detect_stacks_conservative(dir)
+            } else {
+                detector::detect_stacks(dir)
+            };
             for stack in &stacks {
                 log::info!(
                     "Detected stack: {} ({} commands)",
@@ -215,7 +231,7 @@ impl Workspace {
     /// dialog (indicated by Make-related entries in deleted_processes). Otherwise they are
     /// excluded at startup to avoid spawning many VTE terminals for projects with large Makefiles.
     pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
-        let prepared = self.prepare_project(dir)?;
+        let prepared = self.prepare_project_conservative(dir)?;
         let dir_string = dir.to_string_lossy().to_string();
         let has_make_curation = self
             .saved

@@ -656,9 +656,9 @@ dependencies = [
 
 [[package]]
 name = "gio"
-version = "0.22.4"
+version = "0.22.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17271ffcd5a3cce62e8dbe18924c0894fe125945c5f484d0820a75c2f21a4421"
+checksum = "401b600a9795c46ff45890146968b712c96ce4e9393798804133e137bd81d89c"
 dependencies = [
  "futures-channel",
  "futures-core",
@@ -686,9 +686,9 @@ dependencies = [
 
 [[package]]
 name = "glib"
-version = "0.22.4"
+version = "0.22.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02856b71413e175be50eff37fe0aefa53e227054ee3d96196faee8a0823cac80"
+checksum = "a1b7df55594e0e787d1560e23f7e12d7360d0b22e7b7c228ec2488b9e59b1b6b"
 dependencies = [
  "bitflags 2.11.0",
  "futures-channel",
@@ -1438,9 +1438,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkg-config"
-version = "0.3.32"
+version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plain"
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "tuxflow"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "dirs",

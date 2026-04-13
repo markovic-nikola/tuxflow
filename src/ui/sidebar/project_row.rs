@@ -303,6 +303,18 @@ impl ProjectRow {
             .unwrap()
     }
 
+    pub fn set_start_enabled(&self, enabled: bool) {
+        let btn = self.start_button();
+        btn.set_sensitive(enabled);
+        if enabled {
+            btn.set_tooltip_text(Some("Start all marked processes"));
+        } else {
+            btn.set_tooltip_text(Some(
+                "No processes marked \"Start with project\" — toggle it on a process to enable",
+            ));
+        }
+    }
+
     pub fn restart_button(&self) -> gtk4::Button {
         self.controls_box
             .first_child()

@@ -1734,7 +1734,92 @@ impl TuxFlowWindow {
         };
         sidebar.set_on_counts_changed({
             let refresh = refresh_counts.clone();
-            move || refresh()
+            let sb = sidebar.clone();
+            move || {
+                refresh();
+                sb.refresh_all_project_start_states();
+            }
+        });
+        sidebar.set_on_project_commands_changed({
+            let ws_ref = ws.clone();
+            let stack_ref = terminal_stack.clone();
+            let sidebar_ref = sidebar.clone();
+            let selected_ref = selected_process.clone();
+            let refresh = refresh_counts.clone();
+            move |project_name, enabled, disabled| {
+                // Apply disables first: kill, persist deletion, remove sidebar row,
+                // remove terminal from stack.
+                for name in disabled {
+                    let qname = workspace::qualified_name(project_name, name);
+                    let mgr_ref = ws_ref
+                        .borrow()
+                        .get_manager_for_project(project_name)
+                        .cloned();
+                    if let Some(mgr) = mgr_ref {
+                        mgr.borrow_mut().remove_process(name);
+                    }
+                    ws_ref.borrow_mut().mark_process_deleted(project_name, name);
+                    sidebar_ref.remove_process_row(&qname);
+                    if let Some(child) = stack_ref.child_by_name(&qname) {
+                        stack_ref.remove(&child);
+                    }
+                    let mut sel = selected_ref.borrow_mut();
+                    if sel.as_deref() == Some(&qname) {
+                        stack_ref.set_visible_child_name("__welcome__");
+                        *sel = None;
+                    }
+                }
+
+                // Apply enables: persist as custom command, unmark deleted, add to manager,
+                // materialize terminal, add to stack, add sidebar row, wire auto-restart.
+                for cfg in enabled {
+                    let name = cfg.name.clone();
+                    let category = cfg.category.clone();
+                    let qname = workspace::qualified_name(project_name, &name);
+
+                    // Default working_dir to the project directory so commands resolve correctly.
+                    let mut cfg = cfg.clone();
+                    if cfg.working_dir.is_none() {
+                        cfg.working_dir = ws_ref
+                            .borrow()
+                            .get_project_dir(project_name)
+                            .map(|p| p.to_string_lossy().to_string());
+                    }
+
+                    ws_ref
+                        .borrow_mut()
+                        .unmark_process_deleted(project_name, &name);
+                    ws_ref
+                        .borrow_mut()
+                        .save_custom_command(project_name, cfg.clone());
+
+                    let mgr_ref = ws_ref
+                        .borrow()
+                        .get_manager_for_project(project_name)
+                        .cloned();
+                    let Some(mgr) = mgr_ref else { continue };
+
+                    let (terminal, status) = {
+                        let mut m = mgr.borrow_mut();
+                        m.add_process(cfg.clone());
+                        m.materialize_process(&name);
+                        let proc = m.get_process(&name);
+                        let term = proc.and_then(|p| p.terminal.clone());
+                        let st = proc.map(|p| p.status).unwrap_or(ProcessStatus::Stopped);
+                        (term, st)
+                    };
+
+                    if let Some(ref term) = terminal {
+                        stack_ref.add_named(term, Some(&qname));
+                    }
+
+                    sidebar_ref.add_process_to_project(&mgr, project_name, &name, status, category);
+                    Self::setup_auto_restart_for_process(&mgr, &name);
+                }
+
+                refresh();
+                sidebar_ref.refresh_all_project_start_states();
+            }
         });
         sidebar.set_on_project_renamed({
             let last_proj = last_selected_project.clone();

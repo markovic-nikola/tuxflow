@@ -10,7 +10,7 @@ use vte4::prelude::*;
 use adw::prelude::*;
 use libadwaita as adw;
 
-use crate::config::schema::ProcessCategory;
+use crate::config::schema::{ProcessCategory, ProcessConfig};
 use crate::process::manager::{ProcessManagerRef, ProcessStatus};
 use crate::ui::add_command_dialog::{AddCommandDialog, EditCommandResult};
 use crate::ui::edit_project_dialog::{EditProjectDialog, EditProjectResult};
@@ -35,10 +35,13 @@ pub struct ProjectList {
     search_btn: gtk4::ToggleButton,
     process_rows: Rc<RefCell<HashMap<String, ProcessRow>>>,
     project_rows: Rc<RefCell<HashMap<String, ProjectRow>>>,
+    project_managers: Rc<RefCell<HashMap<String, ProcessManagerRef>>>,
     sections: Rc<RefCell<Vec<SectionInfo>>>,
     process_statuses: Rc<RefCell<HashMap<String, ProcessStatus>>>,
     on_process_selected: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     on_process_deleted: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
+    on_project_commands_changed:
+        Rc<RefCell<Option<Box<dyn Fn(&str, &[ProcessConfig], &[String])>>>>,
     on_counts_changed: Rc<RefCell<Option<Box<dyn Fn()>>>>,
     on_project_renamed: Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>,
     on_process_renamed: Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>,
@@ -122,10 +125,12 @@ impl ProjectList {
             search_btn,
             process_rows,
             project_rows: Rc::new(RefCell::new(HashMap::new())),
+            project_managers: Rc::new(RefCell::new(HashMap::new())),
             sections: Rc::new(RefCell::new(Vec::new())),
             process_statuses: Rc::new(RefCell::new(HashMap::new())),
             on_process_selected: Rc::new(RefCell::new(None)),
             on_process_deleted: Rc::new(RefCell::new(None)),
+            on_project_commands_changed: Rc::new(RefCell::new(None)),
             on_counts_changed: Rc::new(RefCell::new(None)),
             on_project_renamed: Rc::new(RefCell::new(None)),
             on_process_renamed: Rc::new(RefCell::new(None)),
@@ -164,6 +169,13 @@ impl ProjectList {
 
     pub fn set_on_process_deleted(&self, cb: impl Fn(&str) + 'static) {
         *self.on_process_deleted.borrow_mut() = Some(Box::new(cb));
+    }
+
+    pub fn set_on_project_commands_changed(
+        &self,
+        cb: impl Fn(&str, &[ProcessConfig], &[String]) + 'static,
+    ) {
+        *self.on_project_commands_changed.borrow_mut() = Some(Box::new(cb));
     }
 
     pub fn set_on_counts_changed(&self, cb: impl Fn() + 'static) {
@@ -372,9 +384,43 @@ impl ProjectList {
         }
 
         self.container.append(project_row.widget());
+        self.project_managers
+            .borrow_mut()
+            .insert(project_name.to_string(), manager.clone());
         self.project_rows
             .borrow_mut()
             .insert(project_name.to_string(), project_row);
+        self.refresh_project_start_state(project_name);
+    }
+
+    pub fn refresh_all_project_start_states(&self) {
+        let names: Vec<String> = self.project_managers.borrow().keys().cloned().collect();
+        for name in names {
+            self.refresh_project_start_state(&name);
+        }
+    }
+
+    /// Recomputes whether the project's play button should be enabled,
+    /// based on whether any process is marked `start_with_project`.
+    /// Skips silently if the manager is currently borrowed mutably — the next
+    /// counts_changed fire will catch up.
+    pub fn refresh_project_start_state(&self, project_name: &str) {
+        let managers = self.project_managers.borrow();
+        let Some(manager) = managers.get(project_name) else {
+            return;
+        };
+        let Ok(mgr) = manager.try_borrow() else {
+            return;
+        };
+        let any_marked = mgr.process_names().iter().any(|name| {
+            mgr.get_process(name)
+                .map(|p| p.config.start_with_project)
+                .unwrap_or(false)
+        });
+        drop(mgr);
+        if let Some(row) = self.project_rows.borrow().get(project_name) {
+            row.set_start_enabled(any_marked);
+        }
     }
 
     fn connect_project_context_actions(
@@ -389,11 +435,13 @@ impl ProjectList {
         let win_ref = self.window.clone();
         let container_ref = self.container.clone();
         let project_rows_ref = self.project_rows.clone();
+        let project_managers_ref = self.project_managers.clone();
         let on_renamed = self.on_project_renamed.clone();
         let sections_ref = self.sections.clone();
         let proc_rows_ref = self.process_rows.clone();
         let proc_statuses_ref = self.process_statuses.clone();
         let selected_qname_ref = self.selected_qname.clone();
+        let on_project_commands_changed_ref = self.on_project_commands_changed.clone();
 
         project_row.set_on_context_action(move |action| match action {
             "start_all" => {
@@ -447,6 +495,7 @@ impl ProjectList {
                         .map(|d| d.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let icon = ws_borrow.get_project_icon(&pname);
+                    let commands = ws_borrow.list_toggleable_commands(&pname);
                     drop(ws_borrow);
 
                     let ws_edit = ws.clone();
@@ -459,12 +508,14 @@ impl ProjectList {
                     let proc_rows_edit = proc_rows_ref.clone();
                     let proc_statuses_edit = proc_statuses_ref.clone();
                     let selected_qname_edit = selected_qname_ref.clone();
+                    let on_commands_changed = on_project_commands_changed_ref.clone();
 
                     EditProjectDialog::show(
                         &win,
                         &pname_for_dialog,
                         &dir,
                         icon.as_deref(),
+                        commands,
                         move |result: EditProjectResult| {
                             if result.remove {
                                 let mut ws_mut = ws_edit.borrow_mut();
@@ -581,6 +632,18 @@ impl ProjectList {
                                         cb(&pname_for_closure, &result.name);
                                     }
                                 }
+
+                                if !result.enabled_commands.is_empty()
+                                    || !result.disabled_commands.is_empty()
+                                {
+                                    if let Some(ref cb) = *on_commands_changed.borrow() {
+                                        cb(
+                                            &result.name,
+                                            &result.enabled_commands,
+                                            &result.disabled_commands,
+                                        );
+                                    }
+                                }
                             }
                         },
                     );
@@ -600,6 +663,7 @@ impl ProjectList {
                 let ws_del = ws_ref.clone();
                 let pname_del = pname.clone();
                 let rows_del = project_rows_ref.clone();
+                let managers_del = project_managers_ref.clone();
                 let container_del = container_ref.clone();
 
                 let win = win_ref.borrow().clone();
@@ -619,6 +683,7 @@ impl ProjectList {
                         if let Some(row) = rows.remove(&pname_del) {
                             container_del.remove(row.widget());
                         }
+                        managers_del.borrow_mut().remove(&pname_del);
                     },
                 );
             }
@@ -1303,6 +1368,51 @@ impl ProjectList {
                 header: section,
                 process_names: vec![qname],
             });
+        }
+        drop(sections);
+        self.refresh_project_start_state(project_name);
+    }
+
+    /// Removes a process row from the sidebar, clears its section bookkeeping,
+    /// and drops its status entry. Mirrors the cleanup done by the per-row delete handler.
+    pub fn remove_process_row(&self, qualified_name: &str) {
+        if let Some(row) = self.process_rows.borrow_mut().remove(qualified_name)
+            && let Some(parent) = row.widget().parent()
+            && let Some(parent_box) = parent.downcast_ref::<gtk4::Box>()
+        {
+            parent_box.remove(row.widget());
+        }
+
+        self.process_statuses.borrow_mut().remove(qualified_name);
+
+        let mut sections = self.sections.borrow_mut();
+        let mut empty_idx = None;
+        for (idx, section) in sections.iter_mut().enumerate() {
+            if section.process_names.contains(&qualified_name.to_string()) {
+                section.process_names.retain(|n| n != qualified_name);
+                let total = section.process_names.len();
+                if total == 0 {
+                    section.header.widget().set_visible(false);
+                    empty_idx = Some(idx);
+                } else {
+                    let statuses = self.process_statuses.borrow();
+                    let running = section
+                        .process_names
+                        .iter()
+                        .filter(|n| {
+                            statuses
+                                .get(n.as_str())
+                                .map(|s| *s == ProcessStatus::Running)
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    section.header.set_count(running, total);
+                }
+                break;
+            }
+        }
+        if let Some(idx) = empty_idx {
+            sections.remove(idx);
         }
     }
 

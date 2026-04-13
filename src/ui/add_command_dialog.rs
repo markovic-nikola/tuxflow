@@ -92,6 +92,18 @@ impl AddCommandDialog {
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_start_title_buttons(false);
+        headerbar.set_show_end_title_buttons(false);
+
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+        headerbar.pack_start(&cancel_btn);
+
+        let add_btn = gtk4::Button::builder()
+            .label("Add")
+            .css_classes(["suggested-action"])
+            .build();
+        headerbar.pack_end(&add_btn);
+
         toolbar_view.add_top_bar(&headerbar);
 
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -120,16 +132,13 @@ impl AddCommandDialog {
 
         let fields = build_form_fields(&content);
 
-        let add_btn = gtk4::Button::builder()
-            .label("Add Command")
-            .css_classes(["suggested-action", "pill"])
-            .margin_top(24)
-            .halign(gtk4::Align::Center)
-            .build();
-        content.append(&add_btn);
-
         toolbar_view.set_content(Some(&content));
         dialog.set_child(Some(&toolbar_view));
+
+        let dialog_cancel = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog_cancel.close();
+        });
 
         let dialog_ref = dialog.clone();
         let names = project_names.to_vec();
@@ -179,6 +188,33 @@ impl AddCommandDialog {
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_start_title_buttons(false);
+        headerbar.set_show_end_title_buttons(false);
+
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+        headerbar.pack_start(&cancel_btn);
+
+        let save_btn = gtk4::Button::builder()
+            .label("Save")
+            .css_classes(["suggested-action"])
+            .build();
+        headerbar.pack_end(&save_btn);
+
+        let menu_btn = gtk4::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("More actions")
+            .build();
+        let menu_popover = gtk4::Popover::new();
+        let menu_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let delete_btn = gtk4::Button::builder()
+            .label("Delete Command")
+            .css_classes(["flat", "destructive-action"])
+            .build();
+        menu_box.append(&delete_btn);
+        menu_popover.set_child(Some(&menu_box));
+        menu_btn.set_popover(Some(&menu_popover));
+        headerbar.pack_end(&menu_btn);
+
         toolbar_view.add_top_bar(&headerbar);
 
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -202,25 +238,6 @@ impl AddCommandDialog {
                 .set_text(&current.restart_when_changed.join(", "));
         }
 
-        // Button row: Save + Delete
-        let button_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        button_box.set_margin_top(24);
-        button_box.set_halign(gtk4::Align::Center);
-
-        let save_btn = gtk4::Button::builder()
-            .label("Save")
-            .css_classes(["suggested-action", "pill"])
-            .build();
-        button_box.append(&save_btn);
-
-        let delete_btn = gtk4::Button::builder()
-            .label("Delete Command")
-            .css_classes(["destructive-action", "pill"])
-            .build();
-        button_box.append(&delete_btn);
-
-        content.append(&button_box);
-
         toolbar_view.set_content(Some(&content));
         dialog.set_child(Some(&toolbar_view));
 
@@ -230,6 +247,11 @@ impl AddCommandDialog {
         let category = current.category.clone();
 
         let on_result = std::rc::Rc::new(on_result);
+
+        let dialog_cancel = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog_cancel.close();
+        });
 
         let dialog_ref = dialog.clone();
         let on_result_ref = on_result.clone();
@@ -259,7 +281,9 @@ impl AddCommandDialog {
         });
 
         let dialog_ref = dialog.clone();
+        let menu_popover_close = menu_popover.clone();
         delete_btn.connect_clicked(move |_| {
+            menu_popover_close.popdown();
             on_result(EditCommandResult::Delete);
             dialog_ref.close();
         });
@@ -281,6 +305,18 @@ impl AddCommandDialog {
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_start_title_buttons(false);
+        headerbar.set_show_end_title_buttons(false);
+
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+        headerbar.pack_start(&cancel_btn);
+
+        let add_btn = gtk4::Button::builder()
+            .label("Add")
+            .css_classes(["suggested-action"])
+            .build();
+        headerbar.pack_end(&add_btn);
+
         toolbar_view.add_top_bar(&headerbar);
 
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -319,16 +355,13 @@ impl AddCommandDialog {
         cmd_group.add(&cmd_row);
         content.append(&cmd_group);
 
-        let add_btn = gtk4::Button::builder()
-            .label("Add Agent")
-            .css_classes(["suggested-action", "pill"])
-            .margin_top(24)
-            .halign(gtk4::Align::Center)
-            .build();
-        content.append(&add_btn);
-
         toolbar_view.set_content(Some(&content));
         dialog.set_child(Some(&toolbar_view));
+
+        let dialog_cancel = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog_cancel.close();
+        });
 
         let dialog_ref = dialog.clone();
         let names = project_names.to_vec();

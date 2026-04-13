@@ -227,19 +227,43 @@ impl Workspace {
     }
 
     /// Convenience: prepare + finalize with detected processes (used for startup/CLI loading).
-    /// Makefile targets are only included if the user previously curated them via the selection
-    /// dialog (indicated by Make-related entries in deleted_processes). Otherwise they are
-    /// excluded at startup to avoid spawning many VTE terminals for projects with large Makefiles.
+    ///
+    /// Once a project has been curated (has a saved process_order), newly-detected commands
+    /// that the user has never seen — not in process_order, custom_commands, or
+    /// deleted_processes — are auto-marked as deleted so they don't appear unsolicited when
+    /// the project's tooling changes (e.g. new Makefile targets, new npm scripts).
     pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
         let prepared = self.prepare_project_conservative(dir)?;
         let dir_string = dir.to_string_lossy().to_string();
-        let has_make_curation = self
-            .saved
-            .has_deleted_processes_matching(&dir_string, "make ");
+
+        let is_curated = self.saved.get_process_order(&dir_string).is_some();
+
+        if is_curated && !prepared.config_loaded {
+            let known: std::collections::HashSet<String> = self
+                .saved
+                .get_process_order(&dir_string)
+                .map(|order| order.iter().cloned().collect())
+                .unwrap_or_default();
+            let custom: std::collections::HashSet<String> = self
+                .saved
+                .get_custom_commands(&dir_string)
+                .map(|cmds| cmds.iter().map(|c| c.name.clone()).collect())
+                .unwrap_or_default();
+            for stack in &prepared.stacks {
+                for proc in &stack.suggested_processes {
+                    if !known.contains(&proc.name)
+                        && !custom.contains(&proc.name)
+                        && !self.saved.is_process_deleted(&dir_string, &proc.name)
+                    {
+                        self.saved.add_deleted_process(&dir_string, &proc.name);
+                    }
+                }
+            }
+        }
+
         let processes: Vec<ProcessConfig> = prepared
             .stacks
             .iter()
-            .filter(|s| s.name != "Make" || prepared.config_loaded || has_make_curation)
             .flat_map(|s| s.suggested_processes.clone())
             .collect();
         self.finalize_project(prepared, processes)

@@ -145,12 +145,6 @@ impl SavedProjects {
             .is_some_and(|list| !list.is_empty())
     }
 
-    pub fn has_deleted_processes_matching(&self, dir: &str, prefix: &str) -> bool {
-        self.deleted_processes
-            .get(dir)
-            .is_some_and(|list| list.iter().any(|n| n.starts_with(prefix)))
-    }
-
     pub fn is_process_deleted(&self, dir: &str, process_name: &str) -> bool {
         self.deleted_processes
             .get(dir)

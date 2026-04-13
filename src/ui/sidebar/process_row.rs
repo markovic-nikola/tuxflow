@@ -25,6 +25,7 @@ pub struct ProcessRow {
     port_label: gtk4::Label,
     browser_button: gtk4::Button,
     play_button: gtk4::Button,
+    restart_button: gtk4::Button,
     stop_button: gtk4::Button,
     on_context_action: ActionCallback,
     url: Rc<RefCell<Option<String>>>,
@@ -187,8 +188,9 @@ impl ProcessRow {
         });
         container.add_controller(gesture);
 
-        // Initially show play, hide stop (default state is Stopped)
+        // Initially show play, hide stop and restart (default state is Stopped)
         stop_button.set_visible(false);
+        restart_button.set_visible(false);
 
         Self {
             container,
@@ -205,6 +207,7 @@ impl ProcessRow {
             port_label,
             browser_button,
             play_button,
+            restart_button,
             stop_button,
             on_context_action,
             url,
@@ -326,6 +329,7 @@ impl ProcessRow {
         let is_running = matches!(status, ProcessStatus::Running | ProcessStatus::Restarting);
         self.play_button.set_visible(!is_running);
         self.stop_button.set_visible(is_running);
+        self.restart_button.set_visible(is_running);
 
         match status {
             ProcessStatus::Running | ProcessStatus::Restarting => {

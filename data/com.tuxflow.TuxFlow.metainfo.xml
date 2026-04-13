@@ -48,6 +48,11 @@
     <color type="primary" scheme_preference="light">#e8e8f0</color>
   </branding>
   <releases>
+    <release version="0.1.28" date="2026-04-13">
+      <description>
+        <p>Release 0.1.28.</p>
+      </description>
+    </release>
     <release version="0.1.27" date="2026-04-12">
       <description>
         <p>Release 0.1.27.</p>

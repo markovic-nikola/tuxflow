@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::config::loader;
 use crate::config::projects::SavedProjects;
-use crate::config::schema::ProcessConfig;
+use crate::config::schema::{ProcessCategory, ProcessConfig};
 use crate::detect::detector::{self, DetectedStack};
 use crate::process::auto_restart;
 use crate::process::manager::{ProcessManager, ProcessManagerRef};
@@ -29,6 +29,14 @@ pub struct PreparedProject {
 }
 
 pub type WorkspaceRef = Rc<RefCell<Workspace>>;
+
+/// Describes one command candidate shown in the Edit Project dialog's Commands section.
+pub struct CommandToggleEntry {
+    pub config: ProcessConfig,
+    pub initial_on: bool,
+    pub is_custom: bool,
+    pub source_label: &'static str,
+}
 
 pub struct Workspace {
     projects: Vec<Project>,
@@ -385,6 +393,112 @@ impl Workspace {
 
     pub fn mark_process_deleted_by_dir(&mut self, dir: &str, process_name: &str) {
         self.saved.add_deleted_process(dir, process_name);
+    }
+
+    pub fn unmark_process_deleted(&mut self, project_name: &str, process_name: &str) {
+        if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
+            let dir_str = project.dir.to_string_lossy().to_string();
+            self.saved.unmark_process_deleted(&dir_str, process_name);
+        }
+    }
+
+    /// Builds the union of commands for the Edit Project dialog:
+    /// active (ON) → hidden (OFF, badge "hidden") → newly-detected (OFF, badge "new").
+    /// Terminal and SSH categories are excluded. Deduped by name with active > hidden > new priority.
+    pub fn list_toggleable_commands(&self, project_name: &str) -> Vec<CommandToggleEntry> {
+        let Some(project) = self.projects.iter().find(|p| p.name == project_name) else {
+            return Vec::new();
+        };
+        let dir_str = project.dir.to_string_lossy().to_string();
+        let mut entries: Vec<CommandToggleEntry> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // 1. Active processes (in manager, excluding Terminal/SSH)
+        {
+            let mgr = project.manager.borrow();
+            for name in mgr.process_names() {
+                if let Some(proc) = mgr.get_process(name)
+                    && !matches!(
+                        proc.config.category,
+                        ProcessCategory::Terminal | ProcessCategory::SSH
+                    )
+                    && seen.insert(proc.config.name.clone())
+                {
+                    let is_custom = self
+                        .saved
+                        .get_custom_commands(&dir_str)
+                        .is_some_and(|list| list.iter().any(|c| c.name == proc.config.name));
+                    entries.push(CommandToggleEntry {
+                        config: proc.config.clone(),
+                        initial_on: true,
+                        is_custom,
+                        source_label: "active",
+                    });
+                }
+            }
+        }
+
+        // 2. Hidden commands (in deleted_processes), resolved from custom_commands or detection
+        if let Some(deleted) = self.saved.deleted_processes.get(&dir_str) {
+            let detected_now = detector::detect_stacks(&project.dir);
+            for name in deleted {
+                if seen.contains(name) {
+                    continue;
+                }
+                let custom = self
+                    .saved
+                    .get_custom_commands(&dir_str)
+                    .and_then(|list| list.iter().find(|c| &c.name == name).cloned());
+                let (config, is_custom) = if let Some(c) = custom {
+                    (c, true)
+                } else if let Some(detected_cfg) = detected_now
+                    .iter()
+                    .flat_map(|s| &s.suggested_processes)
+                    .find(|c| &c.name == name)
+                {
+                    (detected_cfg.clone(), false)
+                } else {
+                    continue;
+                };
+                if matches!(
+                    config.category,
+                    ProcessCategory::Terminal | ProcessCategory::SSH
+                ) {
+                    continue;
+                }
+                seen.insert(name.clone());
+                entries.push(CommandToggleEntry {
+                    config,
+                    initial_on: false,
+                    is_custom,
+                    source_label: "hidden",
+                });
+            }
+        }
+
+        // 3. Newly detected commands not already in active or hidden
+        for stack in detector::detect_stacks(&project.dir) {
+            for cfg in stack.suggested_processes {
+                if seen.contains(&cfg.name) {
+                    continue;
+                }
+                if matches!(
+                    cfg.category,
+                    ProcessCategory::Terminal | ProcessCategory::SSH
+                ) {
+                    continue;
+                }
+                seen.insert(cfg.name.clone());
+                entries.push(CommandToggleEntry {
+                    config: cfg,
+                    initial_on: false,
+                    is_custom: false,
+                    source_label: "new",
+                });
+            }
+        }
+
+        entries
     }
 
     pub fn reorder_project(&mut self, project_name: &str, target_name: &str, before: bool) {

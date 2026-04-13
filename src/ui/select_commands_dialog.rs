@@ -27,6 +27,18 @@ impl SelectCommandsDialog {
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_start_title_buttons(false);
+        headerbar.set_show_end_title_buttons(false);
+
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+        headerbar.pack_start(&cancel_btn);
+
+        let confirm_btn = gtk4::Button::builder()
+            .label(&format!("Add {total} Commands"))
+            .css_classes(["suggested-action"])
+            .build();
+        headerbar.pack_end(&confirm_btn);
+
         toolbar_view.add_top_bar(&headerbar);
 
         let scrolled = gtk4::ScrolledWindow::builder()
@@ -103,15 +115,6 @@ impl SelectCommandsDialog {
         btn_row.append(&deselect_all_btn);
         content.append(&btn_row);
 
-        // Confirm button with dynamic count
-        let confirm_btn = gtk4::Button::builder()
-            .label(&format!("Add {total} Commands"))
-            .css_classes(["suggested-action", "pill"])
-            .margin_bottom(8)
-            .halign(gtk4::Align::Center)
-            .build();
-        content.append(&confirm_btn);
-
         // Per-stack sections
         for stack in stacks {
             let group = adw::PreferencesGroup::builder()
@@ -151,6 +154,11 @@ impl SelectCommandsDialog {
         scrolled.set_child(Some(&content));
         toolbar_view.set_content(Some(&scrolled));
         dialog.set_child(Some(&toolbar_view));
+
+        let dialog_cancel = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog_cancel.close();
+        });
 
         let dialog_ref = dialog.clone();
         let on_confirm = Cell::new(Some(on_confirm));

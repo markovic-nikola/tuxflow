@@ -24,6 +24,18 @@ impl AddSshDialog {
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_start_title_buttons(false);
+        headerbar.set_show_end_title_buttons(false);
+
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+        headerbar.pack_start(&cancel_btn);
+
+        let add_btn = gtk4::Button::builder()
+            .label("Add")
+            .css_classes(["suggested-action"])
+            .build();
+        headerbar.pack_end(&add_btn);
+
         toolbar_view.add_top_bar(&headerbar);
 
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
@@ -131,17 +143,13 @@ impl AddSshDialog {
             }
         });
 
-        // Add button
-        let add_btn = gtk4::Button::builder()
-            .label("Add SSH Connection")
-            .css_classes(["suggested-action", "pill"])
-            .margin_top(24)
-            .halign(gtk4::Align::Center)
-            .build();
-        content.append(&add_btn);
-
         toolbar_view.set_content(Some(&content));
         dialog.set_child(Some(&toolbar_view));
+
+        let dialog_cancel = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog_cancel.close();
+        });
 
         let dialog_ref = dialog.clone();
         let names = project_names.to_vec();

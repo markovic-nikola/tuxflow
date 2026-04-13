@@ -6,12 +6,16 @@ use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
+use crate::config::schema::ProcessConfig;
 use crate::config::settings::AppSettings;
+use crate::workspace::CommandToggleEntry;
 
 pub struct EditProjectResult {
     pub name: String,
     pub icon_path: Option<String>,
     pub remove: bool,
+    pub enabled_commands: Vec<ProcessConfig>,
+    pub disabled_commands: Vec<String>,
 }
 
 pub struct EditProjectDialog;
@@ -22,82 +26,262 @@ impl EditProjectDialog {
         project_name: &str,
         project_dir: &str,
         current_icon: Option<&str>,
+        commands: Vec<CommandToggleEntry>,
         on_save: impl Fn(EditProjectResult) + 'static,
     ) {
         let dialog = adw::Dialog::builder()
             .title("Edit Project")
-            .content_width(450)
-            .content_height(400)
+            .content_width(520)
+            .content_height(640)
             .build();
 
         let toolbar_view = adw::ToolbarView::new();
-
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_end_title_buttons(false);
+        headerbar.set_show_start_title_buttons(false);
+
+        // Header: cancel (left), save (right), overflow menu with Remove (right).
+        let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+        headerbar.pack_start(&cancel_btn);
+
+        let save_btn = gtk4::Button::builder()
+            .label("Save")
+            .css_classes(["suggested-action"])
+            .build();
+        headerbar.pack_end(&save_btn);
+
+        let menu_btn = gtk4::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("More actions")
+            .build();
+        let menu_popover = gtk4::Popover::new();
+        let menu_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let remove_btn = gtk4::Button::builder()
+            .label("Remove Project")
+            .css_classes(["flat", "destructive-action"])
+            .build();
+        menu_box.append(&remove_btn);
+        menu_popover.set_child(Some(&menu_box));
+        menu_btn.set_popover(Some(&menu_popover));
+        headerbar.pack_end(&menu_btn);
+
         toolbar_view.add_top_bar(&headerbar);
 
-        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        content.set_margin_start(24);
-        content.set_margin_end(24);
-        content.set_margin_top(12);
-        content.set_margin_bottom(24);
+        // Content uses an AdwPreferencesPage for consistent spacing.
+        let page = adw::PreferencesPage::new();
 
-        // Name field
-        let name_group = adw::PreferencesGroup::new();
+        // --- Project group: name + directory (with quick-action suffixes) ---
+        let project_group = adw::PreferencesGroup::builder().title("Project").build();
+
         let name_row = adw::EntryRow::builder()
-            .title("Project Name")
+            .title("Name")
             .text(project_name)
             .build();
-        name_group.add(&name_row);
-        content.append(&name_group);
+        project_group.add(&name_row);
 
-        // Directory field (read-only)
-        let dir_group = adw::PreferencesGroup::new();
-        dir_group.set_margin_top(12);
-        let dir_row = adw::EntryRow::builder()
-            .title("Project Directory")
-            .text(project_dir)
-            .editable(false)
+        let dir_row = adw::ActionRow::builder()
+            .title("Directory")
+            .subtitle(project_dir)
+            .subtitle_selectable(true)
             .build();
-        dir_group.add(&dir_row);
-        content.append(&dir_group);
-
-        // Quick actions row
-        let actions_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        actions_box.set_margin_top(8);
-        actions_box.set_halign(gtk4::Align::Start);
-        actions_box.set_margin_start(12);
+        dir_row.add_css_class("property");
 
         let copy_path_btn = gtk4::Button::builder()
             .icon_name("edit-copy-symbolic")
             .tooltip_text("Copy Path")
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
             .build();
-
         let reveal_btn = gtk4::Button::builder()
             .icon_name("folder-open-symbolic")
             .tooltip_text("Reveal in File Manager")
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
             .build();
-
         let terminal_btn = gtk4::Button::builder()
             .icon_name("utilities-terminal-symbolic")
-            .tooltip_text("Open Terminal")
-            .css_classes(["flat", "circular"])
+            .tooltip_text("Open Terminal Here")
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
             .build();
-
         let editor_btn = gtk4::Button::builder()
             .icon_name("text-editor-symbolic")
             .tooltip_text("Open in Editor")
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
             .build();
 
-        actions_box.append(&copy_path_btn);
-        actions_box.append(&reveal_btn);
-        actions_box.append(&terminal_btn);
-        actions_box.append(&editor_btn);
-        content.append(&actions_box);
+        dir_row.add_suffix(&copy_path_btn);
+        dir_row.add_suffix(&reveal_btn);
+        dir_row.add_suffix(&terminal_btn);
+        dir_row.add_suffix(&editor_btn);
+        project_group.add(&dir_row);
 
-        // Copy path
+        page.add(&project_group);
+
+        // --- Icon section: single ActionRow with prefix preview + suffix menu ---
+        let icon_group = adw::PreferencesGroup::new();
+        let icon_row = adw::ActionRow::builder().title("Icon").build();
+
+        let icon_preview = gtk4::Image::builder()
+            .pixel_size(32)
+            .margin_start(4)
+            .margin_end(4)
+            .build();
+        let initials_label = gtk4::Label::builder()
+            .css_classes(["project-icon", "caption"])
+            .width_request(32)
+            .height_request(32)
+            .halign(gtk4::Align::Center)
+            .valign(gtk4::Align::Center)
+            .build();
+
+        let icon_path_store: Rc<RefCell<Option<String>>> =
+            Rc::new(RefCell::new(current_icon.map(|s| s.to_string())));
+
+        let update_preview = {
+            let icon_preview = icon_preview.clone();
+            let initials_label = initials_label.clone();
+            let icon_row = icon_row.clone();
+            Rc::new(move |path: Option<&str>, pname: &str| {
+                if let Some(p) = path {
+                    icon_preview.set_from_file(Some(p));
+                    icon_preview.set_visible(true);
+                    initials_label.set_visible(false);
+                    icon_row.set_subtitle("Custom image");
+                } else {
+                    icon_preview.set_visible(false);
+                    let initials = pname.chars().take(2).collect::<String>().to_uppercase();
+                    initials_label.set_label(&initials);
+                    initials_label.set_visible(true);
+                    icon_row.set_subtitle("Default initials");
+                }
+            })
+        };
+        update_preview(current_icon, project_name);
+
+        let preview_wrap = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        preview_wrap.set_valign(gtk4::Align::Center);
+        preview_wrap.append(&icon_preview);
+        preview_wrap.append(&initials_label);
+        icon_row.add_prefix(&preview_wrap);
+
+        let icon_menu_btn = gtk4::MenuButton::builder()
+            .icon_name("document-edit-symbolic")
+            .tooltip_text("Change icon")
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
+            .build();
+        let icon_menu_popover = gtk4::Popover::new();
+        let icon_menu_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let auto_detect_btn = gtk4::Button::builder()
+            .label("Auto-detect")
+            .css_classes(["flat"])
+            .build();
+        let choose_file_btn = gtk4::Button::builder()
+            .label("Choose File…")
+            .css_classes(["flat"])
+            .build();
+        let clear_icon_btn = gtk4::Button::builder()
+            .label("Reset to Initials")
+            .css_classes(["flat"])
+            .build();
+        icon_menu_box.append(&auto_detect_btn);
+        icon_menu_box.append(&choose_file_btn);
+        icon_menu_box.append(&clear_icon_btn);
+        icon_menu_popover.set_child(Some(&icon_menu_box));
+        icon_menu_btn.set_popover(Some(&icon_menu_popover));
+        icon_row.add_suffix(&icon_menu_btn);
+
+        icon_group.add(&icon_row);
+        page.add(&icon_group);
+
+        // --- Commands section: grouped into Active / Hidden / Detected ---
+        let switches: Rc<RefCell<Vec<(adw::SwitchRow, ProcessConfig, bool, bool)>>> =
+            Rc::new(RefCell::new(Vec::with_capacity(commands.len())));
+
+        if !commands.is_empty() {
+            let mut active_entries = Vec::new();
+            let mut hidden_entries = Vec::new();
+            let mut new_entries = Vec::new();
+            for entry in commands {
+                match entry.source_label {
+                    "hidden" => hidden_entries.push(entry),
+                    "new" => new_entries.push(entry),
+                    _ => active_entries.push(entry),
+                }
+            }
+
+            let add_group =
+                |title: &str,
+                 description: Option<&str>,
+                 entries: Vec<CommandToggleEntry>,
+                 switches: &Rc<RefCell<Vec<(adw::SwitchRow, ProcessConfig, bool, bool)>>>|
+                 -> Option<adw::PreferencesGroup> {
+                    if entries.is_empty() {
+                        return None;
+                    }
+                    let builder = adw::PreferencesGroup::builder().title(title);
+                    let group = match description {
+                        Some(d) => builder.description(d).build(),
+                        None => builder.build(),
+                    };
+                    for entry in entries {
+                        let title = entry
+                            .config
+                            .display_name
+                            .clone()
+                            .unwrap_or_else(|| entry.config.name.clone());
+                        let row = adw::SwitchRow::builder()
+                            .title(&title)
+                            .subtitle(&entry.config.command)
+                            .active(entry.initial_on)
+                            .build();
+                        group.add(&row);
+                        switches.borrow_mut().push((
+                            row,
+                            entry.config,
+                            entry.initial_on,
+                            entry.is_custom,
+                        ));
+                    }
+                    Some(group)
+                };
+
+            let active_count = active_entries.len();
+            let hidden_count = hidden_entries.len();
+            let new_count = new_entries.len();
+
+            if let Some(g) = add_group(
+                &format!("Active ({active_count})"),
+                Some("Currently part of this project. Toggle off to stop and hide."),
+                active_entries,
+                &switches,
+            ) {
+                page.add(&g);
+            }
+            if let Some(g) = add_group(
+                &format!("Hidden ({hidden_count})"),
+                Some("Previously removed. Toggle on to restore."),
+                hidden_entries,
+                &switches,
+            ) {
+                page.add(&g);
+            }
+            if let Some(g) = add_group(
+                &format!("Detected ({new_count})"),
+                Some("Found in this project but not yet added. Toggle on to include."),
+                new_entries,
+                &switches,
+            ) {
+                page.add(&g);
+            }
+        }
+
+        toolbar_view.set_content(Some(&page));
+        dialog.set_child(Some(&toolbar_view));
+
+        // --- Wire directory quick actions ---
         let dir_for_copy = project_dir.to_string();
         copy_path_btn.connect_clicked(move |_| {
             if let Some(display) = gtk4::gdk::Display::default() {
@@ -105,7 +289,6 @@ impl EditProjectDialog {
             }
         });
 
-        // Reveal in file manager
         let dir_for_reveal = project_dir.to_string();
         reveal_btn.connect_clicked(move |_| {
             let _ = std::process::Command::new("xdg-open")
@@ -113,13 +296,11 @@ impl EditProjectDialog {
                 .spawn();
         });
 
-        // Open terminal in project directory
         let dir_for_terminal = project_dir.to_string();
         terminal_btn.connect_clicked(move |_| {
             let settings = AppSettings::load();
             let terminal = &settings.tools.default_terminal;
             if terminal == "xdg-open" {
-                // xdg-open on a dir opens file manager, so pick a real terminal
                 for candidate in [
                     "gnome-terminal",
                     "konsole",
@@ -149,13 +330,11 @@ impl EditProjectDialog {
             }
         });
 
-        // Open in editor
         let dir_for_editor = project_dir.to_string();
         editor_btn.connect_clicked(move |_| {
             let settings = AppSettings::load();
             let editor = &settings.tools.default_editor;
             if editor == "xdg-open" {
-                // xdg-open on a dir opens file manager; probe for a GUI editor
                 for candidate in [
                     "code",
                     "codium",
@@ -183,93 +362,30 @@ impl EditProjectDialog {
             }
         });
 
-        // Icon section
-        let icon_group = adw::PreferencesGroup::builder()
-            .title("Project Icon")
-            .margin_top(12)
-            .build();
-
-        let icon_preview = gtk4::Image::builder()
-            .pixel_size(48)
-            .margin_start(12)
-            .margin_top(8)
-            .halign(gtk4::Align::Start)
-            .build();
-        if let Some(path) = current_icon {
-            icon_preview.set_from_file(Some(path));
-            icon_preview.set_visible(true);
-        } else {
-            icon_preview.set_visible(false);
-        }
-
-        let icon_path_label = gtk4::Label::builder()
-            .label(current_icon.unwrap_or("(default initials)"))
-            .halign(gtk4::Align::Start)
-            .ellipsize(gtk4::pango::EllipsizeMode::Middle)
-            .css_classes(["caption", "dim-label"])
-            .margin_start(12)
-            .margin_end(12)
-            .margin_top(8)
-            .margin_bottom(4)
-            .build();
-
-        let icon_path_store: Rc<RefCell<Option<String>>> =
-            Rc::new(RefCell::new(current_icon.map(|s| s.to_string())));
-
-        let icon_buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        icon_buttons.set_margin_start(12);
-        icon_buttons.set_margin_end(12);
-        icon_buttons.set_margin_top(4);
-        icon_buttons.set_margin_bottom(8);
-
-        let auto_detect_btn = gtk4::Button::builder()
-            .label("Auto-detect")
-            .css_classes(["flat"])
-            .build();
-
-        let choose_file_btn = gtk4::Button::builder()
-            .label("Choose File...")
-            .css_classes(["flat"])
-            .build();
-
-        let clear_icon_btn = gtk4::Button::builder()
-            .label("Reset")
-            .css_classes(["flat"])
-            .build();
-
-        icon_buttons.append(&auto_detect_btn);
-        icon_buttons.append(&choose_file_btn);
-        icon_buttons.append(&clear_icon_btn);
-
-        let icon_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        icon_box.append(&icon_preview);
-        icon_box.append(&icon_path_label);
-        icon_box.append(&icon_buttons);
-        icon_group.add(&icon_box);
-        content.append(&icon_group);
-
-        // Auto-detect button
+        // --- Wire icon actions ---
+        let pname_owned = project_name.to_string();
         let dir_owned = project_dir.to_string();
-        let label_ref = icon_path_label.clone();
         let store_ref = icon_path_store.clone();
-        let preview_ref = icon_preview.clone();
+        let pname_ref = pname_owned.clone();
+        let update_preview_ad = update_preview.clone();
+        let popover_close = icon_menu_popover.clone();
         auto_detect_btn.connect_clicked(move |_| {
+            popover_close.popdown();
             if let Some(icon) = detect_project_icon(Path::new(&dir_owned)) {
-                label_ref.set_label(&icon);
-                preview_ref.set_from_file(Some(&icon));
-                preview_ref.set_visible(true);
+                update_preview_ad(Some(&icon), &pname_ref);
                 *store_ref.borrow_mut() = Some(icon);
             } else {
-                label_ref.set_label("(no icon found)");
-                preview_ref.set_visible(false);
+                update_preview_ad(None, &pname_ref);
+                *store_ref.borrow_mut() = None;
             }
         });
 
-        // Choose file button
-        let label_ref = icon_path_label.clone();
         let store_ref = icon_path_store.clone();
-        let preview_ref = icon_preview.clone();
+        let pname_ref = pname_owned.clone();
+        let update_preview_cf = update_preview.clone();
+        let popover_close = icon_menu_popover.clone();
         choose_file_btn.connect_clicked(move |btn| {
+            popover_close.popdown();
             let file_dialog = gtk4::FileDialog::builder()
                 .title("Select Project Icon")
                 .build();
@@ -287,86 +403,82 @@ impl EditProjectDialog {
 
             let win = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
 
-            let label_ref = label_ref.clone();
             let store_ref = store_ref.clone();
-            let preview_ref = preview_ref.clone();
+            let pname_ref = pname_ref.clone();
+            let update_preview_cf = update_preview_cf.clone();
             file_dialog.open(win.as_ref(), gtk4::gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result
                     && let Some(path) = file.path()
                 {
                     let path_str = path.to_string_lossy().to_string();
-                    label_ref.set_label(&path_str);
-                    preview_ref.set_from_file(Some(&*path_str));
-                    preview_ref.set_visible(true);
+                    update_preview_cf(Some(&path_str), &pname_ref);
                     *store_ref.borrow_mut() = Some(path_str);
                 }
             });
         });
 
-        // Clear icon button
-        let label_ref = icon_path_label.clone();
         let store_ref = icon_path_store.clone();
-        let preview_ref = icon_preview.clone();
+        let pname_ref = pname_owned.clone();
+        let update_preview_cl = update_preview.clone();
+        let popover_close = icon_menu_popover.clone();
         clear_icon_btn.connect_clicked(move |_| {
-            label_ref.set_label("(default initials)");
-            preview_ref.set_visible(false);
+            popover_close.popdown();
+            update_preview_cl(None, &pname_ref);
             *store_ref.borrow_mut() = None;
         });
 
-        // Action buttons
-        let btn_box = gtk4::Box::builder()
-            .orientation(gtk4::Orientation::Vertical)
-            .spacing(8)
-            .margin_top(24)
-            .halign(gtk4::Align::Center)
-            .build();
-
-        let save_btn = gtk4::Button::builder()
-            .label("Save")
-            .css_classes(["suggested-action", "pill"])
-            .width_request(200)
-            .build();
-
-        let remove_btn = gtk4::Button::builder()
-            .label("Remove Project")
-            .css_classes(["destructive-action", "pill"])
-            .build();
-
-        btn_box.append(&save_btn);
-        btn_box.append(&remove_btn);
-        content.append(&btn_box);
-
-        toolbar_view.set_content(Some(&content));
-        dialog.set_child(Some(&toolbar_view));
-
+        // --- Wire Save / Cancel / Remove ---
         let on_save = Rc::new(on_save);
 
-        // Wire save button
-        let dialog_ref = dialog.clone();
+        let dialog_cancel = dialog.clone();
+        cancel_btn.connect_clicked(move |_| {
+            dialog_cancel.close();
+        });
+
+        let dialog_save = dialog.clone();
         let on_save_ref = on_save.clone();
         let store_ref = icon_path_store.clone();
+        let switches_save = switches.clone();
+        let name_row_ref = name_row.clone();
         save_btn.connect_clicked(move |_| {
-            let name = name_row.text().to_string();
+            let name = name_row_ref.text().to_string();
             if name.is_empty() {
                 return;
             }
+            let switches_borrow = switches_save.borrow();
+            let enabled_commands: Vec<ProcessConfig> = switches_borrow
+                .iter()
+                .filter(|(row, _, initial_on, _)| row.is_active() && !initial_on)
+                .map(|(_, cfg, _, _)| cfg.clone())
+                .collect();
+            let disabled_commands: Vec<String> = switches_borrow
+                .iter()
+                .filter(|(row, _, initial_on, _)| !row.is_active() && *initial_on)
+                .map(|(_, cfg, _, _)| cfg.name.clone())
+                .collect();
+            drop(switches_borrow);
             on_save_ref(EditProjectResult {
                 name,
                 icon_path: store_ref.borrow().clone(),
                 remove: false,
+                enabled_commands,
+                disabled_commands,
             });
-            dialog_ref.close();
+            dialog_save.close();
         });
 
-        // Wire remove button
-        let dialog_ref = dialog.clone();
+        let dialog_remove = dialog.clone();
+        let menu_popover_close = menu_popover.clone();
         remove_btn.connect_clicked(move |_| {
+            menu_popover_close.popdown();
             on_save(EditProjectResult {
                 name: String::new(),
                 icon_path: None,
                 remove: true,
+                enabled_commands: Vec::new(),
+                disabled_commands: Vec::new(),
             });
-            dialog_ref.close();
+            dialog_remove.close();
         });
 
         dialog.present(Some(parent));

@@ -388,6 +388,11 @@ impl GitChangesDialog {
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
+        headerbar.set_show_start_title_buttons(false);
+        headerbar.set_show_end_title_buttons(false);
+
+        let close_btn = gtk4::Button::builder().label("Close").build();
+        headerbar.pack_start(&close_btn);
 
         let refresh_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
@@ -396,6 +401,11 @@ impl GitChangesDialog {
             .build();
         headerbar.pack_end(&refresh_btn);
         toolbar_view.add_top_bar(&headerbar);
+
+        let dialog_close = dialog.clone();
+        close_btn.connect_clicked(move |_| {
+            dialog_close.close();
+        });
 
         // Content area — starts with a spinner
         let content_stack = gtk4::Stack::new();

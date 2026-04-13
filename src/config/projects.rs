@@ -139,6 +139,23 @@ impl SavedProjects {
         }
     }
 
+    pub fn unmark_process_deleted(&mut self, dir: &str, process_name: &str) {
+        let mut changed = false;
+        if let Some(list) = self.deleted_processes.get_mut(dir) {
+            let before = list.len();
+            list.retain(|n| n != process_name);
+            if list.len() != before {
+                changed = true;
+            }
+            if list.is_empty() {
+                self.deleted_processes.remove(dir);
+            }
+        }
+        if changed {
+            self.save();
+        }
+    }
+
     pub fn has_deleted_processes(&self, dir: &str) -> bool {
         self.deleted_processes
             .get(dir)

@@ -2059,6 +2059,23 @@ impl TuxFlowWindow {
                 return gtk4::glib::Propagation::Proceed;
             }
 
+            // Skip all shortcuts when an adw::Dialog is focused (e.g. git
+            // changes dialog) so dialog-local shortcuts like Ctrl+Enter work.
+            if let Some(fw) =
+                gtk4::prelude::GtkWindowExt::focus(window_ref.upcast_ref::<gtk4::Window>())
+            {
+                let mut w: gtk4::Widget = fw;
+                loop {
+                    if w.downcast_ref::<adw::Dialog>().is_some() {
+                        return gtk4::glib::Propagation::Proceed;
+                    }
+                    match w.parent() {
+                        Some(p) => w = p,
+                        None => break,
+                    }
+                }
+            }
+
             let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
             let alt = state.contains(gdk::ModifierType::ALT_MASK);
 

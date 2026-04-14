@@ -708,6 +708,7 @@ impl GitChangesDialog {
         // "commit in flight" guards without re-implementing them.
         let commit_btn_shortcut = commit_btn.clone();
         let key_controller = gtk4::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
             if keyval == gtk4::gdk::Key::Return
                 && state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
@@ -767,7 +768,9 @@ impl GitChangesDialog {
                 if let Ok(result) = rx.try_recv() {
                     pushing_done.set(false);
                     match result {
-                        Ok(ahead) => update_push_button(&pb, ahead),
+                        Ok(_) => {
+                            dlg.close();
+                        }
                         Err(err) => {
                             update_push_button(&pb, 1); // re-enable on error
                             show_error_dialog(&dlg, "Push Failed", &err);

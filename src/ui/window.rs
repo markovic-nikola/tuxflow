@@ -379,8 +379,11 @@ impl TuxFlowWindow {
         let pid_file_shutdown = pid_file.clone();
         let settings_shutdown = settings.clone();
         window.connect_close_request(move |win| {
-            // Save window size, position, and maximized state
+            // Save window size, position, and maximized state.
+            // Re-load from disk first so we don't overwrite changes made by the
+            // settings dialog (which uses its own AppSettings instance).
             {
+                *settings_shutdown.borrow_mut() = AppSettings::load();
                 let mut s = settings_shutdown.borrow_mut();
                 s.window.maximized = win.is_maximized();
                 if !win.is_maximized() {

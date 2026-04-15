@@ -343,7 +343,8 @@ impl ProjectList {
                     row.set_name(display);
                 }
                 row.set_status(proc.status);
-                self.connect_row_click(&row, &qname);
+                row.qualified_name.replace(qname.clone());
+                self.connect_row_click(&row);
                 Self::connect_row_actions(
                     &row,
                     manager,
@@ -1216,13 +1217,14 @@ impl ProjectList {
         row.widget().add_controller(proc_drop_target);
     }
 
-    fn connect_row_click(&self, row: &ProcessRow, qualified_name: &str) {
+    fn connect_row_click(&self, row: &ProcessRow) {
         let gesture = gtk4::GestureClick::new();
-        let name = qualified_name.to_string();
+        let qname_cell = row.qualified_name.clone();
         let cb_ref = self.on_process_selected.clone();
         let rows_ref = self.process_rows.clone();
         let selected_ref = self.selected_qname.clone();
         gesture.connect_released(move |_, _, _, _| {
+            let name = qname_cell.borrow().clone();
             // Remove highlight from previous selection
             {
                 let rows = rows_ref.borrow();
@@ -1271,7 +1273,8 @@ impl ProjectList {
             row.set_name(display);
         }
         row.set_status(status);
-        self.connect_row_click(&row, &qname);
+        row.qualified_name.replace(qname.clone());
+        self.connect_row_click(&row);
         Self::connect_row_actions(
             &row,
             manager,

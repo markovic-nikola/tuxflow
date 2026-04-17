@@ -1361,9 +1361,13 @@ impl TuxFlowWindow {
                                         Some(project.dir.to_string_lossy().to_string());
                                 }
                             }
-                            // Persist the custom command
-                            ws2.borrow_mut()
-                                .save_custom_command(selected_project, config.clone());
+                            // Persist the custom command and clear any stale deletion marker
+                            // so it doesn't get filtered out on next startup.
+                            {
+                                let mut ws_mut = ws2.borrow_mut();
+                                ws_mut.unmark_process_deleted(selected_project, &name);
+                                ws_mut.save_custom_command(selected_project, config.clone());
+                            }
 
                             let ws_borrow = ws2.borrow();
                             if let Some(project) = ws_borrow

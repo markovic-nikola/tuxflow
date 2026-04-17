@@ -443,6 +443,7 @@ impl ProjectList {
         let proc_statuses_ref = self.process_statuses.clone();
         let selected_qname_ref = self.selected_qname.clone();
         let on_project_commands_changed_ref = self.on_project_commands_changed.clone();
+        let on_process_deleted_ref = self.on_process_deleted.clone();
 
         project_row.set_on_context_action(move |action| match action {
             "start_all" => {
@@ -666,6 +667,11 @@ impl ProjectList {
                 let rows_del = project_rows_ref.clone();
                 let managers_del = project_managers_ref.clone();
                 let container_del = container_ref.clone();
+                let sections_del = sections_ref.clone();
+                let proc_rows_del = proc_rows_ref.clone();
+                let proc_statuses_del = proc_statuses_ref.clone();
+                let selected_qname_del = selected_qname_ref.clone();
+                let on_deleted_del = on_process_deleted_ref.clone();
 
                 let win = win_ref.borrow().clone();
                 let parent_widget = win.map(|w| w.upcast::<gtk4::Widget>());
@@ -680,6 +686,34 @@ impl ProjectList {
                         if let Some(ref ws) = *ws_del.borrow() {
                             ws.borrow_mut().remove_project(&pname_del);
                         }
+
+                        // Collect qnames of all processes in this project so we can
+                        // notify listeners (terminal stack) and clean up internal state.
+                        let qname_prefix = format!("{}::", pname_del);
+                        let orphaned_qnames: Vec<String> = proc_rows_del
+                            .borrow()
+                            .keys()
+                            .filter(|q| q.starts_with(&qname_prefix))
+                            .cloned()
+                            .collect();
+
+                        for qname in &orphaned_qnames {
+                            proc_rows_del.borrow_mut().remove(qname);
+                            proc_statuses_del.borrow_mut().remove(qname);
+                            if let Some(ref cb) = *on_deleted_del.borrow() {
+                                cb(qname);
+                            }
+                        }
+                        {
+                            let mut sel = selected_qname_del.borrow_mut();
+                            if sel.as_deref().is_some_and(|q| q.starts_with(&qname_prefix)) {
+                                *sel = None;
+                            }
+                        }
+                        sections_del
+                            .borrow_mut()
+                            .retain(|s| s.project_name != pname_del);
+
                         let mut rows = rows_del.borrow_mut();
                         if let Some(row) = rows.remove(&pname_del) {
                             container_del.remove(row.widget());
@@ -891,6 +925,7 @@ impl ProjectList {
                                                 row.set_action_name(&new_name);
                                                 row.set_command_tooltip(&new_command);
                                                 row.qualified_name.replace(new_qname.clone());
+                                                row.widget().set_widget_name(&new_qname);
                                                 rows.insert(new_qname.clone(), row);
                                             }
 
@@ -1420,9 +1455,18 @@ impl ProjectList {
     }
 
     pub fn update_process_status(&self, qualified_name: &str, status: ProcessStatus) {
-        if let Some(row) = self.process_rows.borrow().get(qualified_name) {
+        let rows = self.process_rows.borrow();
+        if let Some(row) = rows.get(qualified_name) {
             row.set_status(status);
+        } else {
+            log::warn!(
+                "update_process_status: no row for qname='{qualified_name}' status={status:?} \
+                 (have {} rows: {:?})",
+                rows.len(),
+                rows.keys().collect::<Vec<_>>()
+            );
         }
+        drop(rows);
         self.process_statuses
             .borrow_mut()
             .insert(qualified_name.to_string(), status);

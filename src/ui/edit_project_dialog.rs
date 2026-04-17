@@ -394,6 +394,7 @@ impl EditProjectDialog {
             filter.add_mime_type("image/png");
             filter.add_mime_type("image/svg+xml");
             filter.add_mime_type("image/jpeg");
+            filter.add_mime_type("image/webp");
             filter.add_mime_type("image/x-icon");
             filter.set_name(Some("Images"));
 
@@ -490,20 +491,27 @@ pub fn detect_project_icon(dir: &Path) -> Option<String> {
     let candidates = [
         "favicon.svg",
         "favicon.png",
+        "favicon.webp",
         "favicon.ico",
         "logo.svg",
         "logo.png",
+        "logo.webp",
         ".icon.png",
         ".icon.svg",
+        ".icon.webp",
         "public/favicon.svg",
         "public/favicon.png",
+        "public/favicon.webp",
         "public/favicon.ico",
         "public/logo.svg",
         "public/logo.png",
+        "public/logo.webp",
         "resources/icon.svg",
         "resources/icon.png",
+        "resources/icon.webp",
         "assets/icon.svg",
         "assets/icon.png",
+        "assets/icon.webp",
     ];
 
     for candidate in &candidates {

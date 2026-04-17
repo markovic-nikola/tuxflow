@@ -80,6 +80,10 @@ impl SavedProjects {
         self.directories.retain(|d| d != dir);
         self.icons.remove(dir);
         self.names.remove(dir);
+        self.process_order.remove(dir);
+        self.expanded.remove(dir);
+        self.deleted_processes.remove(dir);
+        self.custom_commands.remove(dir);
         self.save();
     }
 

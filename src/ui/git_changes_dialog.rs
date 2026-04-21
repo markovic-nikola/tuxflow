@@ -806,16 +806,18 @@ impl GitChangesDialog {
             let dv = diff_view_pull.clone();
             let fs = files_store_pull.clone();
             let (tx, rx) = mpsc::channel::<Result<(usize, usize), String>>();
-            std::thread::spawn(move || match run_git_command(&dir, &["pull"]) {
-                Ok(_) => {
-                    let ahead = commits_ahead(&dir);
-                    let behind = commits_behind(&dir);
-                    let _ = tx.send(Ok((ahead, behind)));
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                }
-            });
+            std::thread::spawn(
+                move || match run_git_command(&dir, &["pull", "--ff-only"]) {
+                    Ok(_) => {
+                        let ahead = commits_ahead(&dir);
+                        let behind = commits_behind(&dir);
+                        let _ = tx.send(Ok((ahead, behind)));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                    }
+                },
+            );
             let pulling_done = pulling_click.clone();
             let dir_reload = dir_pull.clone();
             glib::idle_add_local(move || {

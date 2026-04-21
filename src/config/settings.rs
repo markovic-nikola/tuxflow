@@ -50,6 +50,8 @@ pub struct NotificationSettings {
     pub on_crash: bool,
     pub on_auto_restart: bool,
     pub on_file_watch_restart: bool,
+    pub on_process_finish: bool,
+    pub suppress_when_focused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +103,8 @@ impl Default for NotificationSettings {
             on_crash: true,
             on_auto_restart: true,
             on_file_watch_restart: false,
+            on_process_finish: true,
+            suppress_when_focused: true,
         }
     }
 }

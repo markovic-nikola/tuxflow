@@ -6,7 +6,6 @@ use crate::config::loader;
 use crate::config::projects::SavedProjects;
 use crate::config::schema::{ProcessCategory, ProcessConfig};
 use crate::detect::detector::{self, DetectedStack};
-use crate::process::auto_restart;
 use crate::process::manager::{ProcessManager, ProcessManagerRef};
 use crate::util::icon_detector;
 use crate::watcher::file_watcher::FileWatcher;

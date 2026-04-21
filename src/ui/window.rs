@@ -110,6 +110,35 @@ impl TuxFlowWindow {
         terminal_stack.set_vexpand(true);
         terminal_stack.set_hexpand(true);
 
+        // Focus-gate for notifications: returns true when the given qname's terminal
+        // is NOT what the user is currently looking at. Callers combine this with
+        // the `suppress_when_focused` setting to decide whether to notify.
+        let focus_gate: crate::process::auto_restart::FocusGate = {
+            let window_ref = window.clone();
+            let stack_ref = terminal_stack.clone();
+            Rc::new(move |qname: &str| {
+                let window_focused = window_ref.is_active();
+                let terminal_visible = stack_ref
+                    .visible_child_name()
+                    .map(|n| n.as_str() == qname)
+                    .unwrap_or(false);
+                !(window_focused && terminal_visible)
+            })
+        };
+
+        // Resolver from project name → current icon path, for attaching project
+        // icons to desktop notifications. Kept behind a closure so the auto-restart
+        // module stays decoupled from the workspace type.
+        let icon_resolver: crate::process::auto_restart::IconResolver = {
+            let ws_ref = ws.clone();
+            Rc::new(move |project_name: &str| {
+                ws_ref
+                    .borrow()
+                    .get_project_icon(project_name)
+                    .map(std::path::PathBuf::from)
+            })
+        };
+
         let sidebar = Rc::new(ProjectList::new(single_expand.clone()));
         sidebar.set_workspace(&ws);
         sidebar.set_window(&window);
@@ -154,6 +183,8 @@ impl TuxFlowWindow {
                         &pid_file,
                         &status_bar,
                         &selected_process,
+                        Some(focus_gate.clone()),
+                        Some(icon_resolver.clone()),
                     );
                 }
             }
@@ -169,6 +200,8 @@ impl TuxFlowWindow {
                 &pid_file,
                 &status_bar,
                 &selected_process,
+                Some(focus_gate.clone()),
+                Some(icon_resolver.clone()),
             );
         }
 
@@ -331,6 +364,8 @@ impl TuxFlowWindow {
             &status_bar,
             &keybinding_map,
             &auto_hide,
+            &focus_gate,
+            &icon_resolver,
         );
         window.set_content(Some(&content));
 
@@ -483,14 +518,26 @@ impl TuxFlowWindow {
     }
 
     /// Connect auto-restart handler to a dynamically added process's terminal.
-    fn setup_auto_restart_for_process(manager: &ProcessManagerRef, name: &str) {
+    fn setup_auto_restart_for_process(
+        manager: &ProcessManagerRef,
+        project_name: &str,
+        name: &str,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
+    ) {
         let auto_restart = manager
             .borrow()
             .get_process(name)
             .map(|p| p.config.auto_restart)
             .unwrap_or(false);
-        let (handler, name_cell) =
-            crate::process::auto_restart::build_auto_restart_handler(manager, name, auto_restart);
+        let (handler, name_cell) = crate::process::auto_restart::build_auto_restart_handler(
+            manager,
+            project_name,
+            name,
+            auto_restart,
+            focus_gate,
+            icon_resolver,
+        );
         let mut mgr = manager.borrow_mut();
         if let Some(proc) = mgr.get_process_mut(name) {
             proc.name_cell = Some(name_cell);
@@ -645,6 +692,8 @@ impl TuxFlowWindow {
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
         let mut ws_mut = ws.borrow_mut();
         if let Some(project) = ws_mut.add_project_from_dir(dir) {
@@ -664,6 +713,8 @@ impl TuxFlowWindow {
                 pid_file,
                 status_bar,
                 selected_process,
+                focus_gate,
+                icon_resolver,
             );
         }
     }
@@ -678,6 +729,8 @@ impl TuxFlowWindow {
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
         let prepared = {
             let mut ws_mut = ws.borrow_mut();
@@ -707,6 +760,8 @@ impl TuxFlowWindow {
             let status_bar = status_bar.clone();
             let selected_process = selected_process.clone();
             let last_selected_project = last_selected_project.clone();
+            let focus_gate = focus_gate.clone();
+            let icon_resolver = icon_resolver.clone();
 
             Self::show_confirm_project_dialog(parent, &project_name, move |custom_name| {
                 let mut ws_mut = ws.borrow_mut();
@@ -732,6 +787,8 @@ impl TuxFlowWindow {
                         &pid_file,
                         &status_bar,
                         &selected_process,
+                        focus_gate.clone(),
+                        icon_resolver.clone(),
                     );
                     *last_selected_project.borrow_mut() = Some(project_name.clone());
                     sidebar.expand_project(&project_name);
@@ -754,6 +811,8 @@ impl TuxFlowWindow {
             let status_bar = status_bar.clone();
             let selected_process = selected_process.clone();
             let last_selected_project = last_selected_project.clone();
+            let focus_gate = focus_gate.clone();
+            let icon_resolver = icon_resolver.clone();
 
             crate::ui::select_commands_dialog::SelectCommandsDialog::show(
                 parent,
@@ -792,6 +851,8 @@ impl TuxFlowWindow {
                             &pid_file,
                             &status_bar,
                             &selected_process,
+                            focus_gate.clone(),
+                            icon_resolver.clone(),
                         );
                         *last_selected_project.borrow_mut() = Some(project_name.clone());
                         sidebar.expand_project(&project_name);
@@ -868,6 +929,8 @@ impl TuxFlowWindow {
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
         // Add placeholders to the stack (real terminals are created lazily)
         let detector = Rc::new(RefCell::new(PortDetector::new()));
@@ -931,8 +994,11 @@ impl TuxFlowWindow {
                 let (auto_restart_handler, name_cell) =
                     crate::process::auto_restart::build_auto_restart_handler(
                         manager,
+                        project_name,
                         name,
                         auto_restart_cfg,
+                        focus_gate.clone(),
+                        icon_resolver.clone(),
                     );
 
                 // Capture refs for the on_materialized closure
@@ -1089,6 +1155,8 @@ impl TuxFlowWindow {
         status_bar: &Rc<StatusBar>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         auto_hide: &Rc<Cell<bool>>,
+        focus_gate: &crate::process::auto_restart::FocusGate,
+        icon_resolver: &crate::process::auto_restart::IconResolver,
     ) -> gtk4::Widget {
         let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
@@ -1122,6 +1190,8 @@ impl TuxFlowWindow {
         let sb_ref = status_bar.clone();
         let sel_ref = selected_process.clone();
         let last_proj_ref = last_selected_project.clone();
+        let focus_gate_ref = focus_gate.clone();
+        let icon_resolver_ref = icon_resolver.clone();
         palette.set_on_action(move |action| {
             match action {
                 "stop_all" => {
@@ -1145,6 +1215,8 @@ impl TuxFlowWindow {
                     let sb2 = sb_ref.clone();
                     let sel2 = sel_ref.clone();
                     let last_proj2 = last_proj_ref.clone();
+                    let focus_gate2 = focus_gate_ref.clone();
+                    let icon_resolver2 = icon_resolver_ref.clone();
                     let dialog = gtk4::FileDialog::builder()
                         .title("Open Project Directory")
                         .build();
@@ -1163,6 +1235,8 @@ impl TuxFlowWindow {
                                 &sb2,
                                 &sel2,
                                 &last_proj2,
+                                Some(focus_gate2.clone()),
+                                Some(icon_resolver2.clone()),
                             );
                         }
                     });
@@ -1171,6 +1245,8 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let fg = focus_gate_ref.clone();
+                    let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
                         .borrow()
                         .projects()
@@ -1227,7 +1303,13 @@ impl TuxFlowWindow {
                                     crate::config::schema::ProcessCategory::Agent,
                                 );
                                 sidebar2.expand_project(&project_name);
-                                Self::setup_auto_restart_for_process(&project.manager, &name);
+                                Self::setup_auto_restart_for_process(
+                                    &project.manager,
+                                    &project_name,
+                                    &name,
+                                    Some(fg.clone()),
+                                    Some(ir.clone()),
+                                );
                                 project.manager.borrow_mut().spawn(&name);
                                 stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
@@ -1249,6 +1331,8 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let fg = focus_gate_ref.clone();
+                    let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
                         .borrow()
                         .projects()
@@ -1306,7 +1390,13 @@ impl TuxFlowWindow {
                                     crate::config::schema::ProcessCategory::SSH,
                                 );
                                 sidebar2.expand_project(&project_name);
-                                Self::setup_auto_restart_for_process(&project.manager, &name);
+                                Self::setup_auto_restart_for_process(
+                                    &project.manager,
+                                    &project_name,
+                                    &name,
+                                    Some(fg.clone()),
+                                    Some(ir.clone()),
+                                );
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
                                 }
@@ -1330,6 +1420,8 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let fg = focus_gate_ref.clone();
+                    let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
                         .borrow()
                         .projects()
@@ -1398,7 +1490,13 @@ impl TuxFlowWindow {
                                     category,
                                 );
                                 sidebar2.expand_project(&project_name);
-                                Self::setup_auto_restart_for_process(&project.manager, &name);
+                                Self::setup_auto_restart_for_process(
+                                    &project.manager,
+                                    &project_name,
+                                    &name,
+                                    Some(fg.clone()),
+                                    Some(ir.clone()),
+                                );
                                 if start_with_project {
                                     project.manager.borrow_mut().spawn(&name);
                                 }
@@ -1412,6 +1510,8 @@ impl TuxFlowWindow {
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
                     let win2 = window_ref.clone();
+                    let fg = focus_gate_ref.clone();
+                    let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
                         .borrow()
                         .projects()
@@ -1489,7 +1589,13 @@ impl TuxFlowWindow {
                                     crate::config::schema::ProcessCategory::Terminal,
                                 );
                                 sidebar2.expand_project(&project_name);
-                                Self::setup_auto_restart_for_process(&project.manager, &term_name);
+                                Self::setup_auto_restart_for_process(
+                                    &project.manager,
+                                    &project_name,
+                                    &term_name,
+                                    Some(fg.clone()),
+                                    Some(ir.clone()),
+                                );
                                 project.manager.borrow_mut().spawn(&term_name);
                                 stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
@@ -1513,6 +1619,8 @@ impl TuxFlowWindow {
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
                     let win2 = window_ref.clone();
+                    let fg = focus_gate_ref.clone();
+                    let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
                         .borrow()
                         .projects()
@@ -1596,7 +1704,13 @@ impl TuxFlowWindow {
                                     crate::config::schema::ProcessCategory::Agent,
                                 );
                                 sidebar2.expand_project(&project_name);
-                                Self::setup_auto_restart_for_process(&project.manager, &agent_name);
+                                Self::setup_auto_restart_for_process(
+                                    &project.manager,
+                                    &project_name,
+                                    &agent_name,
+                                    Some(fg.clone()),
+                                    Some(ir.clone()),
+                                );
                                 project.manager.borrow_mut().spawn(&agent_name);
                                 stack2.set_visible_child_name(&qname);
                                 if let Some(ref term) = terminal {
@@ -1753,6 +1867,8 @@ impl TuxFlowWindow {
             let sidebar_ref = sidebar.clone();
             let selected_ref = selected_process.clone();
             let refresh = refresh_counts.clone();
+            let focus_gate = focus_gate.clone();
+            let icon_resolver = icon_resolver.clone();
             move |project_name, enabled, disabled| {
                 // Apply disables first: kill, persist deletion, remove sidebar row,
                 // remove terminal from stack.
@@ -1821,7 +1937,13 @@ impl TuxFlowWindow {
                     }
 
                     sidebar_ref.add_process_to_project(&mgr, project_name, &name, status, category);
-                    Self::setup_auto_restart_for_process(&mgr, &name);
+                    Self::setup_auto_restart_for_process(
+                        &mgr,
+                        project_name,
+                        &name,
+                        Some(focus_gate.clone()),
+                        Some(icon_resolver.clone()),
+                    );
                 }
 
                 refresh();
@@ -2019,6 +2141,8 @@ impl TuxFlowWindow {
             keybinding_map,
             last_selected_project,
             status_bar,
+            focus_gate,
+            icon_resolver,
         );
 
         vbox.upcast()
@@ -2040,6 +2164,8 @@ impl TuxFlowWindow {
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
         status_bar: &Rc<StatusBar>,
+        focus_gate: &crate::process::auto_restart::FocusGate,
+        icon_resolver: &crate::process::auto_restart::IconResolver,
     ) {
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -2059,6 +2185,8 @@ impl TuxFlowWindow {
         let kb_map = keybinding_map.clone();
         let last_proj_ref = last_selected_project.clone();
         let sb_ref = status_bar.clone();
+        let focus_gate_ref = focus_gate.clone();
+        let icon_resolver_ref = icon_resolver.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _keycode, state| {
             // Skip all shortcuts while settings key capture is active
@@ -2217,6 +2345,8 @@ impl TuxFlowWindow {
                             &stack_ref,
                             &sidebar_ref,
                             &last_proj_ref,
+                            Some(focus_gate_ref.clone()),
+                            Some(icon_resolver_ref.clone()),
                         );
                     }
                 }
@@ -2498,6 +2628,8 @@ impl TuxFlowWindow {
         stack: &gtk4::Stack,
         sidebar: &Rc<ProjectList>,
         last_project: &Rc<RefCell<Option<String>>>,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
         let ws_borrow = ws.borrow();
         let project_name = match Self::resolve_active_project(stack, last_project, sidebar) {
@@ -2555,7 +2687,13 @@ impl TuxFlowWindow {
                 ProcessStatus::Stopped,
                 crate::config::schema::ProcessCategory::Terminal,
             );
-            Self::setup_auto_restart_for_process(&project.manager, &term_name);
+            Self::setup_auto_restart_for_process(
+                &project.manager,
+                &project_name,
+                &term_name,
+                focus_gate,
+                icon_resolver,
+            );
             project.manager.borrow_mut().spawn(&term_name);
             if let Some(ref term) = terminal {
                 Self::connect_window_title_auto_rename(

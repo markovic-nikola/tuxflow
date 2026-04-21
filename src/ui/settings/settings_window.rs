@@ -436,6 +436,33 @@ impl SettingsWindow {
         });
         group.add(&notify_file_row);
 
+        let notify_finish_row = adw::SwitchRow::builder()
+            .title("Process Finished")
+            .subtitle("Notify when a process exits on its own")
+            .active(s.notifications.on_process_finish)
+            .build();
+        let settings_ref = settings.clone();
+        notify_finish_row.connect_active_notify(move |row| {
+            settings_ref.borrow_mut().notifications.on_process_finish = row.is_active();
+            settings_ref.borrow().save();
+        });
+        group.add(&notify_finish_row);
+
+        let suppress_focused_row = adw::SwitchRow::builder()
+            .title("Suppress When Focused")
+            .subtitle("Skip notifications for the terminal you're currently viewing")
+            .active(s.notifications.suppress_when_focused)
+            .build();
+        let settings_ref = settings.clone();
+        suppress_focused_row.connect_active_notify(move |row| {
+            settings_ref
+                .borrow_mut()
+                .notifications
+                .suppress_when_focused = row.is_active();
+            settings_ref.borrow().save();
+        });
+        group.add(&suppress_focused_row);
+
         drop(s);
         page.add(&group);
         page

@@ -66,7 +66,7 @@ impl SettingsWindow {
         dialog.add(&sidebar_page);
 
         // Notifications page
-        let notifications_page = Self::build_notifications_page(settings);
+        let notifications_page = Self::build_notifications_page(settings, &dialog);
         dialog.add(&notifications_page);
 
         // Hotkeys page
@@ -385,7 +385,10 @@ impl SettingsWindow {
         page
     }
 
-    fn build_notifications_page(settings: &SettingsRef) -> adw::PreferencesPage {
+    fn build_notifications_page(
+        settings: &SettingsRef,
+        dialog: &adw::PreferencesDialog,
+    ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Notifications")
             .icon_name("preferences-system-notifications-symbolic")
@@ -394,6 +397,17 @@ impl SettingsWindow {
         let group = adw::PreferencesGroup::builder()
             .title("Desktop Notifications")
             .build();
+
+        let test_btn = gtk4::Button::builder()
+            .label("Send Test")
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
+            .tooltip_text("Fire a sample notification right now")
+            .build();
+        test_btn.connect_clicked(|_| {
+            crate::util::notifications::notify_finish("TuxFlow", "test", None);
+        });
+        group.set_header_suffix(Some(&test_btn));
 
         let s = settings.borrow();
 
@@ -463,8 +477,82 @@ impl SettingsWindow {
         });
         group.add(&suppress_focused_row);
 
-        drop(s);
         page.add(&group);
+
+        // --- Sound group ---
+        let sound_group = adw::PreferencesGroup::builder()
+            .title("Sound")
+            .description("Play a sound alongside each desktop notification")
+            .build();
+
+        let sound_enabled_row = adw::SwitchRow::builder()
+            .title("Play Sound")
+            .subtitle("Requires paplay (pulseaudio-utils)")
+            .active(s.notifications.sound_enabled)
+            .build();
+        let settings_ref = settings.clone();
+        sound_enabled_row.connect_active_notify(move |row| {
+            settings_ref.borrow_mut().notifications.sound_enabled = row.is_active();
+            settings_ref.borrow().save();
+        });
+        sound_group.add(&sound_enabled_row);
+
+        // Sound picker — bundled sounds ship inside the binary so this list is
+        // identical on every install.
+        let sound_ids: Vec<String> = crate::util::notifications::BUNDLED_SOUNDS
+            .iter()
+            .map(|s| s.id.to_string())
+            .collect();
+        let sound_labels: Vec<&str> = crate::util::notifications::BUNDLED_SOUNDS
+            .iter()
+            .map(|s| s.label)
+            .collect();
+        let string_list = gtk4::StringList::new(&sound_labels);
+        let current_idx = sound_ids
+            .iter()
+            .position(|id| *id == s.notifications.sound_name)
+            .unwrap_or(0) as u32;
+        let sound_combo = adw::ComboRow::builder()
+            .title("Notification Sound")
+            .model(&string_list)
+            .selected(current_idx)
+            .build();
+        let settings_ref = settings.clone();
+        let sound_ids_for_select = sound_ids.clone();
+        sound_combo.connect_selected_notify(move |row| {
+            let idx = row.selected() as usize;
+            if let Some(id) = sound_ids_for_select.get(idx) {
+                settings_ref.borrow_mut().notifications.sound_name = id.clone();
+                settings_ref.borrow().save();
+            }
+        });
+
+        let test_btn = gtk4::Button::builder()
+            .icon_name("media-playback-start-symbolic")
+            .tooltip_text("Preview sound")
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
+            .build();
+        let sound_combo_for_test = sound_combo.clone();
+        let sound_ids_for_test = sound_ids.clone();
+        let dialog_for_test = dialog.clone();
+        test_btn.connect_clicked(move |_| {
+            let idx = sound_combo_for_test.selected() as usize;
+            if let Some(id) = sound_ids_for_test.get(idx)
+                && let Err(msg) = crate::util::notifications::play_sound(id)
+            {
+                let toast = adw::Toast::new(&format!("Sound unavailable: {msg}"));
+                toast.set_timeout(6);
+                dialog_for_test.add_toast(toast);
+            }
+        });
+        sound_combo.add_suffix(&test_btn);
+
+        sound_group.add(&sound_combo);
+
+        page.add(&sound_group);
+
+        drop(s);
         page
     }
 

@@ -52,6 +52,10 @@ pub struct NotificationSettings {
     pub on_file_watch_restart: bool,
     pub on_process_finish: bool,
     pub suppress_when_focused: bool,
+    pub sound_enabled: bool,
+    /// Freedesktop sound theme event ID, e.g. "complete", "bell",
+    /// "message-new-instant", "dialog-information".
+    pub sound_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +109,8 @@ impl Default for NotificationSettings {
             on_file_watch_restart: false,
             on_process_finish: true,
             suppress_when_focused: true,
+            sound_enabled: false,
+            sound_name: "sound1".to_string(),
         }
     }
 }

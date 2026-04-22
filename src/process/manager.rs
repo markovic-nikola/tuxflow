@@ -172,6 +172,7 @@ pub struct ProcessManager {
     order: Vec<String>,
     on_status_change: Option<Box<dyn Fn(&str, ProcessStatus)>>,
     on_pid_change: Option<Rc<dyn Fn(i32, bool)>>,
+    on_file_watch_restart: Option<Rc<dyn Fn(&str)>>,
     settings: AppSettings,
 }
 
@@ -182,6 +183,7 @@ impl ProcessManager {
             order: Vec::new(),
             on_status_change: None,
             on_pid_change: None,
+            on_file_watch_restart: None,
             settings: AppSettings::load(),
         }))
     }
@@ -192,6 +194,16 @@ impl ProcessManager {
 
     pub fn set_on_status_change(&mut self, cb: impl Fn(&str, ProcessStatus) + 'static) {
         self.on_status_change = Some(Box::new(cb));
+    }
+
+    /// Callback fired when a file-watch pattern triggers a restart. Receives the
+    /// bare process name. UI layer is responsible for the notification gating.
+    pub fn set_on_file_watch_restart(&mut self, cb: impl Fn(&str) + 'static) {
+        self.on_file_watch_restart = Some(Rc::new(cb));
+    }
+
+    pub fn file_watch_restart_callback(&self) -> Option<Rc<dyn Fn(&str)>> {
+        self.on_file_watch_restart.clone()
     }
 
     /// Callback fires with (pid, acquired). `acquired=true` on spawn, `false` on kill.

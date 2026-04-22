@@ -107,7 +107,11 @@ impl FileWatcher {
                         rel_str,
                         entry.process_name
                     );
+                    let cb = manager.borrow().file_watch_restart_callback();
                     manager.borrow_mut().restart(&entry.process_name);
+                    if let Some(cb) = cb {
+                        cb(&entry.process_name);
+                    }
                     break;
                 }
             }

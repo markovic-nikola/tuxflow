@@ -972,6 +972,33 @@ impl TuxFlowWindow {
                     pf.remove(pid);
                 }
             });
+
+            // File-watch restart notification. Respects on_file_watch_restart
+            // setting + focus-gate + icon resolver, same pattern as clean-exit
+            // notifications in auto_restart.rs.
+            let pname_fw = project_name.to_string();
+            let focus_gate_fw = focus_gate.clone();
+            let icon_resolver_fw = icon_resolver.clone();
+            mgr.set_on_file_watch_restart(move |process_name| {
+                let settings = AppSettings::load();
+                if !settings.notifications.on_file_watch_restart {
+                    return;
+                }
+                if settings.notifications.suppress_when_focused
+                    && let Some(gate) = &focus_gate_fw
+                {
+                    let qname = workspace::qualified_name(&pname_fw, process_name);
+                    if !gate(&qname) {
+                        return;
+                    }
+                }
+                let icon = icon_resolver_fw.as_ref().and_then(|r| r(&pname_fw));
+                crate::util::notifications::notify_file_watch_restart(
+                    &pname_fw,
+                    process_name,
+                    icon.as_deref(),
+                );
+            });
         }
 
         // Build per-process on_materialized callbacks (deferred signal connections)

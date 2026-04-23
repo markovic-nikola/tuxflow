@@ -806,8 +806,19 @@ impl GitChangesDialog {
             let dv = diff_view_pull.clone();
             let fs = files_store_pull.clone();
             let (tx, rx) = mpsc::channel::<Result<(usize, usize), String>>();
-            std::thread::spawn(
-                move || match run_git_command(&dir, &["pull", "--ff-only"]) {
+            std::thread::spawn(move || {
+                let result = run_git_command(&dir, &["pull", "--ff-only"]).or_else(|e| {
+                    // Transient: initial pull occasionally fails with "no such ref
+                    // was fetched" when the fetch didn't advertise all refs.
+                    // An explicit fetch followed by a retry clears it up.
+                    if e.contains("no such ref was fetched") {
+                        run_git_command(&dir, &["fetch"])
+                            .and_then(|_| run_git_command(&dir, &["pull", "--ff-only"]))
+                    } else {
+                        Err(e)
+                    }
+                });
+                match result {
                     Ok(_) => {
                         let ahead = commits_ahead(&dir);
                         let behind = commits_behind(&dir);
@@ -816,8 +827,8 @@ impl GitChangesDialog {
                     Err(e) => {
                         let _ = tx.send(Err(e));
                     }
-                },
-            );
+                }
+            });
             let pulling_done = pulling_click.clone();
             let dir_reload = dir_pull.clone();
             glib::idle_add_local(move || {

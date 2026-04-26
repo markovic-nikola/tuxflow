@@ -186,6 +186,14 @@ fn run_git_command(project_dir: &Path, args: &[&str]) -> Result<String, String> 
     }
 }
 
+fn current_branch(project_dir: &Path) -> Option<String> {
+    let name = run_git_command(project_dir, &["branch", "--show-current"])
+        .ok()?
+        .trim()
+        .to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
 fn show_error_dialog(parent: &impl IsA<gtk4::Widget>, heading: &str, message: &str) {
     let dialog = adw::AlertDialog::builder()
         .heading(heading)
@@ -522,6 +530,13 @@ impl GitChangesDialog {
             .sensitive(false)
             .build();
 
+        let branch_label = gtk4::Label::builder()
+            .label("")
+            .css_classes(["dim-label", "caption"])
+            .ellipsize(gtk4::pango::EllipsizeMode::End)
+            .max_width_chars(40)
+            .build();
+
         let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
 
@@ -537,6 +552,7 @@ impl GitChangesDialog {
             .build();
 
         buttons_row.append(&commit_btn);
+        buttons_row.append(&branch_label);
         buttons_row.append(&spacer);
         buttons_row.append(&pull_btn);
         buttons_row.append(&push_btn);
@@ -549,6 +565,11 @@ impl GitChangesDialog {
         // Store files for selection callback
         let files_store = std::rc::Rc::new(std::cell::RefCell::new(Vec::<ChangedFile>::new()));
         let dir = project_dir.to_path_buf();
+
+        // Initial branch label (synchronous — single fast git call)
+        if let Some(branch) = current_branch(&dir) {
+            branch_label.set_label(&format!("⎇ {branch}"));
+        }
 
         // Initial push/pull status
         {
@@ -809,9 +830,12 @@ impl GitChangesDialog {
             std::thread::spawn(move || {
                 let result = run_git_command(&dir, &["pull", "--ff-only"]).or_else(|e| {
                     // Transient: initial pull occasionally fails with "no such ref
-                    // was fetched" when the fetch didn't advertise all refs.
-                    // An explicit fetch followed by a retry clears it up.
-                    if e.contains("no such ref was fetched") {
+                    // was fetched" or "Cannot fast-forward to multiple branches"
+                    // when the prior fetch left the upstream config in an
+                    // intermediate state. An explicit fetch + retry clears it up.
+                    if e.contains("no such ref was fetched")
+                        || e.contains("Cannot fast-forward to multiple branches")
+                    {
                         run_git_command(&dir, &["fetch"])
                             .and_then(|_| run_git_command(&dir, &["pull", "--ff-only"]))
                     } else {
@@ -877,6 +901,7 @@ impl GitChangesDialog {
         let poll_pull = pull_btn.clone();
         let poll_pushing = pushing.clone();
         let poll_pulling = pulling.clone();
+        let poll_branch = branch_label.clone();
         glib::timeout_add_seconds_local(2, move || {
             if !alive.get() {
                 return glib::ControlFlow::Break;
@@ -891,13 +916,14 @@ impl GitChangesDialog {
             let fs = poll_files.clone();
             let pb = poll_push.clone();
             let pl = poll_pull.clone();
+            let bl = poll_branch.clone();
             let is_pushing = poll_pushing.clone();
             let is_pulling = poll_pulling.clone();
 
             let fetch_tick = fetch_counter.get();
             fetch_counter.set(fetch_tick + 1);
 
-            let (tx, rx) = mpsc::channel::<(u64, usize, usize)>();
+            let (tx, rx) = mpsc::channel::<(u64, usize, usize, Option<String>)>();
             std::thread::spawn(move || {
                 // Fetch every ~30 seconds (15 ticks * 2 seconds)
                 if fetch_tick % 15 == 0 {
@@ -906,7 +932,8 @@ impl GitChangesDialog {
                 let hash = git_status_hash(&dir);
                 let ahead = commits_ahead(&dir);
                 let behind = commits_behind(&dir);
-                let _ = tx.send((hash, ahead, behind));
+                let branch = current_branch(&dir);
+                let _ = tx.send((hash, ahead, behind, branch));
             });
 
             let dir2 = poll_dir.clone();
@@ -914,12 +941,18 @@ impl GitChangesDialog {
                 if !alive_ref.get() {
                     return glib::ControlFlow::Break;
                 }
-                if let Ok((hash, ahead, behind)) = rx.try_recv() {
+                if let Ok((hash, ahead, behind, branch)) = rx.try_recv() {
                     if !is_pushing.get() {
                         update_push_button(&pb, ahead);
                     }
                     if !is_pulling.get() {
                         update_pull_button(&pl, behind);
+                    }
+                    if let Some(name) = branch {
+                        let new_text = format!("⎇ {name}");
+                        if bl.label().as_str() != new_text {
+                            bl.set_label(&new_text);
+                        }
                     }
                     let prev = hash_ref.get();
                     hash_ref.set(hash);

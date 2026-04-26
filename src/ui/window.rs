@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use adw::prelude::*;
 use gtk4::gdk;
@@ -1014,6 +1015,10 @@ impl TuxFlowWindow {
                     crate::config::schema::ProcessCategory::Agent
                         | crate::config::schema::ProcessCategory::SSH
                 );
+                let is_agent = matches!(
+                    proc.config.category,
+                    crate::config::schema::ProcessCategory::Agent
+                );
                 let is_auto_named = proc.config.auto_named;
                 let auto_restart_cfg = proc.config.auto_restart;
 
@@ -1027,6 +1032,28 @@ impl TuxFlowWindow {
                         focus_gate.clone(),
                         icon_resolver.clone(),
                     );
+
+                // For Agent-category processes, also build the idle handler
+                // (BEL + activity stamp) and remember the cells so the
+                // per-project silence ticker can read them.
+                let (agent_idle_handler, last_activity_cell, is_idle_cell) = if is_agent {
+                    let kind =
+                        crate::util::notifications::AgentKind::from_command(&proc.config.command);
+                    let last_activity = Rc::new(Cell::new(Instant::now()));
+                    let is_idle = Rc::new(Cell::new(false));
+                    let handler = crate::process::auto_restart::build_agent_idle_handler(
+                        project_name,
+                        name,
+                        kind,
+                        last_activity.clone(),
+                        is_idle.clone(),
+                        focus_gate.clone(),
+                        icon_resolver.clone(),
+                    );
+                    (Some(handler), Some(last_activity), Some(is_idle))
+                } else {
+                    (None, None, None)
+                };
 
                 // Capture refs for the on_materialized closure
                 let detector_ref = detector.clone();
@@ -1051,6 +1078,8 @@ impl TuxFlowWindow {
                 };
                 proc.name_cell = Some(name_cell);
                 proc.qname_cell = Some(qname_cell);
+                proc.last_activity = last_activity_cell;
+                proc.is_idle = is_idle_cell;
                 proc.on_materialized = Some(Box::new(move |terminal: &vte4::Terminal| {
                     // Replace placeholder in stack with real terminal
                     let current_qname = qname_cell_mat.borrow().clone();
@@ -1061,6 +1090,11 @@ impl TuxFlowWindow {
 
                     // Connect auto-restart handler
                     auto_restart_handler(terminal);
+
+                    // Agent-only: connect BEL + activity-stamp handlers.
+                    if let Some(ref handler) = agent_idle_handler {
+                        handler(terminal);
+                    }
 
                     // Connect port detection + MCP log capture
                     let log_buffers = crate::mcp::bridge::MCP_LOG_BUFFERS.clone();
@@ -1152,6 +1186,59 @@ impl TuxFlowWindow {
 
         // Populate sidebar
         sidebar.add_project(manager, project_name, icon_path, saved_expanded);
+
+        // Per-project ticker for the idle-silence fallback. Walks Agent-category
+        // processes every 2 s and fires a "waiting for input" notification when
+        // a process has been silent longer than the configured threshold. The
+        // ticker itself is always alive (cheap no-op when the fallback setting
+        // is off — `check_agent_silence` short-circuits), but only does per-
+        // process work when a `last_activity` cell is present.
+        {
+            let manager_ref = manager.clone();
+            let project_name = project_name.to_string();
+            let focus_gate_tick = focus_gate.clone();
+            let icon_resolver_tick = icon_resolver.clone();
+            glib::timeout_add_local(Duration::from_secs(2), move || {
+                let settings = AppSettings::load();
+                let threshold = settings.notifications.agent_idle_silence_seconds;
+                let cells: Vec<(
+                    String,
+                    crate::util::notifications::AgentKind,
+                    Rc<Cell<Instant>>,
+                    Rc<Cell<bool>>,
+                )> = {
+                    let mgr = manager_ref.borrow();
+                    mgr.processes_by_category(crate::config::schema::ProcessCategory::Agent)
+                        .into_iter()
+                        .filter(|p| p.status == ProcessStatus::Running)
+                        .filter_map(|p| match (&p.last_activity, &p.is_idle) {
+                            (Some(la), Some(idle)) => Some((
+                                p.id.clone(),
+                                crate::util::notifications::AgentKind::from_command(
+                                    &p.config.command,
+                                ),
+                                la.clone(),
+                                idle.clone(),
+                            )),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for (name, kind, la, idle) in cells {
+                    crate::process::auto_restart::check_agent_silence(
+                        &project_name,
+                        &name,
+                        kind,
+                        &la,
+                        &idle,
+                        threshold,
+                        focus_gate_tick.as_ref(),
+                        icon_resolver_tick.as_ref(),
+                    );
+                }
+                glib::ControlFlow::Continue
+            });
+        }
     }
 
     fn load_css() {

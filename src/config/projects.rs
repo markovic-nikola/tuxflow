@@ -62,7 +62,7 @@ impl SavedProjects {
                 if let Err(e) = fs::write(&path, content) {
                     log::error!("Failed to write saved projects: {e}");
                 } else {
-                    log::info!("Saved projects list to {}", path.display());
+                    log::debug!("Saved projects list to {}", path.display());
                 }
             }
             Err(e) => log::error!("Failed to serialize saved projects: {e}"),

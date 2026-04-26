@@ -51,11 +51,18 @@ pub struct NotificationSettings {
     pub on_auto_restart: bool,
     pub on_file_watch_restart: bool,
     pub on_process_finish: bool,
+    pub on_agent_idle: bool,
+    pub on_agent_idle_silence_fallback: bool,
+    pub agent_idle_silence_seconds: u32,
     pub suppress_when_focused: bool,
     pub sound_enabled: bool,
     /// Freedesktop sound theme event ID, e.g. "complete", "bell",
     /// "message-new-instant", "dialog-information".
     pub sound_name: String,
+    /// Per-agent idle sound overrides. `None` = fall back to `sound_name`.
+    pub claude_sound_name: Option<String>,
+    pub codex_sound_name: Option<String>,
+    pub gemini_sound_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,9 +115,15 @@ impl Default for NotificationSettings {
             on_auto_restart: true,
             on_file_watch_restart: false,
             on_process_finish: true,
+            on_agent_idle: true,
+            on_agent_idle_silence_fallback: false,
+            agent_idle_silence_seconds: 20,
             suppress_when_focused: true,
             sound_enabled: false,
             sound_name: "sound1".to_string(),
+            claude_sound_name: None,
+            codex_sound_name: None,
+            gemini_sound_name: None,
         }
     }
 }
@@ -171,7 +184,7 @@ impl AppSettings {
             match fs::read_to_string(&path) {
                 Ok(content) => match toml::from_str(&content) {
                     Ok(settings) => {
-                        log::info!("Loaded settings from {}", path.display());
+                        log::debug!("Loaded settings from {}", path.display());
                         return settings;
                     }
                     Err(e) => log::warn!("Failed to parse settings: {e}"),

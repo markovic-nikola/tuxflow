@@ -116,8 +116,41 @@ pub static BUNDLED_SOUNDS: &[BundledSound] = &[
 /// bundled sound (e.g. settings file predates the switch to bundled sounds).
 pub const DEFAULT_SOUND_ID: &str = "sound1";
 
+/// Identifies a built-in AI agent so notifications can apply per-agent
+/// preferences (e.g. a different sound for Claude vs. Codex) or suppression
+/// rules (OpenCode emits its own desktop notifications, so TuxFlow stays
+/// silent for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    Unknown,
+}
+
+impl AgentKind {
+    /// Derived from the first whitespace-separated token of `ProcessConfig.command`.
+    /// Matches the agent labels set by `new_agent:<kind>` in the command
+    /// palette (see `src/ui/window.rs`).
+    pub fn from_command(command: &str) -> Self {
+        // Take the executable name (basename of first whitespace-separated token,
+        // lowercased) so paths and shell aliases both resolve. Common aliases
+        // like `cc` for Claude Code are recognized.
+        let token = command.split_whitespace().next().unwrap_or("");
+        let exe = token.rsplit('/').next().unwrap_or(token).to_lowercase();
+        match exe.as_str() {
+            "claude" | "claude-code" | "cc" => Self::Claude,
+            "codex" => Self::Codex,
+            "gemini" => Self::Gemini,
+            "opencode" => Self::OpenCode,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// Internal: send a desktop notification, optionally with a file-based icon.
-fn send(title: &str, body: &str, icon_path: Option<&Path>) {
+fn send(title: &str, body: &str, icon_path: Option<&Path>, sound_override: Option<&str>) {
     let notification = gio::Notification::new(title);
     notification.set_body(Some(body));
 
@@ -135,15 +168,29 @@ fn send(title: &str, body: &str, icon_path: Option<&Path>) {
         log::warn!("No application instance for notification: {title}");
     }
 
-    maybe_play_sound();
+    maybe_play_sound(sound_override);
 }
 
-fn maybe_play_sound() {
+fn maybe_play_sound(override_sound_id: Option<&str>) {
     let settings = AppSettings::load();
     if !settings.notifications.sound_enabled {
         return;
     }
-    let _ = play_sound(&settings.notifications.sound_name);
+    let id = override_sound_id.unwrap_or(&settings.notifications.sound_name);
+    let _ = play_sound(id);
+}
+
+fn per_agent_sound(
+    ns: &crate::config::settings::NotificationSettings,
+    kind: AgentKind,
+) -> Option<String> {
+    let id = match kind {
+        AgentKind::Claude => ns.claude_sound_name.as_deref(),
+        AgentKind::Codex => ns.codex_sound_name.as_deref(),
+        AgentKind::Gemini => ns.gemini_sound_name.as_deref(),
+        AgentKind::OpenCode | AgentKind::Unknown => None,
+    };
+    id.map(|s| s.to_string())
 }
 
 /// Plays a bundled notification sound by ID.
@@ -203,7 +250,12 @@ fn cache_dir() -> PathBuf {
 }
 
 pub fn notify_crash(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
-    send(project_name, &format!("{process_name}: crashed"), icon_path);
+    send(
+        project_name,
+        &format!("{process_name}: crashed"),
+        icon_path,
+        None,
+    );
 }
 
 pub fn notify_restart(
@@ -216,6 +268,7 @@ pub fn notify_restart(
         project_name,
         &format!("{process_name}: restarting (attempt {attempt})"),
         icon_path,
+        None,
     );
 }
 
@@ -224,6 +277,27 @@ pub fn notify_finish(project_name: &str, process_name: &str, icon_path: Option<&
         project_name,
         &format!("{process_name}: finished"),
         icon_path,
+        None,
+    );
+}
+
+pub fn notify_agent_idle(
+    project_name: &str,
+    process_name: &str,
+    icon_path: Option<&Path>,
+    kind: AgentKind,
+) {
+    // OpenCode emits its own desktop notifications — don't double up.
+    if kind == AgentKind::OpenCode {
+        return;
+    }
+    let settings = AppSettings::load();
+    let sound_override = per_agent_sound(&settings.notifications, kind);
+    send(
+        project_name,
+        &format!("{process_name}: waiting for input"),
+        icon_path,
+        sound_override.as_deref(),
     );
 }
 
@@ -232,5 +306,6 @@ pub fn notify_file_watch_restart(project_name: &str, process_name: &str, icon_pa
         project_name,
         &format!("{process_name}: file change → restart"),
         icon_path,
+        None,
     );
 }

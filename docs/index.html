@@ -61,7 +61,12 @@
     <div class="feature-card">
       <span class="feature-icon">&#10023;</span>
       <h3>AI Agents</h3>
-      <p>Run Claude Code, Codex, Gemini CLI, and other agents side-by-side with your processes.</p>
+      <p>Run Claude Code, Codex, Gemini CLI, OpenCode, and other agents side-by-side with your processes.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#128276;</span>
+      <h3>Agent Idle Alerts</h3>
+      <p>Get notified the moment an agent finishes its turn — terminal BEL detection plus an optional silence-based fallback, with per-agent sound overrides.</p>
     </div>
     <div class="feature-card">
       <span class="feature-icon">&#9776;</span>
@@ -84,14 +89,24 @@
       <p>Auto-detects Node.js, Rust, Go, Python, PHP, Docker and suggests commands.</p>
     </div>
     <div class="feature-card">
+      <span class="feature-icon">&#9881;</span>
+      <h3>Git Integration</h3>
+      <p>Status, diff, commit, push, and pull from a built-in dialog. Live ahead/behind indicators and the current branch in the status bar.</p>
+    </div>
+    <div class="feature-card">
       <span class="feature-icon">&#9618;</span>
       <h3>Resources</h3>
-      <p>Per-process CPU and memory usage via /proc. See what's consuming resources at a glance.</p>
+      <p>Per-process CPU and memory via /proc, aggregated across child process trees. See what's consuming resources at a glance.</p>
     </div>
     <div class="feature-card">
       <span class="feature-icon">&#9741;</span>
       <h3>MCP Server</h3>
       <p>Unix socket API so AI agents can list processes, read logs, and control your environment.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feature-icon">&#128266;</span>
+      <h3>Notifications</h3>
+      <p>Per-project title/icon, focus-aware suppression, and bundled notification sounds with picker and preview.</p>
     </div>
     <div class="feature-card">
       <span class="feature-icon">&#9775;</span>
@@ -174,18 +189,22 @@ cargo build --release
       </thead>
       <tbody>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Command palette</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Add project or process</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd></td><td>Add project or process</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>New terminal</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Filter processes</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Terminal search</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Previous / Next process</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Previous / Next project</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Quick jump</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Quick jump</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>Close agent / terminal</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>&#8592;</kbd>/<kbd>&#8594;</kbd></td><td>Focus sidebar / terminal</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>\</kbd></td><td>Toggle sidebar</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd></td><td>Start / Stop process</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd></td><td>Restart process</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd></td><td>Clear output</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd>/<kbd>-</kbd></td><td>Increase / Decrease font size</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>/<kbd>V</kbd></td><td>Copy / Paste</td></tr>
       </tbody>
     </table>
   </div>

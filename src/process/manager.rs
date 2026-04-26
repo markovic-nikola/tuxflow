@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
@@ -36,6 +36,13 @@ pub struct ManagedProcess {
     /// Shared qualified name cell (project::process) so on_materialized and
     /// signal handlers track renames.
     pub qname_cell: Option<Rc<RefCell<String>>>,
+    /// Last VTE `contents-changed` timestamp. Populated for Agent-category
+    /// processes only; used by the idle-silence fallback ticker.
+    pub last_activity: Option<Rc<Cell<Instant>>>,
+    /// Edge-trigger guard for the idle-silence ticker: `true` once a silence
+    /// notification has fired for the current quiet period, reset on next
+    /// `contents-changed`.
+    pub is_idle: Option<Rc<Cell<bool>>>,
 }
 
 impl ManagedProcess {
@@ -53,6 +60,8 @@ impl ManagedProcess {
             on_materialized: None,
             name_cell: None,
             qname_cell: None,
+            last_activity: None,
+            is_idle: None,
         }
     }
 

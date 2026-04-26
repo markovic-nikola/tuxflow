@@ -1,13 +1,14 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gtk4::glib;
 use vte4::prelude::*;
 
 use super::manager::{ProcessManagerRef, ProcessStatus};
 use crate::config::settings::AppSettings;
-use crate::util::notifications;
+use crate::util::notifications::{self, AgentKind};
 use crate::workspace;
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -250,4 +251,96 @@ fn handle_process_exit(
     glib::timeout_add_local_once(std::time::Duration::from_millis(delay as u64), move || {
         manager_ref2.borrow_mut().spawn(&name2);
     });
+}
+
+/// Connects VTE `bell` + `contents-changed` handlers for Agent-category
+/// processes, feeding the per-project idle-silence ticker via `last_activity`
+/// and firing `notify_agent_idle` on BEL.
+///
+/// The returned closure is meant to run after `build_auto_restart_handler`'s
+/// closure on the same terminal — both attach signals, neither replaces the
+/// other.
+pub fn build_agent_idle_handler(
+    project_name: &str,
+    process_name: &str,
+    kind: AgentKind,
+    last_activity: Rc<Cell<Instant>>,
+    is_idle: Rc<Cell<bool>>,
+    focus_gate: Option<FocusGate>,
+    icon_resolver: Option<IconResolver>,
+) -> Box<dyn Fn(&vte4::Terminal)> {
+    let project_name = project_name.to_string();
+    let process_name = process_name.to_string();
+
+    Box::new(move |terminal: &vte4::Terminal| {
+        // contents-changed: stamp activity + reset idle edge-trigger.
+        {
+            let la = last_activity.clone();
+            let idle = is_idle.clone();
+            terminal.connect_contents_changed(move |_| {
+                la.set(Instant::now());
+                idle.set(false);
+            });
+        }
+
+        // bell: primary "agent waiting for input" signal.
+        {
+            let project_name = project_name.clone();
+            let process_name = process_name.clone();
+            let focus_gate = focus_gate.clone();
+            let icon_resolver = icon_resolver.clone();
+            terminal.connect_bell(move |_| {
+                let settings = AppSettings::load();
+                if !settings.notifications.on_agent_idle {
+                    return;
+                }
+                if !should_notify(&settings, &project_name, &process_name, focus_gate.as_ref()) {
+                    return;
+                }
+                let icon = icon_resolver.as_ref().and_then(|r| r(&project_name));
+                notifications::notify_agent_idle(
+                    &project_name,
+                    &process_name,
+                    icon.as_deref(),
+                    kind,
+                );
+            });
+        }
+    })
+}
+
+/// Per-tick check for the silence-fallback. Called by the project's
+/// `glib::timeout_add_local` ticker once per agent. Returns true when a
+/// notification was fired (caller just needs to know the edge-trigger state
+/// was flipped).
+pub fn check_agent_silence(
+    project_name: &str,
+    process_name: &str,
+    kind: AgentKind,
+    last_activity: &Cell<Instant>,
+    is_idle: &Cell<bool>,
+    threshold_seconds: u32,
+    focus_gate: Option<&FocusGate>,
+    icon_resolver: Option<&IconResolver>,
+) -> bool {
+    if is_idle.get() {
+        return false;
+    }
+    let elapsed = last_activity.get().elapsed();
+    if elapsed.as_secs() < threshold_seconds as u64 {
+        return false;
+    }
+    let settings = AppSettings::load();
+    if !settings.notifications.on_agent_idle
+        || !settings.notifications.on_agent_idle_silence_fallback
+    {
+        return false;
+    }
+    is_idle.set(true);
+    if !should_notify(&settings, project_name, process_name, focus_gate) {
+        return false;
+    }
+    let icon = icon_resolver.and_then(|r| r(project_name));
+    notifications::notify_agent_idle(project_name, process_name, icon.as_deref(), kind);
+    true
 }

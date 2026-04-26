@@ -462,6 +462,57 @@ impl SettingsWindow {
         });
         group.add(&notify_finish_row);
 
+        let notify_agent_idle_row = adw::SwitchRow::builder()
+            .title("Agent Idle")
+            .subtitle(
+                "Notify when an AI agent finishes its turn (requires agent to emit terminal bell)",
+            )
+            .active(s.notifications.on_agent_idle)
+            .build();
+        let settings_ref = settings.clone();
+        notify_agent_idle_row.connect_active_notify(move |row| {
+            settings_ref.borrow_mut().notifications.on_agent_idle = row.is_active();
+            settings_ref.borrow().save();
+        });
+        group.add(&notify_agent_idle_row);
+
+        let notify_agent_silence_row = adw::SwitchRow::builder()
+            .title("Silence-based Fallback")
+            .subtitle("Also notify after N seconds of no agent output. May false-positive on long tool calls.")
+            .active(s.notifications.on_agent_idle_silence_fallback)
+            .build();
+        let settings_ref = settings.clone();
+        notify_agent_silence_row.connect_active_notify(move |row| {
+            settings_ref
+                .borrow_mut()
+                .notifications
+                .on_agent_idle_silence_fallback = row.is_active();
+            settings_ref.borrow().save();
+        });
+        group.add(&notify_agent_silence_row);
+
+        let agent_idle_threshold_row = adw::SpinRow::builder()
+            .title("Idle Silence Threshold")
+            .subtitle("Seconds of no output before firing the idle notification")
+            .adjustment(&gtk4::Adjustment::new(
+                s.notifications.agent_idle_silence_seconds as f64,
+                5.0,
+                120.0,
+                1.0,
+                5.0,
+                0.0,
+            ))
+            .build();
+        let settings_ref = settings.clone();
+        agent_idle_threshold_row.connect_changed(move |row| {
+            settings_ref
+                .borrow_mut()
+                .notifications
+                .agent_idle_silence_seconds = row.value() as u32;
+            settings_ref.borrow().save();
+        });
+        group.add(&agent_idle_threshold_row);
+
         let suppress_focused_row = adw::SwitchRow::builder()
             .title("Suppress When Focused")
             .subtitle("Skip notifications for the terminal you're currently viewing")
@@ -549,6 +600,99 @@ impl SettingsWindow {
         sound_combo.add_suffix(&test_btn);
 
         sound_group.add(&sound_combo);
+
+        // Per-agent sound overrides. Each row adds a "(Use default)" entry at
+        // index 0, followed by all bundled sounds. Selecting "(Use default)"
+        // clears the override (falls back to the global sound). OpenCode is
+        // intentionally omitted — it emits its own desktop notifications, so
+        // TuxFlow stays silent for it.
+        let mut per_agent_labels: Vec<&str> = vec!["(Use default)"];
+        per_agent_labels.extend_from_slice(&sound_labels);
+
+        let agents: [(
+            &str,
+            fn(&crate::config::settings::NotificationSettings) -> Option<String>,
+        ); 3] = [
+            ("Claude Sound", |n| n.claude_sound_name.clone()),
+            ("Codex Sound", |n| n.codex_sound_name.clone()),
+            ("Gemini Sound", |n| n.gemini_sound_name.clone()),
+        ];
+
+        for (idx, (title, getter)) in agents.iter().enumerate() {
+            let list = gtk4::StringList::new(&per_agent_labels);
+            let current = getter(&s.notifications);
+            let selected = current
+                .as_ref()
+                .and_then(|id| sound_ids.iter().position(|s| s == id))
+                .map(|i| (i + 1) as u32) // +1 because "(Use default)" is index 0
+                .unwrap_or(0);
+            let combo = adw::ComboRow::builder()
+                .title(*title)
+                .model(&list)
+                .selected(selected)
+                .build();
+
+            let settings_ref = settings.clone();
+            let sound_ids_for_select = sound_ids.clone();
+            let agent_idx = idx;
+            combo.connect_selected_notify(move |row| {
+                let i = row.selected() as usize;
+                let value = if i == 0 {
+                    None
+                } else {
+                    sound_ids_for_select.get(i - 1).cloned()
+                };
+                let mut s = settings_ref.borrow_mut();
+                match agent_idx {
+                    0 => s.notifications.claude_sound_name = value,
+                    1 => s.notifications.codex_sound_name = value,
+                    2 => s.notifications.gemini_sound_name = value,
+                    _ => {}
+                }
+                drop(s);
+                settings_ref.borrow().save();
+            });
+
+            let test_btn = gtk4::Button::builder()
+                .icon_name("media-playback-start-symbolic")
+                .tooltip_text("Preview sound")
+                .css_classes(["flat"])
+                .valign(gtk4::Align::Center)
+                .build();
+            let combo_for_test = combo.clone();
+            let sound_ids_for_test = sound_ids.clone();
+            let dialog_for_test = dialog.clone();
+            let settings_for_test = settings.clone();
+            test_btn.connect_clicked(move |_| {
+                let i = combo_for_test.selected() as usize;
+                // "(Use default)" → play the global sound; otherwise play the
+                // selected per-agent sound.
+                let id = if i == 0 {
+                    settings_for_test.borrow().notifications.sound_name.clone()
+                } else {
+                    match sound_ids_for_test.get(i - 1) {
+                        Some(id) => id.clone(),
+                        None => return,
+                    }
+                };
+                if let Err(msg) = crate::util::notifications::play_sound(&id) {
+                    let toast = adw::Toast::new(&format!("Sound unavailable: {msg}"));
+                    toast.set_timeout(6);
+                    dialog_for_test.add_toast(toast);
+                }
+            });
+            combo.add_suffix(&test_btn);
+
+            sound_group.add(&combo);
+        }
+
+        // Subtle note: OpenCode is handled specially.
+        let opencode_note = adw::ActionRow::builder()
+            .title("OpenCode")
+            .subtitle("Uses its own desktop notifications — TuxFlow stays silent for it.")
+            .sensitive(false)
+            .build();
+        sound_group.add(&opencode_note);
 
         page.add(&sound_group);
 

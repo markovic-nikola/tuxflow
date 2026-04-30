@@ -78,6 +78,14 @@
     border-left: 2px solid alpha(@accent_bg_color, 0.2);
 }
 
+.project-container.project-has-running {
+    border-left: 2px solid #73c991;
+}
+
+.project-has-running .project-name {
+    color: #73c991;
+}
+
 .project-content {
     margin-bottom: 0;
     padding-left: 10px;

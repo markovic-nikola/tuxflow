@@ -408,6 +408,9 @@ impl ProcessRow {
                 self.port_label.set_visible(true);
             }
             None => {
+                if !self.port_label.is_visible() {
+                    return;
+                }
                 self.port_label.set_visible(false);
             }
         }
@@ -416,17 +419,22 @@ impl ProcessRow {
     pub fn set_url(&self, url: Option<&str>) {
         match url {
             Some(u) => {
+                if self.url.borrow().as_deref() == Some(u) {
+                    return;
+                }
                 *self.url.borrow_mut() = Some(u.to_string());
                 self.browser_button.set_visible(true);
                 self.browser_button
                     .set_tooltip_text(Some(&format!("Open {u}")));
-                // Add "Open in Browser" to context menu if not already there
                 if self.browser_menu_section.n_items() == 0 {
                     self.browser_menu_section
                         .append(Some("Open in Browser"), Some("proc.open_url"));
                 }
             }
             None => {
+                if self.url.borrow().is_none() {
+                    return;
+                }
                 *self.url.borrow_mut() = None;
                 self.browser_button.set_visible(false);
                 self.browser_menu_section.remove_all();

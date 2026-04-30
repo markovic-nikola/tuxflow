@@ -366,6 +366,14 @@ impl ProjectRow {
         }
     }
 
+    pub fn set_has_running(&self, has_running: bool) {
+        if has_running {
+            self.container.add_css_class("project-has-running");
+        } else {
+            self.container.remove_css_class("project-has-running");
+        }
+    }
+
     pub fn name(&self) -> String {
         self.name_label.label().to_string()
     }

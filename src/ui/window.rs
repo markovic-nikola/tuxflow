@@ -951,10 +951,18 @@ impl TuxFlowWindow {
             let sidebar_ref = sidebar.clone();
             let pname = project_name.to_string();
             let mcp_state = crate::mcp::bridge::MCP_PROCESS_STATE.clone();
+            let detector_status = detector.clone();
             let mut mgr = manager.borrow_mut();
             mgr.set_on_status_change(move |process_name, status| {
                 let qname = workspace::qualified_name(&pname, process_name);
                 sidebar_ref.update_process_status(&qname, status);
+
+                // Clear locked port on stop/crash/restart so the next run re-detects.
+                if !matches!(status, ProcessStatus::Running) {
+                    detector_status.borrow_mut().clear(process_name);
+                    sidebar_ref.set_process_port(&qname, None);
+                    sidebar_ref.set_process_url(&qname, None);
+                }
 
                 // Update MCP shared state
                 if let Ok(mut state) = mcp_state.lock()
@@ -1139,9 +1147,16 @@ impl TuxFlowWindow {
                             }
                         }
 
-                        // Port detection — skip for agents, skip when not running
-                        if !skip_port_detection && sidebar_ref.is_process_running(&qname_contents) {
-                            let start_row = (row - 5).max(0);
+                        // Port detection — skip for agents, skip when not running,
+                        // skip once a port has already been locked for this process.
+                        if !skip_port_detection
+                            && sidebar_ref.is_process_running(&qname_contents)
+                            && !detector_ref.borrow().has_port(&proc_name)
+                        {
+                            // Wide enough that the app's startup line isn't pushed out
+                            // of view by later log spam before detection locks in.
+                            const PORT_SCAN_LOOKBACK_ROWS: i64 = 200;
+                            let start_row = (row - PORT_SCAN_LOOKBACK_ROWS).max(0);
                             let cols = terminal.column_count();
                             let (text_opt, _len) = terminal.text_range_format(
                                 vte4::Format::Text,

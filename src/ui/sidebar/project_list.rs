@@ -392,12 +392,31 @@ impl ProjectList {
             .borrow_mut()
             .insert(project_name.to_string(), project_row);
         self.refresh_project_start_state(project_name);
+        self.refresh_project_running_state(project_name);
     }
 
     pub fn refresh_all_project_start_states(&self) {
         let names: Vec<String> = self.project_managers.borrow().keys().cloned().collect();
         for name in names {
             self.refresh_project_start_state(&name);
+        }
+    }
+
+    fn project_has_running(&self, project_name: &str) -> bool {
+        let prefix = format!("{project_name}::");
+        self.process_statuses
+            .borrow()
+            .iter()
+            .any(|(qname, status)| {
+                qname.starts_with(&prefix)
+                    && matches!(status, ProcessStatus::Running | ProcessStatus::Restarting)
+            })
+    }
+
+    fn refresh_project_running_state(&self, project_name: &str) {
+        let has_running = self.project_has_running(project_name);
+        if let Some(row) = self.project_rows.borrow().get(project_name) {
+            row.set_has_running(has_running);
         }
     }
 
@@ -1471,6 +1490,9 @@ impl ProjectList {
             .borrow_mut()
             .insert(qualified_name.to_string(), status);
         self.refresh_section_counts();
+        if let Some((project_name, _)) = qualified_name.split_once("::") {
+            self.refresh_project_running_state(project_name);
+        }
         self.notify_counts_changed();
     }
 

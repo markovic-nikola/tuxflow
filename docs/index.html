@@ -4,7 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TuxFlow — Linux-Native Dev Environment Manager</title>
-  <meta name="description" content="Manage dev servers, AI coding agents, and terminals from a single GTK4 window. Built with Rust for Linux.">
+  <meta name="description" content="Manage dev servers, AI coding agents, SSH connections, and terminals from a single GTK4 window. Built with Rust for Linux.">
+  <meta property="og:title" content="TuxFlow — Linux-Native Dev Environment Manager">
+  <meta property="og:description" content="Processes, AI agents, SSH, and terminals — managed together. Native Linux desktop app built with Rust + GTK4.">
+  <meta property="og:image" content="hero.png">
+  <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="logo.svg" type="image/svg+xml">
 </head>
@@ -23,7 +27,10 @@
       <li><a href="#install">Install</a></li>
       <li><a href="#shortcuts">Shortcuts</a></li>
       <li><a href="#mcp">MCP</a></li>
-      <li><a href="https://github.com/markovic-nikola/tuxflow" class="gh-link">GitHub</a></li>
+      <li><a href="https://github.com/markovic-nikola/tuxflow" class="gh-link">
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a></li>
     </ul>
   </div>
 </nav>
@@ -32,10 +39,18 @@
 <section class="hero" id="top">
   <div class="hero-badge"><span class="dot"></span> Built with Rust + GTK4</div>
   <h1>One window for<br>your <span class="gold">dev environment</span></h1>
-  <p class="tagline">Processes, AI agents, SSH, and terminals &mdash; managed together. Native Linux desktop app.</p>
+  <p class="tagline">Processes, AI agents, SSH, and terminals &mdash; managed together. A native Linux desktop app for the way you actually work.</p>
   <div class="cta">
     <a href="#install" class="btn btn-primary">Get Started</a>
-    <a href="https://github.com/markovic-nikola/tuxflow" class="btn btn-secondary">View on GitHub</a>
+    <a href="https://github.com/markovic-nikola/tuxflow" class="btn btn-secondary">
+      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      View on GitHub
+    </a>
+  </div>
+  <div class="meta-row">
+    <span>MIT licensed</span>
+    <span>Linux only</span>
+    <span>Open source</span>
   </div>
   <div class="screenshot-wrap">
     <video class="screenshot" autoplay loop muted playsinline poster="hero.png">
@@ -51,68 +66,153 @@
 <section id="features" class="section-center">
   <span class="section-label">Capabilities</span>
   <h2 class="section-heading">Everything in one place</h2>
-  <p class="section-sub">Stop juggling terminal tabs. TuxFlow gives you a unified view of everything running in your project.</p>
+  <p class="section-sub">Stop juggling terminal tabs and tmux panes. TuxFlow gives you a unified view of everything running in your project.</p>
   <div class="features-grid reveal">
+
     <div class="feature-card">
-      <span class="feature-icon">&#9654;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"></polygon></svg>
+      </span>
       <h3>Process Management</h3>
-      <p>Start, stop, and restart dev servers. Auto-restart with exponential backoff on crashes.</p>
+      <p>Start, stop, and restart dev servers and background tasks. Each process gets a real terminal with full ANSI colors.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#10023;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.4H22l-6.2 4.5 2.4 7.4L12 16.8 5.8 21.3l2.4-7.4L2 9.4h7.6L12 2z"></path></svg>
+      </span>
       <h3>AI Agents</h3>
-      <p>Run Claude Code, Codex, Gemini CLI, OpenCode, and other agents side-by-side with your processes.</p>
+      <p>Run Claude Code, Codex, Gemini CLI, OpenCode, and other agents side-by-side with the rest of your stack.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#128276;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 01-3.46 0"></path></svg>
+      </span>
       <h3>Agent Idle Alerts</h3>
-      <p>Get notified the moment an agent finishes its turn — terminal BEL detection plus an optional silence-based fallback, with per-agent sound overrides.</p>
+      <p>Notified the moment an agent finishes its turn — terminal BEL detection plus an optional silence-based fallback, with per-agent sounds.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#9776;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+      </span>
+      <h3>Auto-Restart</h3>
+      <p>Crashed processes restart with exponential backoff. Stops after repeated failures so you can fix the root cause.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"></path></svg>
+      </span>
+      <h3>File Watching</h3>
+      <p>Restart processes when source files change. Glob patterns let you scope watches to exactly what matters.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg>
+      </span>
       <h3>Multi-Project</h3>
-      <p>Open multiple projects in one window with expandable sidebar sections and drag-and-drop.</p>
+      <p>Open multiple projects in one window with expandable sidebar sections, drag-and-drop reordering, and running-project highlights.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#8594;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </span>
       <h3>SSH Connections</h3>
-      <p>Connect to remote hosts from ~/.ssh/config. Managed like any other process.</p>
+      <p>Connect to remote hosts straight from <code>~/.ssh/config</code>. Auto-restart handles reconnection like any other process.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&gt;_</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+      </span>
       <h3>Embedded Terminals</h3>
-      <p>Full VTE4 terminals with true color, mouse events, search, and clickable URLs.</p>
+      <p>Full VTE4 terminals with true color, mouse events, search, clickable URLs, and configurable color schemes.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#9881;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      </span>
+      <h3>Command Palette</h3>
+      <p><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> to fuzzy-search every action, process, and project. Keyboard-first by design.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+      </span>
       <h3>Stack Detection</h3>
-      <p>Auto-detects Node.js, Rust, Go, Python, PHP, Docker and suggests commands.</p>
+      <p>Auto-detects Node.js, Rust, Go, Python, PHP, Docker and suggests sensible default commands to get you running fast.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#9881;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 012 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+      </span>
       <h3>Git Integration</h3>
-      <p>Status, diff, commit, push, and pull from a built-in dialog. Live ahead/behind indicators and the current branch in the status bar.</p>
+      <p>Status, diff, commit, push, and pull from a built-in dialog. Live ahead/behind indicators and current branch in the status bar.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#9618;</span>
-      <h3>Resources</h3>
-      <p>Per-process CPU and memory via /proc, aggregated across child process trees. See what's consuming resources at a glance.</p>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+      </span>
+      <h3>Resource Monitoring</h3>
+      <p>Per-process CPU and memory via <code>/proc</code>, aggregated across child process trees. See what's eating your laptop at a glance.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#9741;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"></path></svg>
+      </span>
+      <h3>Port &amp; URL Detection</h3>
+      <p>Smart detection scans terminal output for ports and URLs and ignores build-tool noise. <kbd>Ctrl</kbd>+click to open.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 010 8h-1"></path><path d="M2 8h16v9a4 4 0 01-4 4H6a4 4 0 01-4-4V8z"></path><line x1="6" y1="1" x2="6" y2="4"></line><line x1="10" y1="1" x2="10" y2="4"></line><line x1="14" y1="1" x2="14" y2="4"></line></svg>
+      </span>
       <h3>MCP Server</h3>
-      <p>Unix socket API so AI agents can list processes, read logs, and control your environment.</p>
+      <p>Unix socket API so AI agents can list processes, read terminal logs, and start/stop/restart your environment.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#128266;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07"></path></svg>
+      </span>
       <h3>Notifications</h3>
-      <p>Per-project title/icon, focus-aware suppression, and bundled notification sounds with picker and preview.</p>
+      <p>Per-project title and icon, focus-aware suppression, and bundled notification sounds with picker and preview.</p>
     </div>
+
     <div class="feature-card">
-      <span class="feature-icon">&#9775;</span>
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+      </span>
       <h3>Theming</h3>
-      <p>Dark, light, and system themes with accent colors and terminal color schemes.</p>
+      <p>Dark, light, and system themes with accent colors, terminal color schemes, and font size controls.</p>
     </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 102.13-9.36L1 10"></path></svg>
+      </span>
+      <h3>Session Restore</h3>
+      <p>Window position, open projects, and process order persist across sessions. Pick up exactly where you left off.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+      </span>
+      <h3>TOML Config</h3>
+      <p>Optional <code>tuxflow.toml</code> in your project root. Simple, human-readable, and version-controllable.</p>
+    </div>
+
   </div>
 </section>
 
@@ -122,57 +222,77 @@
 <section id="install">
   <span class="section-label">Getting started</span>
   <h2 class="section-heading">Install TuxFlow</h2>
-  <p class="section-sub">Pick the method that suits your distro.</p>
+  <p class="section-sub">Pick the method that fits your distro. Pre-built binaries for x86_64 Linux ship with every release.</p>
 
-  <div class="install-tabs">
-    <input type="radio" name="distro" id="tab-deb" checked>
-    <label for="tab-deb">Ubuntu / Debian</label>
-    <input type="radio" name="distro" id="tab-tarball">
-    <label for="tab-tarball">Binary tarball</label>
-    <input type="radio" name="distro" id="tab-source">
-    <label for="tab-source">From source</label>
-  </div>
+  <div class="install-wrap">
+    <div class="install-tabs">
+      <input type="radio" name="distro" id="tab-deb" checked>
+      <label for="tab-deb">Ubuntu / Debian</label>
+      <input type="radio" name="distro" id="tab-tarball">
+      <label for="tab-tarball">Binary tarball</label>
+      <input type="radio" name="distro" id="tab-source">
+      <label for="tab-source">From source</label>
+    </div>
 
-  <div class="install-block active" id="block-deb">
-    <pre><code># Download the latest .deb from GitHub Releases
+    <div class="install-block active" id="block-deb">
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-dots"><span></span><span></span><span></span></span>
+          <span>shell</span>
+        </div>
+<pre><code># Download the latest .deb from GitHub Releases
 sudo dpkg -i tuxflow_*_amd64.deb
 sudo apt-get install -f</code></pre>
-    <p class="install-note">Download from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a></p>
-  </div>
+      </div>
+      <p class="install-note">Grab the latest <code>.deb</code> from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a>.</p>
+    </div>
 
-  <div class="install-block" id="block-tarball">
-    <pre><code># Download the latest .tar.gz from GitHub Releases
+    <div class="install-block" id="block-tarball">
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-dots"><span></span><span></span><span></span></span>
+          <span>shell</span>
+        </div>
+<pre><code># Download the latest .tar.gz from GitHub Releases
 tar xzf tuxflow-*-x86_64-linux.tar.gz
 cd tuxflow-*-x86_64-linux
 ./install.sh              # installs to /usr/local (requires sudo)
 ./install.sh --user       # installs to ~/.local (no sudo)</code></pre>
-    <p class="install-note">Download from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a></p>
-  </div>
+      </div>
+      <p class="install-note">Grab the latest <code>.tar.gz</code> from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a>.</p>
+    </div>
 
-  <div class="install-block" id="block-source">
-    <pre><code># Ubuntu/Debian
+    <div class="install-block" id="block-source">
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-dots"><span></span><span></span><span></span></span>
+          <span>shell</span>
+        </div>
+<pre><code># Ubuntu/Debian
 sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev build-essential
 
 # Fedora
-# sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
+sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
 
 # Arch
-# sudo pacman -S gtk4 libadwaita vte4
+sudo pacman -S gtk4 libadwaita vte4
 
 git clone https://github.com/markovic-nikola/tuxflow.git
 cd tuxflow
 cargo build --release
 ./target/release/tuxflow</code></pre>
-  </div>
+      </div>
+    </div>
 
-  <script>
-    document.querySelectorAll('input[name="distro"]').forEach(function(radio) {
-      radio.addEventListener('change', function() {
-        document.querySelectorAll('.install-block').forEach(function(b) { b.classList.remove('active'); });
-        document.getElementById(radio.id.replace('tab-', 'block-')).classList.add('active');
+    <script>
+      document.querySelectorAll('input[name="distro"]').forEach(function(radio) {
+        radio.addEventListener('change', function() {
+          document.querySelectorAll('.install-block').forEach(function(b) { b.classList.remove('active'); });
+          document.getElementById(radio.id.replace('tab-', 'block-')).classList.add('active');
+        });
       });
-    });
-  </script>
+    </script>
+  </div>
 </section>
 
 <div class="section-divider"><hr></div>
@@ -181,32 +301,38 @@ cargo build --release
 <section id="shortcuts">
   <span class="section-label">Navigation</span>
   <h2 class="section-heading">Keyboard-driven</h2>
-  <p class="section-sub">Every shortcut is configurable via Settings.</p>
+  <p class="section-sub">TuxFlow is built to keep your hands on the keyboard. Every shortcut is configurable in Settings.</p>
   <div class="shortcuts-wrap reveal">
-    <table class="shortcuts-table">
-      <thead>
-        <tr><th>Shortcut</th><th>Action</th></tr>
-      </thead>
-      <tbody>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Command palette</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd></td><td>Add project or process</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>New terminal</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Filter processes</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Terminal search</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Previous / Next process</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Previous / Next project</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Quick jump</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>Close agent / terminal</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>&#8592;</kbd>/<kbd>&#8594;</kbd></td><td>Focus sidebar / terminal</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>\</kbd></td><td>Toggle sidebar</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd></td><td>Start / Stop process</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd></td><td>Restart process</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd></td><td>Clear output</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd>/<kbd>-</kbd></td><td>Increase / Decrease font size</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>/<kbd>V</kbd></td><td>Copy / Paste</td></tr>
-      </tbody>
-    </table>
+    <div class="shortcuts-col">
+      <table class="shortcuts-table">
+        <tbody>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd></td><td>Command palette</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>N</kbd></td><td>Add project / process</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>New terminal</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>,</kbd></td><td>Settings</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Filter processes</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F</kbd></td><td>Terminal search</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Quick jump</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd></td><td>Close agent / terminal</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>\</kbd></td><td>Toggle sidebar</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="shortcuts-col">
+      <table class="shortcuts-table">
+        <tbody>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Prev / Next process</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>&#8593;</kbd>/<kbd>&#8595;</kbd></td><td>Prev / Next project</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>&#8592;</kbd>/<kbd>&#8594;</kbd></td><td>Focus sidebar / terminal</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd></td><td>Start / Stop process</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>R</kbd></td><td>Restart process</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd></td><td>Clear output</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd>/<kbd>-</kbd></td><td>Increase / Decrease font</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>/<kbd>V</kbd></td><td>Copy / Paste</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Enter</kbd></td><td>Commit (in git dialog)</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </section>
 
@@ -215,16 +341,21 @@ cargo build --release
 <!-- MCP -->
 <section id="mcp">
   <span class="section-label">Integration</span>
-  <h2 class="section-heading">MCP Server</h2>
-  <p class="section-sub">Let AI agents observe and control your dev environment.</p>
+  <h2 class="section-heading">Built for AI agents</h2>
+  <p class="section-sub">An MCP server over a Unix socket lets AI agents observe and control your dev environment without leaving the terminal.</p>
   <div class="mcp-content reveal">
     <ul class="mcp-features">
-      <li>List and monitor running processes</li>
-      <li>Read terminal output and logs</li>
-      <li>Start, stop, and restart processes</li>
+      <li>List &amp; monitor processes</li>
+      <li>Read terminal output</li>
+      <li>Start, stop, and restart</li>
     </ul>
     <p class="connect-label">Claude Code config</p>
-    <pre><code>{
+    <div class="code-block">
+      <div class="code-block-header">
+        <span class="code-block-dots"><span></span><span></span><span></span></span>
+        <span>~/.config/claude-code/mcp.json</span>
+      </div>
+<pre><code>{
   "mcpServers": {
     "tuxflow": {
       "command": "tuxflow-mcp",
@@ -232,11 +363,22 @@ cargo build --release
     }
   }
 }</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-section">
+  <h2>Ready to streamline your workflow?</h2>
+  <p>TuxFlow is open source and MIT licensed. Try it on your next project.</p>
+  <div class="cta">
+    <a href="#install" class="btn btn-primary">Install Now</a>
+    <a href="https://github.com/markovic-nikola/tuxflow" class="btn btn-secondary">Star on GitHub</a>
   </div>
 </section>
 
 <footer>
-  <p>MIT License &middot; <a href="https://github.com/markovic-nikola/tuxflow">GitHub</a></p>
+  <p>MIT License &middot; <a href="https://github.com/markovic-nikola/tuxflow">GitHub</a> &middot; <a href="https://github.com/markovic-nikola/tuxflow/issues">Issues</a> &middot; <a href="https://github.com/markovic-nikola/tuxflow/releases">Releases</a></p>
 </footer>
 
 <!-- Scroll reveal -->

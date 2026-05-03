@@ -182,9 +182,13 @@ impl AppSettings {
         let path = Self::config_path();
         if path.exists() {
             match fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str(&content) {
-                    Ok(settings) => {
+                Ok(content) => match toml::from_str::<AppSettings>(&content) {
+                    Ok(mut settings) => {
                         log::debug!("Loaded settings from {}", path.display());
+                        let migrated = settings.migrate_keybindings();
+                        if migrated {
+                            settings.save();
+                        }
                         return settings;
                     }
                     Err(e) => log::warn!("Failed to parse settings: {e}"),
@@ -193,6 +197,19 @@ impl AppSettings {
             }
         }
         Self::default()
+    }
+
+    /// Migrate keybindings whose old default conflicts with common terminal app
+    /// shortcuts (e.g. Ctrl+W in nano). Only rewrites bindings still set to the
+    /// retired default — user customizations are preserved. Returns true if any
+    /// changes were made.
+    fn migrate_keybindings(&mut self) -> bool {
+        let mut changed = false;
+        if self.keybindings.close_process == "Ctrl+W" {
+            self.keybindings.close_process = "Ctrl+Shift+W".into();
+            changed = true;
+        }
+        changed
     }
 
     pub fn save(&self) {

@@ -238,6 +238,17 @@ impl ProcessManager {
     }
 
     pub fn spawn(&mut self, name: &str) {
+        self.spawn_inner(name, None);
+    }
+
+    /// Like `spawn`, but uses `command_override` as the shell command instead
+    /// of the persisted `proc.config.command`. The saved config is not
+    /// modified — a subsequent plain `spawn` reverts to the original command.
+    pub fn spawn_with_command_override(&mut self, name: &str, command_override: &str) {
+        self.spawn_inner(name, Some(command_override));
+    }
+
+    fn spawn_inner(&mut self, name: &str, command_override: Option<&str>) {
         // Ensure terminal exists before spawning
         {
             let settings = self.settings.clone();
@@ -262,14 +273,14 @@ impl ProcessManager {
         terminal.reset(true, true);
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let command = &proc.config.command;
+        let command: &str = command_override.unwrap_or(&proc.config.command);
 
         // Build argv: shell -li -c "command"
         // Use login (-l) + interactive (-i) shell so all profile scripts are
         // sourced. zsh only reads ~/.zshrc for interactive shells, and many
         // users set PATH there (nvm, go, cargo, etc.), so -i is required.
         // The VTE PTY already provides a terminal, so -i is safe here.
-        let argv = [shell.as_str(), "-li", "-c", command.as_str()];
+        let argv = [shell.as_str(), "-li", "-c", command];
 
         // Build envv: merge parent environment with config overrides.
         // VTE treats a non-empty envv as the *complete* environment, so we must

@@ -33,6 +33,7 @@ impl AddSshDialog {
         let add_btn = gtk4::Button::builder()
             .label("Add")
             .css_classes(["suggested-action"])
+            .sensitive(false)
             .build();
         headerbar.pack_end(&add_btn);
 
@@ -84,7 +85,7 @@ impl AddSshDialog {
         let name_row = adw::EntryRow::builder().title("Name").build();
         fields_group.add(&name_row);
 
-        let host_row = adw::EntryRow::builder().title("Host").build();
+        let host_row = adw::EntryRow::builder().title("Host (required)").build();
         fields_group.add(&host_row);
 
         let user_row = adw::EntryRow::builder().title("User").build();
@@ -117,6 +118,13 @@ impl AddSshDialog {
         toggle_group.add(&auto_reconnect_row);
 
         content.append(&toggle_group);
+
+        // Enable Add button only when Host is non-empty
+        let add_btn_ref = add_btn.clone();
+        host_row.connect_changed(move |row| {
+            let has_host = !row.text().trim().is_empty();
+            add_btn_ref.set_sensitive(has_host);
+        });
 
         // When picking from ssh config, populate fields
         let name_row_ref = name_row.clone();

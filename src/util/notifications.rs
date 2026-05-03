@@ -149,6 +149,26 @@ impl AgentKind {
     }
 }
 
+/// Build a "resume previous session" command for the given agent invocation.
+/// Returns `None` when the agent kind has no CLI affordance for resuming
+/// (Gemini uses an in-app `/restore` slash command) or the command is unknown.
+///
+/// Preserves the user's executable path/alias but drops any extra argv tokens.
+/// For Codex this is required because `resume` is a subcommand with its own
+/// option set; for Claude/OpenCode top-level flags would still apply, but we
+/// drop them for consistency and predictability.
+pub fn resume_command_for(command: &str) -> Option<String> {
+    let token = command.split_whitespace().next().unwrap_or("");
+    if token.is_empty() {
+        return None;
+    }
+    match AgentKind::from_command(command) {
+        AgentKind::Claude | AgentKind::OpenCode => Some(format!("{token} --continue")),
+        AgentKind::Codex => Some(format!("{token} resume --last")),
+        AgentKind::Gemini | AgentKind::Unknown => None,
+    }
+}
+
 /// Internal: send a desktop notification, optionally with a file-based icon.
 fn send(title: &str, body: &str, icon_path: Option<&Path>, sound_override: Option<&str>) {
     let notification = gio::Notification::new(title);
@@ -308,4 +328,44 @@ pub fn notify_file_watch_restart(project_name: &str, process_name: &str, icon_pa
         icon_path,
         None,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_command_for_known_agents() {
+        assert_eq!(
+            resume_command_for("claude").as_deref(),
+            Some("claude --continue")
+        );
+        assert_eq!(
+            resume_command_for("opencode").as_deref(),
+            Some("opencode --continue")
+        );
+        assert_eq!(
+            resume_command_for("codex").as_deref(),
+            Some("codex resume --last")
+        );
+    }
+
+    #[test]
+    fn resume_command_drops_extra_args_and_keeps_path() {
+        assert_eq!(
+            resume_command_for("/home/me/bin/claude --model opus").as_deref(),
+            Some("/home/me/bin/claude --continue")
+        );
+        assert_eq!(
+            resume_command_for("codex --foo bar").as_deref(),
+            Some("codex resume --last")
+        );
+    }
+
+    #[test]
+    fn resume_command_for_unsupported_returns_none() {
+        assert!(resume_command_for("gemini").is_none());
+        assert!(resume_command_for("npx claude-code").is_none());
+        assert!(resume_command_for("").is_none());
+    }
 }

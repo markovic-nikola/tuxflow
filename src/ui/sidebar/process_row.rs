@@ -4,6 +4,7 @@ use std::rc::Rc;
 use gtk4::gio;
 use gtk4::prelude::*;
 
+use crate::config::schema::ProcessCategory;
 use crate::process::manager::ProcessStatus;
 
 type ActionCallback = Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>;
@@ -33,15 +34,22 @@ pub struct ProcessRow {
 }
 
 impl ProcessRow {
-    pub fn new(name: &str, command: &str) -> Self {
-        Self::new_with_options(name, command, false)
+    pub fn new(name: &str, command: &str, category: ProcessCategory) -> Self {
+        Self::new_with_options(name, command, false, category)
     }
 
     pub fn new_terminal(name: &str, command: &str) -> Self {
-        Self::new_with_options(name, command, true)
+        // Terminal/SSH rows pass their category here; resume action is gated
+        // on Agent only, so the exact value doesn't matter for the menu.
+        Self::new_with_options(name, command, true, ProcessCategory::Terminal)
     }
 
-    fn new_with_options(name: &str, command: &str, is_terminal: bool) -> Self {
+    fn new_with_options(
+        name: &str,
+        command: &str,
+        is_terminal: bool,
+        category: ProcessCategory,
+    ) -> Self {
         let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         container.set_margin_start(8);
         container.set_margin_end(12);
@@ -174,8 +182,14 @@ impl ProcessRow {
         });
 
         // Right-click context menu
-        let (popover, _menu, browser_section) =
-            Self::build_context_menu(name, command, &on_context_action, &url, &action_name);
+        let (popover, _menu, browser_section) = Self::build_context_menu(
+            name,
+            command,
+            category,
+            &on_context_action,
+            &url,
+            &action_name,
+        );
         popover.set_parent(&container);
 
         let gesture = gtk4::GestureClick::builder()
@@ -218,6 +232,7 @@ impl ProcessRow {
     fn build_context_menu(
         _process_name: &str,
         command: &str,
+        category: ProcessCategory,
         on_action: &ActionCallback,
         url: &Rc<RefCell<Option<String>>>,
         action_name: &Rc<RefCell<String>>,
@@ -227,6 +242,11 @@ impl ProcessRow {
         let control_section = gio::Menu::new();
         control_section.append(Some("Start / Stop"), Some("proc.toggle"));
         control_section.append(Some("Restart"), Some("proc.restart"));
+        let show_resume = category == ProcessCategory::Agent
+            && crate::util::notifications::resume_command_for(command).is_some();
+        if show_resume {
+            control_section.append(Some("Resume Session"), Some("proc.resume"));
+        }
         menu.append_section(None, &control_section);
 
         // Browser section (initially empty, items added/removed dynamically)
@@ -274,6 +294,9 @@ impl ProcessRow {
 
         add_action("toggle", "toggle");
         add_action("restart", "restart");
+        if show_resume {
+            add_action("resume", "resume");
+        }
         add_action("edit", "edit");
         add_action("clear", "clear");
         add_action("redraw", "redraw");

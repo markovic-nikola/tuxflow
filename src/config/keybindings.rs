@@ -368,7 +368,7 @@ impl Default for KeybindingsSettings {
             font_decrease: "Ctrl+-".into(),
             quick_jump: "Ctrl+G".into(),
             new_terminal: "Ctrl+T".into(),
-            close_process: "Ctrl+W".into(),
+            close_process: "Ctrl+Shift+W".into(),
             prev_project: "Ctrl+Shift+Up".into(),
             next_project: "Ctrl+Shift+Down".into(),
             clear_output: "Ctrl+Alt+C".into(),

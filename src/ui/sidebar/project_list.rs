@@ -337,7 +337,7 @@ impl ProjectList {
                 {
                     ProcessRow::new_terminal(&proc.config.name, &proc.config.command)
                 } else {
-                    ProcessRow::new(&proc.config.name, &proc.config.command)
+                    ProcessRow::new(&proc.config.name, &proc.config.command, category.clone())
                 };
                 if let Some(display) = &proc.config.display_name {
                     row.set_name(display);
@@ -842,6 +842,25 @@ impl ProjectList {
                     }
                     select_and_highlight(&qname);
                 }
+                "resume" => {
+                    let cmd_override = mgr.borrow().get_process(name).and_then(|p| {
+                        crate::util::notifications::resume_command_for(&p.config.command)
+                    });
+                    if let Some(new_cmd) = cmd_override {
+                        {
+                            let mut mgr_mut = mgr.borrow_mut();
+                            let is_running = mgr_mut
+                                .get_process(name)
+                                .map(|p| p.status == ProcessStatus::Running)
+                                .unwrap_or(false);
+                            if is_running {
+                                mgr_mut.kill(name);
+                            }
+                            mgr_mut.spawn_with_command_override(name, &new_cmd);
+                        }
+                        select_and_highlight(&qname);
+                    }
+                }
                 "clear" => {
                     if let Some(proc) = mgr.borrow().get_process(name)
                         && let Some(ref terminal) = proc.terminal
@@ -1321,7 +1340,7 @@ impl ProjectList {
         let row = if category == ProcessCategory::Terminal || category == ProcessCategory::SSH {
             ProcessRow::new_terminal(process_name, &command)
         } else {
-            ProcessRow::new(process_name, &command)
+            ProcessRow::new(process_name, &command, category.clone())
         };
         if let Some(display) = &display_name {
             row.set_name(display);
@@ -1449,7 +1468,6 @@ impl ProjectList {
                 section.process_names.retain(|n| n != qualified_name);
                 let total = section.process_names.len();
                 if total == 0 {
-                    section.header.widget().set_visible(false);
                     empty_idx = Some(idx);
                 } else {
                     let statuses = self.process_statuses.borrow();
@@ -1469,7 +1487,12 @@ impl ProjectList {
             }
         }
         if let Some(idx) = empty_idx {
-            sections.remove(idx);
+            let section = sections.remove(idx);
+            if let Some(parent) = section.header.widget().parent()
+                && let Some(parent_box) = parent.downcast_ref::<gtk4::Box>()
+            {
+                parent_box.remove(section.header.widget());
+            }
         }
     }
 
@@ -1627,7 +1650,6 @@ impl ProjectList {
                     section.process_names.retain(|n| n != qualified_name);
                     let total = section.process_names.len();
                     if total == 0 {
-                        section.header.widget().set_visible(false);
                         empty_idx = Some(idx);
                     } else {
                         let statuses = self.process_statuses.borrow();
@@ -1646,7 +1668,12 @@ impl ProjectList {
                 }
             }
             if let Some(idx) = empty_idx {
-                sections.remove(idx);
+                let section = sections.remove(idx);
+                if let Some(parent) = section.header.widget().parent()
+                    && let Some(parent_box) = parent.downcast_ref::<gtk4::Box>()
+                {
+                    parent_box.remove(section.header.widget());
+                }
             }
         }
 

@@ -24,6 +24,7 @@ impl SettingsWindow {
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
+        on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
         keybinding_map: Option<KeybindingMapRef>,
     ) {
         let settings = Rc::new(RefCell::new(AppSettings::load()));
@@ -39,6 +40,7 @@ impl SettingsWindow {
             on_auto_hide_changed,
             on_terminal_theme_changed,
             on_font_changed,
+            on_resource_thresholds_changed,
             &kb_map,
         );
     }
@@ -50,6 +52,7 @@ impl SettingsWindow {
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
+        on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
         keybinding_map: &KeybindingMapRef,
     ) {
         let dialog = adw::PreferencesDialog::new();
@@ -61,8 +64,12 @@ impl SettingsWindow {
         dialog.add(&appearance_page);
 
         // Sidebar page
-        let sidebar_page =
-            Self::build_sidebar_page(settings, on_single_expand_changed, on_auto_hide_changed);
+        let sidebar_page = Self::build_sidebar_page(
+            settings,
+            on_single_expand_changed,
+            on_auto_hide_changed,
+            on_resource_thresholds_changed,
+        );
         dialog.add(&sidebar_page);
 
         // Notifications page
@@ -704,6 +711,7 @@ impl SettingsWindow {
         settings: &SettingsRef,
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
+        on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
     ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Sidebar")
@@ -799,9 +807,17 @@ impl SettingsWindow {
             .build();
         process_cpu_row.set_selected(proc_cpu);
         let settings_ref = settings.clone();
+        let thresh_cb_cpu = on_resource_thresholds_changed.clone();
         process_cpu_row.connect_selected_notify(move |row| {
             settings_ref.borrow_mut().sidebar.process_cpu_threshold = row.selected();
             settings_ref.borrow().save();
+            if let Some(ref cb) = thresh_cb_cpu {
+                let s = settings_ref.borrow();
+                cb(
+                    s.sidebar.process_cpu_threshold,
+                    s.sidebar.process_mem_threshold,
+                );
+            }
         });
         thresholds_group.add(&process_cpu_row);
 
@@ -813,9 +829,17 @@ impl SettingsWindow {
             .build();
         process_mem_row.set_selected(proc_mem);
         let settings_ref = settings.clone();
+        let thresh_cb_mem = on_resource_thresholds_changed.clone();
         process_mem_row.connect_selected_notify(move |row| {
             settings_ref.borrow_mut().sidebar.process_mem_threshold = row.selected();
             settings_ref.borrow().save();
+            if let Some(ref cb) = thresh_cb_mem {
+                let s = settings_ref.borrow();
+                cb(
+                    s.sidebar.process_cpu_threshold,
+                    s.sidebar.process_mem_threshold,
+                );
+            }
         });
         thresholds_group.add(&process_mem_row);
 

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::prelude::*;
@@ -16,6 +16,8 @@ pub struct StatusBar {
     focus_btn: gtk4::Button,
     git_btn: gtk4::Button,
     git_pull_dot: gtk4::DrawingArea,
+    git_behind: Cell<usize>,
+    git_dirty: Cell<usize>,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
@@ -184,6 +186,8 @@ impl StatusBar {
             focus_btn,
             git_btn,
             git_pull_dot,
+            git_behind: Cell::new(0),
+            git_dirty: Cell::new(0),
             browser_btn,
             clear_btn,
             stop_btn,
@@ -326,13 +330,31 @@ impl StatusBar {
     }
 
     pub fn set_git_pull_indicator(&self, behind: usize) {
+        self.git_behind.set(behind);
         self.git_pull_dot.set_visible(behind > 0);
-        if behind > 0 {
-            self.git_btn
-                .set_tooltip_text(Some(&format!("Git Changes ({behind} to pull)")));
+        self.update_git_tooltip();
+    }
+
+    pub fn set_git_dirty(&self, dirty: usize) {
+        self.git_dirty.set(dirty);
+        if dirty > 0 {
+            self.git_btn.add_css_class("git-dirty");
         } else {
-            self.git_btn.set_tooltip_text(Some("Git Changes"));
+            self.git_btn.remove_css_class("git-dirty");
         }
+        self.update_git_tooltip();
+    }
+
+    fn update_git_tooltip(&self) {
+        let behind = self.git_behind.get();
+        let dirty = self.git_dirty.get();
+        let tip = match (dirty, behind) {
+            (0, 0) => "Git Changes".to_string(),
+            (d, 0) => format!("Git Changes ({d} uncommitted)"),
+            (0, b) => format!("Git Changes ({b} to pull)"),
+            (d, b) => format!("Git Changes ({d} uncommitted, {b} to pull)"),
+        };
+        self.git_btn.set_tooltip_text(Some(&tip));
     }
 
     pub fn connect_git_changes(&self, cb: impl Fn(&gtk4::Button) + 'static) {

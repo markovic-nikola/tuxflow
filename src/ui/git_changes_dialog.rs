@@ -145,6 +145,20 @@ pub fn commits_behind(project_dir: &Path) -> usize {
     }
 }
 
+pub fn dirty_file_count(project_dir: &Path) -> usize {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(project_dir)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count(),
+        _ => 0,
+    }
+}
+
 fn update_push_button(btn: &gtk4::Button, ahead: usize) {
     if ahead > 0 {
         btn.set_label(&format!("Push ({ahead})"));

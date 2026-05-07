@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -24,6 +25,13 @@ use crate::ui::terminal_search::TerminalSearch;
 use crate::util::port_detector::PortDetector;
 use crate::util::resource_monitor;
 use crate::workspace::{self, Workspace, WorkspaceRef};
+
+/// Maps current project name → shared cell holding the same name.
+/// Closures inside `wire_project` capture the cell instead of a `String` so
+/// they keep working after the project is renamed. The window-level
+/// `on_project_renamed` callback is responsible for updating the cell's
+/// contents and rekeying this registry.
+type ProjectNameCells = Rc<RefCell<HashMap<String, Rc<RefCell<String>>>>>;
 
 pub struct TuxFlowWindow;
 
@@ -150,6 +158,7 @@ impl TuxFlowWindow {
         // Track selected process and last-used project for quick re-selection
         let selected_process: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let last_selected_project: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let project_name_cells: ProjectNameCells = Rc::new(RefCell::new(HashMap::new()));
         let status_bar = Rc::new(StatusBar::new());
 
         // Check for updates in background
@@ -184,6 +193,7 @@ impl TuxFlowWindow {
                         &pid_file,
                         &status_bar,
                         &selected_process,
+                        &project_name_cells,
                         Some(focus_gate.clone()),
                         Some(icon_resolver.clone()),
                     );
@@ -201,6 +211,7 @@ impl TuxFlowWindow {
                 &pid_file,
                 &status_bar,
                 &selected_process,
+                &project_name_cells,
                 Some(focus_gate.clone()),
                 Some(icon_resolver.clone()),
             );
@@ -349,6 +360,15 @@ impl TuxFlowWindow {
             }
         });
 
+        // Refresh the sidebar's cached resource thresholds when the user
+        // changes them in the settings dialog. Avoids reloading settings.toml
+        // on every resource-monitor tick.
+        let sidebar_for_thresh = sidebar.clone();
+        let on_resource_thresholds_changed: Rc<dyn Fn(u32, u32)> =
+            Rc::new(move |cpu_idx, mem_idx| {
+                sidebar_for_thresh.set_resource_thresholds(cpu_idx, mem_idx);
+            });
+
         // Build UI
         let content = Self::build_content(
             &window,
@@ -357,10 +377,12 @@ impl TuxFlowWindow {
             &terminal_stack,
             &selected_process,
             &last_selected_project,
+            &project_name_cells,
             &on_single_expand_changed,
             &on_auto_hide_changed,
             &on_terminal_theme_changed,
             &on_font_changed,
+            &on_resource_thresholds_changed,
             &pid_file,
             &status_bar,
             &keybinding_map,
@@ -548,23 +570,35 @@ impl TuxFlowWindow {
         }
     }
 
+    /// Look up (or insert) the shared name cell for a project. Returns a
+    /// clone of the registered cell so closures can borrow it across renames.
+    fn pname_cell_for(registry: &ProjectNameCells, project_name: &str) -> Rc<RefCell<String>> {
+        let mut reg = registry.borrow_mut();
+        reg.entry(project_name.to_string())
+            .or_insert_with(|| Rc::new(RefCell::new(project_name.to_string())))
+            .clone()
+    }
+
     /// Connect a VTE terminal's `window-title` property to auto-rename
     /// the sidebar row, but only while the process has `auto_named: true`.
+    /// `pname_cell` and `qname_cell` are read on each title change, so the
+    /// closure keeps using the current project / qualified name even after a
+    /// rename.
     fn connect_window_title_auto_rename(
         terminal: &vte4::Terminal,
         manager: &ProcessManagerRef,
         process_name: &str,
         sidebar: &Rc<ProjectList>,
-        qualified_name: &str,
+        qname_cell: &Rc<RefCell<String>>,
         workspace: &WorkspaceRef,
-        project_name: &str,
+        pname_cell: &Rc<RefCell<String>>,
     ) {
         let mgr_ref = manager.clone();
         let proc_name = process_name.to_string();
         let sidebar_ref = sidebar.clone();
-        let qname = qualified_name.to_string();
+        let qname_cell = qname_cell.clone();
         let ws_ref = workspace.clone();
-        let proj_name = project_name.to_string();
+        let pname_cell = pname_cell.clone();
         terminal.connect_window_title_changed(move |term| {
             let is_auto = mgr_ref
                 .borrow()
@@ -577,13 +611,16 @@ impl TuxFlowWindow {
             if let Some(title) = term.window_title()
                 && let Some(display_name) = Self::parse_window_title(&title)
             {
+                let qname = qname_cell.borrow().clone();
                 sidebar_ref.set_process_name(&qname, &display_name);
                 if let Some(proc) = mgr_ref.borrow_mut().get_process_mut(&proc_name) {
                     proc.config.display_name = Some(display_name.clone());
                 }
-                ws_ref
-                    .borrow_mut()
-                    .set_display_name(&proj_name, &proc_name, &display_name);
+                ws_ref.borrow_mut().set_display_name(
+                    &pname_cell.borrow(),
+                    &proc_name,
+                    &display_name,
+                );
             }
         });
     }
@@ -693,6 +730,7 @@ impl TuxFlowWindow {
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
         focus_gate: Option<crate::process::auto_restart::FocusGate>,
         icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
@@ -714,6 +752,7 @@ impl TuxFlowWindow {
                 pid_file,
                 status_bar,
                 selected_process,
+                project_name_cells,
                 focus_gate,
                 icon_resolver,
             );
@@ -730,6 +769,7 @@ impl TuxFlowWindow {
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
         focus_gate: Option<crate::process::auto_restart::FocusGate>,
         icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
@@ -761,6 +801,7 @@ impl TuxFlowWindow {
             let status_bar = status_bar.clone();
             let selected_process = selected_process.clone();
             let last_selected_project = last_selected_project.clone();
+            let project_name_cells = project_name_cells.clone();
             let focus_gate = focus_gate.clone();
             let icon_resolver = icon_resolver.clone();
 
@@ -788,6 +829,7 @@ impl TuxFlowWindow {
                         &pid_file,
                         &status_bar,
                         &selected_process,
+                        &project_name_cells,
                         focus_gate.clone(),
                         icon_resolver.clone(),
                     );
@@ -812,6 +854,7 @@ impl TuxFlowWindow {
             let status_bar = status_bar.clone();
             let selected_process = selected_process.clone();
             let last_selected_project = last_selected_project.clone();
+            let project_name_cells = project_name_cells.clone();
             let focus_gate = focus_gate.clone();
             let icon_resolver = icon_resolver.clone();
 
@@ -852,6 +895,7 @@ impl TuxFlowWindow {
                             &pid_file,
                             &status_bar,
                             &selected_process,
+                            &project_name_cells,
                             focus_gate.clone(),
                             icon_resolver.clone(),
                         );
@@ -930,9 +974,18 @@ impl TuxFlowWindow {
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
         focus_gate: Option<crate::process::auto_restart::FocusGate>,
         icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
+        // Shared cell holding this project's current display name. The window's
+        // `on_project_renamed` handler updates the cell and the registry on
+        // rename, so closures below keep building correct qualified names.
+        let pname_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(project_name.to_string()));
+        project_name_cells
+            .borrow_mut()
+            .insert(project_name.to_string(), pname_cell.clone());
+
         // Add placeholders to the stack (real terminals are created lazily)
         let detector = Rc::new(RefCell::new(PortDetector::new()));
         {
@@ -949,12 +1002,12 @@ impl TuxFlowWindow {
         // Wire status change → sidebar update + MCP state sync
         {
             let sidebar_ref = sidebar.clone();
-            let pname = project_name.to_string();
+            let pname_cell_status = pname_cell.clone();
             let mcp_state = crate::mcp::bridge::MCP_PROCESS_STATE.clone();
             let detector_status = detector.clone();
             let mut mgr = manager.borrow_mut();
             mgr.set_on_status_change(move |process_name, status| {
-                let qname = workspace::qualified_name(&pname, process_name);
+                let qname = workspace::qualified_name(&pname_cell_status.borrow(), process_name);
                 sidebar_ref.update_process_status(&qname, status);
 
                 // Clear locked port on stop/crash/restart so the next run re-detects.
@@ -985,7 +1038,7 @@ impl TuxFlowWindow {
             // File-watch restart notification. Respects on_file_watch_restart
             // setting + focus-gate + icon resolver, same pattern as clean-exit
             // notifications in auto_restart.rs.
-            let pname_fw = project_name.to_string();
+            let pname_cell_fw = pname_cell.clone();
             let focus_gate_fw = focus_gate.clone();
             let icon_resolver_fw = icon_resolver.clone();
             mgr.set_on_file_watch_restart(move |process_name| {
@@ -993,17 +1046,18 @@ impl TuxFlowWindow {
                 if !settings.notifications.on_file_watch_restart {
                     return;
                 }
+                let pname = pname_cell_fw.borrow().clone();
                 if settings.notifications.suppress_when_focused
                     && let Some(gate) = &focus_gate_fw
                 {
-                    let qname = workspace::qualified_name(&pname_fw, process_name);
+                    let qname = workspace::qualified_name(&pname, process_name);
                     if !gate(&qname) {
                         return;
                     }
                 }
-                let icon = icon_resolver_fw.as_ref().and_then(|r| r(&pname_fw));
+                let icon = icon_resolver_fw.as_ref().and_then(|r| r(&pname));
                 crate::util::notifications::notify_file_watch_restart(
-                    &pname_fw,
+                    &pname,
                     process_name,
                     icon.as_deref(),
                 );
@@ -1074,9 +1128,8 @@ impl TuxFlowWindow {
                 let mgr_ref = manager.clone();
                 let ws_ref = ws.clone();
                 let sidebar_rename = sidebar.clone();
-                let proj_name = project_name.to_string();
+                let pname_cell_rename = pname_cell.clone();
                 let proc_name_rename = name.to_string();
-                let qname_rename = qname.clone();
 
                 let qname_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(qname.clone()));
                 let qname_cell_mat = qname_cell.clone();
@@ -1190,9 +1243,9 @@ impl TuxFlowWindow {
                             &mgr_ref,
                             &proc_name_rename,
                             &sidebar_rename,
-                            &qname_rename,
+                            &qname_cell_mat,
                             &ws_ref,
-                            &proj_name,
+                            &pname_cell_rename,
                         );
                     }
                 }));
@@ -1210,12 +1263,10 @@ impl TuxFlowWindow {
         // process work when a `last_activity` cell is present.
         {
             let manager_ref = manager.clone();
-            let project_name = project_name.to_string();
+            let pname_cell_tick = pname_cell.clone();
             let focus_gate_tick = focus_gate.clone();
             let icon_resolver_tick = icon_resolver.clone();
             glib::timeout_add_local(Duration::from_secs(2), move || {
-                let settings = AppSettings::load();
-                let threshold = settings.notifications.agent_idle_silence_seconds;
                 let cells: Vec<(
                     String,
                     crate::util::notifications::AgentKind,
@@ -1239,6 +1290,12 @@ impl TuxFlowWindow {
                         })
                         .collect()
                 };
+                if cells.is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                let settings = AppSettings::load();
+                let threshold = settings.notifications.agent_idle_silence_seconds;
+                let project_name = pname_cell_tick.borrow().clone();
                 for (name, kind, la, idle) in cells {
                     crate::process::auto_restart::check_agent_silence(
                         &project_name,
@@ -1276,10 +1333,12 @@ impl TuxFlowWindow {
         terminal_stack: &gtk4::Stack,
         selected_process: &Rc<RefCell<Option<String>>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
+        on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
@@ -1319,6 +1378,7 @@ impl TuxFlowWindow {
         let sb_ref = status_bar.clone();
         let sel_ref = selected_process.clone();
         let last_proj_ref = last_selected_project.clone();
+        let pname_cells_ref = project_name_cells.clone();
         let focus_gate_ref = focus_gate.clone();
         let icon_resolver_ref = icon_resolver.clone();
         palette.set_on_action(move |action| {
@@ -1344,6 +1404,7 @@ impl TuxFlowWindow {
                     let sb2 = sb_ref.clone();
                     let sel2 = sel_ref.clone();
                     let last_proj2 = last_proj_ref.clone();
+                    let pname_cells2 = pname_cells_ref.clone();
                     let focus_gate2 = focus_gate_ref.clone();
                     let icon_resolver2 = icon_resolver_ref.clone();
                     let dialog = gtk4::FileDialog::builder()
@@ -1364,6 +1425,7 @@ impl TuxFlowWindow {
                                 &sb2,
                                 &sel2,
                                 &last_proj2,
+                                &pname_cells2,
                                 Some(focus_gate2.clone()),
                                 Some(icon_resolver2.clone()),
                             );
@@ -1374,6 +1436,7 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let pname_cells2 = pname_cells_ref.clone();
                     let fg = focus_gate_ref.clone();
                     let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
@@ -1415,9 +1478,15 @@ impl TuxFlowWindow {
                             {
                                 let project_name = project.name.clone();
                                 let qname = workspace::qualified_name(&project_name, &name);
+                                let pname_cell = Self::pname_cell_for(&pname_cells2, &project_name);
+                                let qname_cell: Rc<RefCell<String>> =
+                                    Rc::new(RefCell::new(qname.clone()));
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
                                 mgr.materialize_process(&name);
+                                if let Some(proc) = mgr.get_process_mut(&name) {
+                                    proc.qname_cell = Some(qname_cell.clone());
+                                }
                                 let terminal =
                                     mgr.get_process(&name).and_then(|p| p.terminal.clone());
                                 if let Some(ref term) = terminal {
@@ -1447,9 +1516,9 @@ impl TuxFlowWindow {
                                         &project.manager,
                                         &name,
                                         &sidebar2,
-                                        &qname,
+                                        &qname_cell,
                                         &ws2,
-                                        &project_name,
+                                        &pname_cell,
                                     );
                                 }
                             }
@@ -1460,6 +1529,7 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let pname_cells2 = pname_cells_ref.clone();
                     let fg = focus_gate_ref.clone();
                     let ir = icon_resolver_ref.clone();
                     let project_names: Vec<String> = ws_ref
@@ -1502,9 +1572,15 @@ impl TuxFlowWindow {
                             {
                                 let project_name = project.name.clone();
                                 let qname = workspace::qualified_name(&project_name, &name);
+                                let pname_cell = Self::pname_cell_for(&pname_cells2, &project_name);
+                                let qname_cell: Rc<RefCell<String>> =
+                                    Rc::new(RefCell::new(qname.clone()));
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
                                 mgr.materialize_process(&name);
+                                if let Some(proc) = mgr.get_process_mut(&name) {
+                                    proc.qname_cell = Some(qname_cell.clone());
+                                }
                                 let terminal =
                                     mgr.get_process(&name).and_then(|p| p.terminal.clone());
                                 if let Some(ref term) = terminal {
@@ -1536,9 +1612,9 @@ impl TuxFlowWindow {
                                         &project.manager,
                                         &name,
                                         &sidebar2,
-                                        &qname,
+                                        &qname_cell,
                                         &ws2,
-                                        &project_name,
+                                        &pname_cell,
                                     );
                                 }
                             }
@@ -1638,6 +1714,7 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let pname_cells2 = pname_cells_ref.clone();
                     let win2 = window_ref.clone();
                     let fg = focus_gate_ref.clone();
                     let ir = icon_resolver_ref.clone();
@@ -1699,12 +1776,18 @@ impl TuxFlowWindow {
                             {
                                 let project_name = project.name.clone();
                                 let qname = workspace::qualified_name(&project_name, &term_name);
+                                let pname_cell = Self::pname_cell_for(&pname_cells2, &project_name);
+                                let qname_cell: Rc<RefCell<String>> =
+                                    Rc::new(RefCell::new(qname.clone()));
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
                                 let terminal = {
                                     mgr.materialize_process(&term_name);
                                     mgr.get_process(&term_name).and_then(|p| p.terminal.clone())
                                 };
+                                if let Some(proc) = mgr.get_process_mut(&term_name) {
+                                    proc.qname_cell = Some(qname_cell.clone());
+                                }
                                 if let Some(ref term) = terminal {
                                     stack2.add_named(term, Some(&qname));
                                 }
@@ -1733,9 +1816,9 @@ impl TuxFlowWindow {
                                         &project.manager,
                                         &term_name,
                                         &sidebar2,
-                                        &qname,
+                                        &qname_cell,
                                         &ws2,
-                                        &project_name,
+                                        &pname_cell,
                                     );
                                 }
                             }
@@ -1747,6 +1830,7 @@ impl TuxFlowWindow {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
                     let sidebar2 = sidebar_ref.clone();
+                    let pname_cells2 = pname_cells_ref.clone();
                     let win2 = window_ref.clone();
                     let fg = focus_gate_ref.clone();
                     let ir = icon_resolver_ref.clone();
@@ -1813,6 +1897,9 @@ impl TuxFlowWindow {
                             {
                                 let project_name = project.name.clone();
                                 let qname = workspace::qualified_name(&project_name, &agent_name);
+                                let pname_cell = Self::pname_cell_for(&pname_cells2, &project_name);
+                                let qname_cell: Rc<RefCell<String>> =
+                                    Rc::new(RefCell::new(qname.clone()));
                                 let mut mgr = project.manager.borrow_mut();
                                 mgr.add_process(config);
                                 let terminal = {
@@ -1820,6 +1907,9 @@ impl TuxFlowWindow {
                                     mgr.get_process(&agent_name)
                                         .and_then(|p| p.terminal.clone())
                                 };
+                                if let Some(proc) = mgr.get_process_mut(&agent_name) {
+                                    proc.qname_cell = Some(qname_cell.clone());
+                                }
                                 if let Some(ref term) = terminal {
                                     stack2.add_named(term, Some(&qname));
                                 }
@@ -1848,9 +1938,9 @@ impl TuxFlowWindow {
                                         &project.manager,
                                         &agent_name,
                                         &sidebar2,
-                                        &qname,
+                                        &qname_cell,
                                         &ws2,
-                                        &project_name,
+                                        &pname_cell,
                                     );
                                 }
                             }
@@ -1939,6 +2029,7 @@ impl TuxFlowWindow {
             on_auto_hide_changed,
             on_terminal_theme_changed,
             on_font_changed,
+            on_resource_thresholds_changed,
             keybinding_map,
         );
 
@@ -2082,12 +2173,60 @@ impl TuxFlowWindow {
         sidebar.set_on_project_renamed({
             let last_proj = last_selected_project.clone();
             let refresh = refresh_counts.clone();
+            let pname_cells = project_name_cells.clone();
+            let ws_rename = ws.clone();
+            let stack_rename = terminal_stack.clone();
             move |old_name, new_name| {
                 let mut lp = last_proj.borrow_mut();
                 if lp.as_deref() == Some(old_name) {
                     *lp = Some(new_name.to_string());
                 }
                 drop(lp);
+
+                // Update the shared project-name cell so closures captured in
+                // wire_project (status callback, file-watch callback, silence
+                // ticker, window-title rename) keep producing the current
+                // qualified names.
+                let cell = {
+                    let mut reg = pname_cells.borrow_mut();
+                    let cell = reg.remove(old_name);
+                    if let Some(ref c) = cell {
+                        *c.borrow_mut() = new_name.to_string();
+                        reg.insert(new_name.to_string(), c.clone());
+                    }
+                    cell
+                };
+                if cell.is_none() {
+                    log::warn!(
+                        "on_project_renamed: no project-name cell registered for '{old_name}'"
+                    );
+                }
+
+                // Rename terminal stack pages for every process in the project,
+                // so `set_visible_child_name(new_qname)` finds them. Also update
+                // each process's `qname_cell` so per-terminal closures
+                // (on_materialized, contents-changed) produce the new qname.
+                let old_prefix = format!("{old_name}::");
+                let new_prefix = format!("{new_name}::");
+                let ws_borrow = ws_rename.borrow();
+                if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == new_name) {
+                    let mut mgr = project.manager.borrow_mut();
+                    let proc_names: Vec<String> = mgr.process_names().to_vec();
+                    for proc_name in &proc_names {
+                        let old_qname = format!("{old_prefix}{proc_name}");
+                        let new_qname = format!("{new_prefix}{proc_name}");
+                        if let Some(child) = stack_rename.child_by_name(&old_qname) {
+                            stack_rename.page(&child).set_name(&new_qname);
+                        }
+                        if let Some(proc) = mgr.get_process_mut(proc_name)
+                            && let Some(ref qcell) = proc.qname_cell
+                        {
+                            *qcell.borrow_mut() = new_qname;
+                        }
+                    }
+                }
+                drop(ws_borrow);
+
                 refresh();
             }
         });
@@ -2267,9 +2406,11 @@ impl TuxFlowWindow {
             on_auto_hide_changed,
             on_terminal_theme_changed,
             on_font_changed,
+            on_resource_thresholds_changed,
             keybinding_map,
             last_selected_project,
             status_bar,
+            project_name_cells,
             focus_gate,
             icon_resolver,
         );
@@ -2290,9 +2431,11 @@ impl TuxFlowWindow {
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
+        on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
         status_bar: &Rc<StatusBar>,
+        project_name_cells: &ProjectNameCells,
         focus_gate: &crate::process::auto_restart::FocusGate,
         icon_resolver: &crate::process::auto_restart::IconResolver,
     ) {
@@ -2311,9 +2454,11 @@ impl TuxFlowWindow {
         let auto_hide_cb = on_auto_hide_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
+        let thresh_cb = on_resource_thresholds_changed.clone();
         let kb_map = keybinding_map.clone();
         let last_proj_ref = last_selected_project.clone();
         let sb_ref = status_bar.clone();
+        let pname_cells_ref = project_name_cells.clone();
         let focus_gate_ref = focus_gate.clone();
         let icon_resolver_ref = icon_resolver.clone();
 
@@ -2384,6 +2529,7 @@ impl TuxFlowWindow {
                             Some(auto_hide_cb.clone()),
                             Some(theme_cb.clone()),
                             Some(font_cb.clone()),
+                            Some(thresh_cb.clone()),
                             Some(kb_map.clone()),
                         );
                     }
@@ -2474,6 +2620,7 @@ impl TuxFlowWindow {
                             &stack_ref,
                             &sidebar_ref,
                             &last_proj_ref,
+                            &pname_cells_ref,
                             Some(focus_gate_ref.clone()),
                             Some(icon_resolver_ref.clone()),
                         );
@@ -2571,6 +2718,7 @@ impl TuxFlowWindow {
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
+        on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
     ) -> (adw::HeaderBar, gtk4::Label) {
         let headerbar = adw::HeaderBar::new();
@@ -2611,6 +2759,7 @@ impl TuxFlowWindow {
         let auto_hide_cb = on_auto_hide_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
+        let thresh_cb = on_resource_thresholds_changed.clone();
         let kb_map = keybinding_map.clone();
         settings_btn.connect_clicked(move |_| {
             crate::ui::settings::settings_window::SettingsWindow::show(
@@ -2619,6 +2768,7 @@ impl TuxFlowWindow {
                 Some(auto_hide_cb.clone()),
                 Some(theme_cb.clone()),
                 Some(font_cb.clone()),
+                Some(thresh_cb.clone()),
                 Some(kb_map.clone()),
             );
         });
@@ -2757,6 +2907,7 @@ impl TuxFlowWindow {
         stack: &gtk4::Stack,
         sidebar: &Rc<ProjectList>,
         last_project: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
         focus_gate: Option<crate::process::auto_restart::FocusGate>,
         icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
@@ -2799,12 +2950,17 @@ impl TuxFlowWindow {
         let ws_borrow = ws.borrow();
         if let Some(project) = ws_borrow.projects().iter().find(|p| p.name == project_name) {
             let qname = workspace::qualified_name(&project_name, &term_name);
+            let pname_cell = Self::pname_cell_for(project_name_cells, &project_name);
+            let qname_cell: Rc<RefCell<String>> = Rc::new(RefCell::new(qname.clone()));
             let mut mgr = project.manager.borrow_mut();
             mgr.add_process(config);
             let terminal = {
                 mgr.materialize_process(&term_name);
                 mgr.get_process(&term_name).and_then(|p| p.terminal.clone())
             };
+            if let Some(proc) = mgr.get_process_mut(&term_name) {
+                proc.qname_cell = Some(qname_cell.clone());
+            }
             if let Some(ref term) = terminal {
                 stack.add_named(term, Some(&qname));
             }
@@ -2830,9 +2986,9 @@ impl TuxFlowWindow {
                     &project.manager,
                     &term_name,
                     sidebar,
-                    &qname,
+                    &qname_cell,
                     ws,
-                    &project_name,
+                    &pname_cell,
                 );
             }
         }

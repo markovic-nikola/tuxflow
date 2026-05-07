@@ -49,6 +49,11 @@ pub struct ProjectList {
     window: Rc<RefCell<Option<libadwaita::ApplicationWindow>>>,
     single_expand: Rc<Cell<bool>>,
     selected_qname: Rc<RefCell<Option<String>>>,
+    // Cached threshold combo indices, refreshed by `set_resource_thresholds`
+    // when the settings dialog saves. Avoids re-reading settings.toml from
+    // disk on every resource-monitor tick.
+    cpu_threshold_idx: Cell<u32>,
+    mem_threshold_idx: Cell<u32>,
 }
 
 impl ProjectList {
@@ -118,6 +123,8 @@ impl ProjectList {
             }
         });
 
+        let settings = crate::config::settings::AppSettings::load();
+
         Self {
             outer_container,
             container,
@@ -138,7 +145,16 @@ impl ProjectList {
             window: Rc::new(RefCell::new(None)),
             single_expand,
             selected_qname: Rc::new(RefCell::new(None)),
+            cpu_threshold_idx: Cell::new(settings.sidebar.process_cpu_threshold),
+            mem_threshold_idx: Cell::new(settings.sidebar.process_mem_threshold),
         }
+    }
+
+    /// Update the cached resource thresholds. Call from the settings dialog's
+    /// save callback so subsequent resource-monitor ticks pick up the change.
+    pub fn set_resource_thresholds(&self, cpu_idx: u32, mem_idx: u32) {
+        self.cpu_threshold_idx.set(cpu_idx);
+        self.mem_threshold_idx.set(mem_idx);
     }
 
     pub fn set_workspace(&self, ws: &WorkspaceRef) {
@@ -450,7 +466,10 @@ impl ProjectList {
         project_name: &str,
     ) {
         let mgr = manager.clone();
-        let pname = project_name.to_string();
+        // Capture a shared cell instead of a snapshot — `set_name` keeps it
+        // in sync, so the closure sees the current project name across renames.
+        let pname_cell = project_row.name_cell();
+        let _ = project_name; // documented: initial value lives in the cell
         let ws_ref = self.workspace.clone();
         let win_ref = self.window.clone();
         let container_ref = self.container.clone();
@@ -464,284 +483,302 @@ impl ProjectList {
         let on_project_commands_changed_ref = self.on_project_commands_changed.clone();
         let on_process_deleted_ref = self.on_process_deleted.clone();
 
-        project_row.set_on_context_action(move |action| match action {
-            "start_all" => {
-                mgr.borrow_mut().spawn_project_group();
-            }
-            "stop_all" => {
-                mgr.borrow_mut().stop_all();
-            }
-            "restart_all" => {
-                mgr.borrow_mut().restart_all();
-            }
-            "copy_path" => {
-                if let Some(ref ws) = *ws_ref.borrow() {
-                    let ws_borrow = ws.borrow();
-                    if let Some(dir) = ws_borrow.get_project_dir(&pname)
-                        && let Some(display) = gtk4::gdk::Display::default()
-                    {
-                        display.clipboard().set_text(&dir.to_string_lossy());
-                    }
+        project_row.set_on_context_action(move |action| {
+            // Snapshot the current project name on every action invocation so
+            // post-rename clicks see the new name (the row's name_cell is
+            // updated by `set_name`).
+            let pname = pname_cell.borrow().clone();
+            match action {
+                "start_all" => {
+                    mgr.borrow_mut().spawn_project_group();
                 }
-            }
-            "open_in_editor" => {
-                if let Some(ref ws) = *ws_ref.borrow() {
-                    let ws_borrow = ws.borrow();
-                    if let Some(dir) = ws_borrow.get_project_dir(&pname) {
-                        let settings = crate::config::settings::AppSettings::load();
-                        let editor = &settings.tools.default_editor;
-                        let mut cmd = std::process::Command::new(editor);
-                        if settings.tools.reuse_editor_window
-                            && matches!(
-                                editor.as_str(),
-                                "code" | "cursor" | "codium" | "code-insiders"
-                            )
+                "stop_all" => {
+                    mgr.borrow_mut().stop_all();
+                }
+                "restart_all" => {
+                    mgr.borrow_mut().restart_all();
+                }
+                "copy_path" => {
+                    if let Some(ref ws) = *ws_ref.borrow() {
+                        let ws_borrow = ws.borrow();
+                        if let Some(dir) = ws_borrow.get_project_dir(&pname)
+                            && let Some(display) = gtk4::gdk::Display::default()
                         {
-                            cmd.arg("--reuse-window");
-                        }
-                        cmd.arg(&dir);
-                        if let Err(e) = cmd.spawn() {
-                            log::error!("Failed to open editor '{}': {}", editor, e);
+                            display.clipboard().set_text(&dir.to_string_lossy());
                         }
                     }
                 }
-            }
-            "edit" => {
-                let ws = ws_ref.borrow().clone();
-                let win = win_ref.borrow().clone();
-                if let (Some(ws), Some(win)) = (ws, win) {
-                    let ws_borrow = ws.borrow();
-                    let dir = ws_borrow
-                        .get_project_dir(&pname)
-                        .map(|d| d.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let icon = ws_borrow.get_project_icon(&pname);
-                    let commands = ws_borrow.list_toggleable_commands(&pname);
-                    drop(ws_borrow);
+                "open_in_editor" => {
+                    if let Some(ref ws) = *ws_ref.borrow() {
+                        let ws_borrow = ws.borrow();
+                        if let Some(dir) = ws_borrow.get_project_dir(&pname) {
+                            let settings = crate::config::settings::AppSettings::load();
+                            let editor = &settings.tools.default_editor;
+                            let mut cmd = std::process::Command::new(editor);
+                            if settings.tools.reuse_editor_window
+                                && matches!(
+                                    editor.as_str(),
+                                    "code" | "cursor" | "codium" | "code-insiders"
+                                )
+                            {
+                                cmd.arg("--reuse-window");
+                            }
+                            cmd.arg(&dir);
+                            if let Err(e) = cmd.spawn() {
+                                log::error!("Failed to open editor '{}': {}", editor, e);
+                            }
+                        }
+                    }
+                }
+                "edit" => {
+                    let ws = ws_ref.borrow().clone();
+                    let win = win_ref.borrow().clone();
+                    if let (Some(ws), Some(win)) = (ws, win) {
+                        let ws_borrow = ws.borrow();
+                        let dir = ws_borrow
+                            .get_project_dir(&pname)
+                            .map(|d| d.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let icon = ws_borrow.get_project_icon(&pname);
+                        let commands = ws_borrow.list_toggleable_commands(&pname);
+                        drop(ws_borrow);
 
-                    let ws_edit = ws.clone();
-                    let pname_for_dialog = pname.clone();
-                    let pname_for_closure = pname.clone();
-                    let project_rows_edit = project_rows_ref.clone();
-                    let container_edit = container_ref.clone();
-                    let on_renamed_cb = on_renamed.clone();
-                    let sections_edit = sections_ref.clone();
-                    let proc_rows_edit = proc_rows_ref.clone();
-                    let proc_statuses_edit = proc_statuses_ref.clone();
-                    let selected_qname_edit = selected_qname_ref.clone();
-                    let on_commands_changed = on_project_commands_changed_ref.clone();
+                        let ws_edit = ws.clone();
+                        let pname_for_dialog = pname.clone();
+                        let pname_for_closure = pname.clone();
+                        let project_rows_edit = project_rows_ref.clone();
+                        let container_edit = container_ref.clone();
+                        let on_renamed_cb = on_renamed.clone();
+                        let sections_edit = sections_ref.clone();
+                        let proc_rows_edit = proc_rows_ref.clone();
+                        let proc_statuses_edit = proc_statuses_ref.clone();
+                        let selected_qname_edit = selected_qname_ref.clone();
+                        let on_commands_changed = on_project_commands_changed_ref.clone();
 
-                    EditProjectDialog::show(
-                        &win,
-                        &pname_for_dialog,
-                        &dir,
-                        icon.as_deref(),
-                        commands,
-                        move |result: EditProjectResult| {
-                            if result.remove {
-                                let mut ws_mut = ws_edit.borrow_mut();
-                                ws_mut.remove_project(&pname_for_closure);
-                                drop(ws_mut);
-                                let mut rows = project_rows_edit.borrow_mut();
-                                if let Some(row) = rows.remove(&pname_for_closure) {
-                                    container_edit.remove(row.widget());
-                                }
-                            } else {
-                                let mut ws_mut = ws_edit.borrow_mut();
-                                ws_mut
-                                    .set_project_icon(&pname_for_closure, result.icon_path.clone());
-                                let renamed = result.name != pname_for_closure;
-                                if renamed {
-                                    ws_mut.rename_project(&pname_for_closure, &result.name);
-                                }
-                                drop(ws_mut);
-
-                                {
-                                    let rows = project_rows_edit.borrow();
-                                    if let Some(row) = rows.get(&pname_for_closure) {
-                                        if renamed {
-                                            row.set_name(&result.name);
-                                        }
-                                        row.set_icon(result.icon_path.as_deref());
+                        EditProjectDialog::show(
+                            &win,
+                            &pname_for_dialog,
+                            &dir,
+                            icon.as_deref(),
+                            commands,
+                            move |result: EditProjectResult| {
+                                if result.remove {
+                                    let mut ws_mut = ws_edit.borrow_mut();
+                                    ws_mut.remove_project(&pname_for_closure);
+                                    drop(ws_mut);
+                                    let mut rows = project_rows_edit.borrow_mut();
+                                    if let Some(row) = rows.remove(&pname_for_closure) {
+                                        container_edit.remove(row.widget());
                                     }
-                                }
+                                } else {
+                                    let mut ws_mut = ws_edit.borrow_mut();
+                                    ws_mut.set_project_icon(
+                                        &pname_for_closure,
+                                        result.icon_path.clone(),
+                                    );
+                                    let renamed = result.name != pname_for_closure;
+                                    if renamed {
+                                        ws_mut.rename_project(&pname_for_closure, &result.name);
+                                    }
+                                    drop(ws_mut);
 
-                                if renamed {
-                                    // Update all internal HashMap keys and section data
-                                    let old_prefix = format!("{}::", pname_for_closure);
-                                    let new_prefix = format!("{}::", result.name);
-
-                                    // Update project_rows key
                                     {
-                                        let mut rows = project_rows_edit.borrow_mut();
-                                        if let Some(row) = rows.remove(&*pname_for_closure) {
-                                            rows.insert(result.name.clone(), row);
+                                        let rows = project_rows_edit.borrow();
+                                        if let Some(row) = rows.get(&pname_for_closure) {
+                                            if renamed {
+                                                row.set_name(&result.name);
+                                            }
+                                            row.set_icon(result.icon_path.as_deref());
                                         }
                                     }
 
-                                    // Update sections
-                                    {
-                                        let mut sections = sections_edit.borrow_mut();
-                                        for section in sections.iter_mut() {
-                                            if section.project_name == *pname_for_closure {
-                                                section.project_name = result.name.clone();
-                                                for qname in &mut section.process_names {
-                                                    if let Some(proc) =
-                                                        qname.strip_prefix(&old_prefix)
-                                                    {
-                                                        *qname = format!("{new_prefix}{proc}");
+                                    if renamed {
+                                        // Update all internal HashMap keys and section data
+                                        let old_prefix = format!("{}::", pname_for_closure);
+                                        let new_prefix = format!("{}::", result.name);
+
+                                        // Update project_rows key
+                                        {
+                                            let mut rows = project_rows_edit.borrow_mut();
+                                            if let Some(row) = rows.remove(&*pname_for_closure) {
+                                                rows.insert(result.name.clone(), row);
+                                            }
+                                        }
+
+                                        // Update sections
+                                        {
+                                            let mut sections = sections_edit.borrow_mut();
+                                            for section in sections.iter_mut() {
+                                                if section.project_name == *pname_for_closure {
+                                                    section.project_name = result.name.clone();
+                                                    for qname in &mut section.process_names {
+                                                        if let Some(proc) =
+                                                            qname.strip_prefix(&old_prefix)
+                                                        {
+                                                            *qname = format!("{new_prefix}{proc}");
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    // Update process_rows keys and DnD widget names
-                                    {
-                                        let mut rows = proc_rows_edit.borrow_mut();
-                                        let old_keys: Vec<String> = rows
-                                            .keys()
-                                            .filter(|k| k.starts_with(&old_prefix))
-                                            .cloned()
-                                            .collect();
-                                        for old_key in old_keys {
-                                            if let Some(row) = rows.remove(&old_key) {
-                                                if let Some(proc) =
-                                                    old_key.strip_prefix(&old_prefix)
-                                                {
-                                                    let new_qname = format!("{new_prefix}{proc}");
-                                                    row.widget().set_widget_name(&new_qname);
-                                                    rows.insert(new_qname, row);
+                                        // Update process_rows keys and DnD widget names.
+                                        // Also update each row's internal qualified_name cell —
+                                        // the row's right-click action handler reads from that
+                                        // cell, and a stale value makes subsequent command
+                                        // edits fail to find their row in the rekeyed HashMap.
+                                        {
+                                            let mut rows = proc_rows_edit.borrow_mut();
+                                            let old_keys: Vec<String> = rows
+                                                .keys()
+                                                .filter(|k| k.starts_with(&old_prefix))
+                                                .cloned()
+                                                .collect();
+                                            for old_key in old_keys {
+                                                if let Some(row) = rows.remove(&old_key) {
+                                                    if let Some(proc) =
+                                                        old_key.strip_prefix(&old_prefix)
+                                                    {
+                                                        let new_qname =
+                                                            format!("{new_prefix}{proc}");
+                                                        row.widget().set_widget_name(&new_qname);
+                                                        row.qualified_name
+                                                            .replace(new_qname.clone());
+                                                        rows.insert(new_qname, row);
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    // Update process_statuses keys
-                                    {
-                                        let mut statuses = proc_statuses_edit.borrow_mut();
-                                        let old_keys: Vec<String> = statuses
-                                            .keys()
-                                            .filter(|k| k.starts_with(&old_prefix))
-                                            .cloned()
-                                            .collect();
-                                        for old_key in old_keys {
-                                            if let Some(status) = statuses.remove(&old_key) {
-                                                if let Some(proc) =
-                                                    old_key.strip_prefix(&old_prefix)
-                                                {
-                                                    statuses.insert(
-                                                        format!("{new_prefix}{proc}"),
-                                                        status,
-                                                    );
+                                        // Update process_statuses keys
+                                        {
+                                            let mut statuses = proc_statuses_edit.borrow_mut();
+                                            let old_keys: Vec<String> = statuses
+                                                .keys()
+                                                .filter(|k| k.starts_with(&old_prefix))
+                                                .cloned()
+                                                .collect();
+                                            for old_key in old_keys {
+                                                if let Some(status) = statuses.remove(&old_key) {
+                                                    if let Some(proc) =
+                                                        old_key.strip_prefix(&old_prefix)
+                                                    {
+                                                        statuses.insert(
+                                                            format!("{new_prefix}{proc}"),
+                                                            status,
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
 
-                                    // Update selected_qname
-                                    {
-                                        let mut selected = selected_qname_edit.borrow_mut();
-                                        if let Some(ref qname) = *selected {
-                                            if let Some(proc) = qname.strip_prefix(&old_prefix) {
-                                                *selected = Some(format!("{new_prefix}{proc}"));
+                                        // Update selected_qname
+                                        {
+                                            let mut selected = selected_qname_edit.borrow_mut();
+                                            if let Some(ref qname) = *selected {
+                                                if let Some(proc) = qname.strip_prefix(&old_prefix)
+                                                {
+                                                    *selected = Some(format!("{new_prefix}{proc}"));
+                                                }
                                             }
+                                        }
+
+                                        if let Some(ref cb) = *on_renamed_cb.borrow() {
+                                            cb(&pname_for_closure, &result.name);
                                         }
                                     }
 
-                                    if let Some(ref cb) = *on_renamed_cb.borrow() {
-                                        cb(&pname_for_closure, &result.name);
+                                    if !result.enabled_commands.is_empty()
+                                        || !result.disabled_commands.is_empty()
+                                    {
+                                        if let Some(ref cb) = *on_commands_changed.borrow() {
+                                            cb(
+                                                &result.name,
+                                                &result.enabled_commands,
+                                                &result.disabled_commands,
+                                            );
+                                        }
                                     }
                                 }
+                            },
+                        );
+                    }
+                }
+                "remove" => {
+                    let dialog = adw::AlertDialog::builder()
+                        .heading(format!("Remove '{}'?", pname))
+                        .body(
+                            "This will remove the project and all its processes from the sidebar.",
+                        )
+                        .build();
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("remove", "Remove");
+                    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
 
-                                if !result.enabled_commands.is_empty()
-                                    || !result.disabled_commands.is_empty()
-                                {
-                                    if let Some(ref cb) = *on_commands_changed.borrow() {
-                                        cb(
-                                            &result.name,
-                                            &result.enabled_commands,
-                                            &result.disabled_commands,
-                                        );
-                                    }
+                    let ws_del = ws_ref.clone();
+                    let pname_del = pname.clone();
+                    let rows_del = project_rows_ref.clone();
+                    let managers_del = project_managers_ref.clone();
+                    let container_del = container_ref.clone();
+                    let sections_del = sections_ref.clone();
+                    let proc_rows_del = proc_rows_ref.clone();
+                    let proc_statuses_del = proc_statuses_ref.clone();
+                    let selected_qname_del = selected_qname_ref.clone();
+                    let on_deleted_del = on_process_deleted_ref.clone();
+
+                    let win = win_ref.borrow().clone();
+                    let parent_widget = win.map(|w| w.upcast::<gtk4::Widget>());
+
+                    dialog.choose(
+                        parent_widget.as_ref(),
+                        gtk4::gio::Cancellable::NONE,
+                        move |response| {
+                            if response != "remove" {
+                                return;
+                            }
+                            if let Some(ref ws) = *ws_del.borrow() {
+                                ws.borrow_mut().remove_project(&pname_del);
+                            }
+
+                            // Collect qnames of all processes in this project so we can
+                            // notify listeners (terminal stack) and clean up internal state.
+                            let qname_prefix = format!("{}::", pname_del);
+                            let orphaned_qnames: Vec<String> = proc_rows_del
+                                .borrow()
+                                .keys()
+                                .filter(|q| q.starts_with(&qname_prefix))
+                                .cloned()
+                                .collect();
+
+                            for qname in &orphaned_qnames {
+                                proc_rows_del.borrow_mut().remove(qname);
+                                proc_statuses_del.borrow_mut().remove(qname);
+                                if let Some(ref cb) = *on_deleted_del.borrow() {
+                                    cb(qname);
                                 }
                             }
+                            {
+                                let mut sel = selected_qname_del.borrow_mut();
+                                if sel.as_deref().is_some_and(|q| q.starts_with(&qname_prefix)) {
+                                    *sel = None;
+                                }
+                            }
+                            sections_del
+                                .borrow_mut()
+                                .retain(|s| s.project_name != pname_del);
+
+                            let mut rows = rows_del.borrow_mut();
+                            if let Some(row) = rows.remove(&pname_del) {
+                                container_del.remove(row.widget());
+                            }
+                            managers_del.borrow_mut().remove(&pname_del);
                         },
                     );
                 }
+                _ => log::warn!("Unknown project action: {action}"),
             }
-            "remove" => {
-                let dialog = adw::AlertDialog::builder()
-                    .heading(format!("Remove '{}'?", pname))
-                    .body("This will remove the project and all its processes from the sidebar.")
-                    .build();
-                dialog.add_response("cancel", "Cancel");
-                dialog.add_response("remove", "Remove");
-                dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
-                dialog.set_default_response(Some("cancel"));
-                dialog.set_close_response("cancel");
-
-                let ws_del = ws_ref.clone();
-                let pname_del = pname.clone();
-                let rows_del = project_rows_ref.clone();
-                let managers_del = project_managers_ref.clone();
-                let container_del = container_ref.clone();
-                let sections_del = sections_ref.clone();
-                let proc_rows_del = proc_rows_ref.clone();
-                let proc_statuses_del = proc_statuses_ref.clone();
-                let selected_qname_del = selected_qname_ref.clone();
-                let on_deleted_del = on_process_deleted_ref.clone();
-
-                let win = win_ref.borrow().clone();
-                let parent_widget = win.map(|w| w.upcast::<gtk4::Widget>());
-
-                dialog.choose(
-                    parent_widget.as_ref(),
-                    gtk4::gio::Cancellable::NONE,
-                    move |response| {
-                        if response != "remove" {
-                            return;
-                        }
-                        if let Some(ref ws) = *ws_del.borrow() {
-                            ws.borrow_mut().remove_project(&pname_del);
-                        }
-
-                        // Collect qnames of all processes in this project so we can
-                        // notify listeners (terminal stack) and clean up internal state.
-                        let qname_prefix = format!("{}::", pname_del);
-                        let orphaned_qnames: Vec<String> = proc_rows_del
-                            .borrow()
-                            .keys()
-                            .filter(|q| q.starts_with(&qname_prefix))
-                            .cloned()
-                            .collect();
-
-                        for qname in &orphaned_qnames {
-                            proc_rows_del.borrow_mut().remove(qname);
-                            proc_statuses_del.borrow_mut().remove(qname);
-                            if let Some(ref cb) = *on_deleted_del.borrow() {
-                                cb(qname);
-                            }
-                        }
-                        {
-                            let mut sel = selected_qname_del.borrow_mut();
-                            if sel.as_deref().is_some_and(|q| q.starts_with(&qname_prefix)) {
-                                *sel = None;
-                            }
-                        }
-                        sections_del
-                            .borrow_mut()
-                            .retain(|s| s.project_name != pname_del);
-
-                        let mut rows = rows_del.borrow_mut();
-                        if let Some(row) = rows.remove(&pname_del) {
-                            container_del.remove(row.widget());
-                        }
-                        managers_del.borrow_mut().remove(&pname_del);
-                    },
-                );
-            }
-            _ => log::warn!("Unknown project action: {action}"),
         });
     }
 
@@ -1555,11 +1592,8 @@ impl ProjectList {
 
     pub fn set_process_resources(&self, qualified_name: &str, cpu_percent: f64, memory_mb: f64) {
         if let Some(row) = self.process_rows.borrow().get(qualified_name) {
-            let settings = crate::config::settings::AppSettings::load();
-            let cpu_threshold =
-                Self::process_cpu_threshold_value(settings.sidebar.process_cpu_threshold);
-            let mem_threshold =
-                Self::process_mem_threshold_value(settings.sidebar.process_mem_threshold);
+            let cpu_threshold = Self::process_cpu_threshold_value(self.cpu_threshold_idx.get());
+            let mem_threshold = Self::process_mem_threshold_value(self.mem_threshold_idx.get());
             row.set_resources(cpu_percent, memory_mb, cpu_threshold, mem_threshold);
         }
     }

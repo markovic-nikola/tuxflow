@@ -19,6 +19,9 @@ pub struct ProjectRow {
     controls_box: gtk4::Box,
     on_context_action: ActionCallback,
     on_toggled: ToggleCallback,
+    // Shared cell holding the current project name. Updated by `set_name` so
+    // captured closures can read the live name across renames via `name_cell()`.
+    name_cell: Rc<RefCell<String>>,
 }
 
 impl ProjectRow {
@@ -164,7 +167,15 @@ impl ProjectRow {
             controls_box,
             on_context_action,
             on_toggled,
+            name_cell: Rc::new(RefCell::new(name.to_string())),
         }
+    }
+
+    /// Returns a clone of the shared name cell. The cell is updated whenever
+    /// `set_name` is called, so closures that capture it see the live name
+    /// across renames.
+    pub fn name_cell(&self) -> Rc<RefCell<String>> {
+        self.name_cell.clone()
     }
 
     fn build_context_menu(_project_name: &str, on_action: &ActionCallback) -> gtk4::PopoverMenu {
@@ -263,6 +274,7 @@ impl ProjectRow {
 
     pub fn set_name(&self, name: &str) {
         self.name_label.set_label(name);
+        *self.name_cell.borrow_mut() = name.to_string();
         // Update icon initials if no custom icon
         if self
             .icon_area

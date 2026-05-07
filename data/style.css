@@ -360,6 +360,10 @@
     color: #ffffff;
 }
 
+.git-dirty image {
+    color: #d29922;
+}
+
 .git-pull-btn:hover {
     background: #e3b341;
 }

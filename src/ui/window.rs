@@ -18,7 +18,9 @@ use crate::process::pid_file::PidFile;
 use crate::ui::add_command_dialog::AddCommandDialog;
 use crate::ui::add_ssh_dialog::AddSshDialog;
 use crate::ui::command_palette::CommandPalette;
-use crate::ui::git_changes_dialog::{GitChangesDialog, commits_behind, git_fetch};
+use crate::ui::git_changes_dialog::{
+    GitChangesDialog, commits_behind, dirty_file_count, git_fetch,
+};
 use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::terminal_search::TerminalSearch;
@@ -2293,14 +2295,15 @@ impl TuxFlowWindow {
                         if let Some(dir) = dir_opt {
                             let dir = dir.clone();
                             let sb = sb_vis.clone();
-                            let (tx, rx) = std::sync::mpsc::channel::<usize>();
+                            let (tx, rx) = std::sync::mpsc::channel::<(usize, usize)>();
                             std::thread::spawn(move || {
                                 git_fetch(&dir);
-                                let _ = tx.send(commits_behind(&dir));
+                                let _ = tx.send((commits_behind(&dir), dirty_file_count(&dir)));
                             });
                             glib::idle_add_local(move || {
-                                if let Ok(behind) = rx.try_recv() {
+                                if let Ok((behind, dirty)) = rx.try_recv() {
                                     sb.set_git_pull_indicator(behind);
+                                    sb.set_git_dirty(dirty);
                                     return glib::ControlFlow::Break;
                                 }
                                 glib::ControlFlow::Continue
@@ -2308,12 +2311,14 @@ impl TuxFlowWindow {
                         }
                     } else {
                         sb_vis.set_git_pull_indicator(0);
+                        sb_vis.set_git_dirty(0);
                     }
                 }
             } else {
                 title_ref.set_label("TuxFlow");
                 sb_vis.set_git_available(false);
                 sb_vis.set_git_pull_indicator(0);
+                sb_vis.set_git_dirty(0);
             }
         });
 
@@ -2336,14 +2341,15 @@ impl TuxFlowWindow {
                         if dir.join(".git").exists() {
                             let dir = dir.clone();
                             let sb = sb_poll.clone();
-                            let (tx, rx) = std::sync::mpsc::channel::<usize>();
+                            let (tx, rx) = std::sync::mpsc::channel::<(usize, usize)>();
                             std::thread::spawn(move || {
                                 git_fetch(&dir);
-                                let _ = tx.send(commits_behind(&dir));
+                                let _ = tx.send((commits_behind(&dir), dirty_file_count(&dir)));
                             });
                             glib::idle_add_local(move || {
-                                if let Ok(behind) = rx.try_recv() {
+                                if let Ok((behind, dirty)) = rx.try_recv() {
                                     sb.set_git_pull_indicator(behind);
+                                    sb.set_git_dirty(dirty);
                                     return glib::ControlFlow::Break;
                                 }
                                 glib::ControlFlow::Continue

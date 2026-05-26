@@ -22,7 +22,15 @@ pub fn start_mcp_server(project_name: &str, project_dir: &str, bridge: McpBridge
     let path = socket_path.clone();
 
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        // Single-threaded runtime — the MCP server is one Unix-socket
+        // accept loop with rare clients. The default multi-thread runtime
+        // creates ~num_cpus worker threads + a 512-slot blocking pool, which
+        // multiplied across all loaded projects accounted for ~300 idle
+        // threads and most of tuxflow's resident memory.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime");
         rt.block_on(async move {
             let listener = match UnixListener::bind(&path) {
                 Ok(l) => l,

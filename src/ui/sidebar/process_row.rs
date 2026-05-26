@@ -30,6 +30,9 @@ pub struct ProcessRow {
     stop_button: gtk4::Button,
     on_context_action: ActionCallback,
     url: Rc<RefCell<Option<String>>>,
+    /// Menu model section that mirrors URL state in the right-click popover.
+    /// Populated eagerly because `set_url` runs before the popover is opened.
+    /// When the popover is later built, the section is wired into the model.
     browser_menu_section: gio::Menu,
 }
 
@@ -181,24 +184,41 @@ impl ProcessRow {
             }
         });
 
-        // Right-click context menu
-        let (popover, _menu, browser_section) = Self::build_context_menu(
-            name,
-            command,
-            category,
-            &on_context_action,
-            &url,
-            &action_name,
-        );
-        popover.set_parent(&container);
+        // The browser section is part of the menu model that `set_url`
+        // mutates before any right-click happens; build it eagerly so the
+        // model stays in sync, and reuse the same instance once the
+        // PopoverMenu is materialised on first right-click.
+        let browser_section = gio::Menu::new();
 
+        // Right-click context menu — built lazily on first right-click.
+        let popover_cell: Rc<RefCell<Option<gtk4::PopoverMenu>>> = Rc::new(RefCell::new(None));
         let gesture = gtk4::GestureClick::builder()
             .button(3) // right click
             .build();
-        let popover_ref = popover;
+        let popover_ref = popover_cell.clone();
+        let container_for_popover = container.clone();
+        let command_for_popover = command.to_string();
+        let category_for_popover = category.clone();
+        let on_action_for_popover = on_context_action.clone();
+        let url_for_popover = url.clone();
+        let action_name_for_popover = action_name.clone();
+        let browser_section_for_popover = browser_section.clone();
         gesture.connect_released(move |_, _, x, y| {
-            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-            popover_ref.popup();
+            let mut slot = popover_ref.borrow_mut();
+            let popover = slot.get_or_insert_with(|| {
+                let p = Self::build_context_menu(
+                    &command_for_popover,
+                    category_for_popover.clone(),
+                    &on_action_for_popover,
+                    &url_for_popover,
+                    &action_name_for_popover,
+                    &browser_section_for_popover,
+                );
+                p.set_parent(&container_for_popover);
+                p
+            });
+            popover.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.popup();
         });
         container.add_controller(gesture);
 
@@ -230,13 +250,13 @@ impl ProcessRow {
     }
 
     fn build_context_menu(
-        _process_name: &str,
         command: &str,
         category: ProcessCategory,
         on_action: &ActionCallback,
         url: &Rc<RefCell<Option<String>>>,
         action_name: &Rc<RefCell<String>>,
-    ) -> (gtk4::PopoverMenu, gio::Menu, gio::Menu) {
+        browser_section: &gio::Menu,
+    ) -> gtk4::PopoverMenu {
         let menu = gio::Menu::new();
 
         let control_section = gio::Menu::new();
@@ -249,9 +269,9 @@ impl ProcessRow {
         }
         menu.append_section(None, &control_section);
 
-        // Browser section (initially empty, items added/removed dynamically)
-        let browser_section = gio::Menu::new();
-        menu.append_section(None, &browser_section);
+        // Browser section is owned by ProcessRow so `set_url` can mutate it
+        // before the popover exists. Attach it to the menu model here.
+        menu.append_section(None, browser_section);
 
         let terminal_section = gio::Menu::new();
         terminal_section.append(Some("Edit Command"), Some("proc.edit"));
@@ -339,7 +359,7 @@ impl ProcessRow {
 
         popover.insert_action_group("proc", Some(&action_group));
 
-        (popover, menu, browser_section)
+        popover
     }
 
     pub fn set_status(&self, status: ProcessStatus) {

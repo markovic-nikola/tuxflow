@@ -142,16 +142,24 @@ impl ProjectRow {
         });
         header_row.add_controller(gesture);
 
-        // Right-click context menu
+        // Right-click context menu — built lazily on first right-click.
+        // Eager PopoverMenu construction was costing ~150 ms per project at
+        // startup; deferring keeps it off the sidebar-population hot path.
         let on_context_action: ActionCallback = Rc::new(RefCell::new(None));
-        let popover = Self::build_context_menu(name, &on_context_action);
-        popover.set_parent(&header_row);
-
+        let popover_cell: Rc<RefCell<Option<gtk4::PopoverMenu>>> = Rc::new(RefCell::new(None));
         let right_click = gtk4::GestureClick::builder().button(3).build();
-        let popover_ref = popover;
+        let popover_ref = popover_cell.clone();
+        let header_for_popover = header_row.clone();
+        let on_action_for_popover = on_context_action.clone();
         right_click.connect_released(move |_, _, x, y| {
-            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-            popover_ref.popup();
+            let mut slot = popover_ref.borrow_mut();
+            let popover = slot.get_or_insert_with(|| {
+                let p = Self::build_context_menu(&on_action_for_popover);
+                p.set_parent(&header_for_popover);
+                p
+            });
+            popover.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover.popup();
         });
         header_row.add_controller(right_click);
 
@@ -178,7 +186,7 @@ impl ProjectRow {
         self.name_cell.clone()
     }
 
-    fn build_context_menu(_project_name: &str, on_action: &ActionCallback) -> gtk4::PopoverMenu {
+    fn build_context_menu(on_action: &ActionCallback) -> gtk4::PopoverMenu {
         let menu = gio::Menu::new();
 
         let control_section = gio::Menu::new();

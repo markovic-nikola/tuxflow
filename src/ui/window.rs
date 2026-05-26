@@ -181,42 +181,56 @@ impl TuxFlowWindow {
             });
         }
 
-        // Load saved projects
+        // Load projects progressively on idle ticks so the window paints first.
+        // Each load_project call wires ~250 ms of GTK widget construction per
+        // process row; serialising 15-20 projects on the main thread before
+        // present() was costing many seconds of "blank screen" on launch.
         {
-            let saved_dirs = ws.borrow().saved_directories();
-            for dir_str in &saved_dirs {
-                let path = std::path::PathBuf::from(dir_str);
-                if path.is_dir() {
-                    Self::load_project(
-                        &ws,
-                        &sidebar,
-                        &terminal_stack,
-                        &path,
-                        &pid_file,
-                        &status_bar,
-                        &selected_process,
-                        &project_name_cells,
-                        Some(focus_gate.clone()),
-                        Some(icon_resolver.clone()),
-                    );
+            let mut queue: Vec<std::path::PathBuf> = ws
+                .borrow()
+                .saved_directories()
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_dir())
+                .collect();
+            if let Some(dir) = project_dir {
+                let dir = dir.to_path_buf();
+                if !queue.iter().any(|p| p == &dir) {
+                    queue.push(dir);
                 }
             }
-        }
-
-        // Load CLI project if given (and not already loaded from saved)
-        if let Some(dir) = project_dir {
-            Self::load_project(
-                &ws,
-                &sidebar,
-                &terminal_stack,
-                dir,
-                &pid_file,
-                &status_bar,
-                &selected_process,
-                &project_name_cells,
-                Some(focus_gate.clone()),
-                Some(icon_resolver.clone()),
-            );
+            let ws_load = ws.clone();
+            let sidebar_load = sidebar.clone();
+            let stack_load = terminal_stack.clone();
+            let pid_file_load = pid_file.clone();
+            let status_bar_load = status_bar.clone();
+            let selected_load = selected_process.clone();
+            let cells_load = project_name_cells.clone();
+            let focus_gate_load = focus_gate.clone();
+            let icon_resolver_load = icon_resolver.clone();
+            let queue_cell: Rc<RefCell<std::vec::IntoIter<std::path::PathBuf>>> =
+                Rc::new(RefCell::new(queue.into_iter()));
+            glib::idle_add_local(move || {
+                let next = queue_cell.borrow_mut().next();
+                match next {
+                    Some(path) => {
+                        Self::load_project(
+                            &ws_load,
+                            &sidebar_load,
+                            &stack_load,
+                            &path,
+                            &pid_file_load,
+                            &status_bar_load,
+                            &selected_load,
+                            &cells_load,
+                            Some(focus_gate_load.clone()),
+                            Some(icon_resolver_load.clone()),
+                        );
+                        glib::ControlFlow::Continue
+                    }
+                    None => glib::ControlFlow::Break,
+                }
+            });
         }
 
         // Wire sidebar selection → terminal switch + status bar URL update
@@ -394,18 +408,14 @@ impl TuxFlowWindow {
         );
         window.set_content(Some(&content));
 
-        // Start MCP servers for loaded projects (if enabled in settings)
-        {
-            let mcp_enabled = settings.borrow().integrations.mcp_enabled;
-            crate::mcp::bridge::set_mcp_enabled(mcp_enabled);
-            if mcp_enabled {
-                let ws_borrow = ws.borrow();
-                for project in ws_borrow.projects() {
-                    let dir_str = project.dir.to_string_lossy().to_string();
-                    Self::start_mcp_for_project(&project.manager, &project.name, &dir_str, &ws);
-                }
-            }
-        }
+        // Sync the global MCP-enabled flag so per-project startup inside
+        // `load_project` (which fires after this on idle ticks) can decide
+        // whether to spin up the server. Previously this block also looped
+        // over `ws.projects()` to start servers eagerly, but with the
+        // progressive-load change projects haven't been added to the
+        // workspace yet at this point — startup is now driven from
+        // `load_project` itself.
+        crate::mcp::bridge::set_mcp_enabled(settings.borrow().integrations.mcp_enabled);
 
         // Start resource monitoring
         {
@@ -757,6 +767,7 @@ impl TuxFlowWindow {
             let project_name = project.name.clone();
             let manager = project.manager.clone();
             let icon_path = project.icon_path.clone();
+            let dir_str = project.dir.to_string_lossy().to_string();
             let saved_expanded = ws_mut.is_project_expanded(&project_name);
             drop(ws_mut);
             Self::wire_project(
@@ -774,6 +785,9 @@ impl TuxFlowWindow {
                 focus_gate,
                 icon_resolver,
             );
+            if crate::mcp::bridge::is_mcp_enabled() {
+                Self::start_mcp_for_project(&manager, &project_name, &dir_str, ws);
+            }
         }
     }
 
@@ -834,6 +848,7 @@ impl TuxFlowWindow {
                     let project_name = project.name.clone();
                     let manager = project.manager.clone();
                     let icon_path = project.icon_path.clone();
+                    let dir_str = project.dir.to_string_lossy().to_string();
                     let saved_expanded = ws_mut.is_project_expanded(&project_name);
                     drop(ws_mut);
                     Self::wire_project(
@@ -851,6 +866,9 @@ impl TuxFlowWindow {
                         focus_gate.clone(),
                         icon_resolver.clone(),
                     );
+                    if crate::mcp::bridge::is_mcp_enabled() {
+                        Self::start_mcp_for_project(&manager, &project_name, &dir_str, &ws);
+                    }
                     *last_selected_project.borrow_mut() = Some(project_name.clone());
                     sidebar.expand_project(&project_name);
                 }
@@ -900,6 +918,7 @@ impl TuxFlowWindow {
                         let project_name = project.name.clone();
                         let manager = project.manager.clone();
                         let icon_path = project.icon_path.clone();
+                        let dir_str = project.dir.to_string_lossy().to_string();
                         let saved_expanded = ws_mut.is_project_expanded(&project_name);
                         drop(ws_mut);
                         Self::wire_project(
@@ -917,6 +936,9 @@ impl TuxFlowWindow {
                             focus_gate.clone(),
                             icon_resolver.clone(),
                         );
+                        if crate::mcp::bridge::is_mcp_enabled() {
+                            Self::start_mcp_for_project(&manager, &project_name, &dir_str, &ws);
+                        }
                         *last_selected_project.borrow_mut() = Some(project_name.clone());
                         sidebar.expand_project(&project_name);
                     }

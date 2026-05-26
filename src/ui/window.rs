@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -645,6 +645,22 @@ impl TuxFlowWindow {
                     .and_then(|name| name.split_once("::").map(|(proj, _)| proj.to_string()))
             })
             .or_else(|| sidebar.last_expanded_project())
+    }
+
+    fn refresh_status_bar_git(dir: PathBuf, status_bar: Rc<StatusBar>, do_fetch: bool) {
+        let (tx, rx) = tokio::sync::oneshot::channel::<(usize, usize)>();
+        std::thread::spawn(move || {
+            if do_fetch {
+                git_fetch(&dir);
+            }
+            let _ = tx.send((commits_behind(&dir), dirty_file_count(&dir)));
+        });
+        glib::spawn_future_local(async move {
+            if let Ok((behind, dirty)) = rx.await {
+                status_bar.set_git_pull_indicator(behind);
+                status_bar.set_git_dirty(dirty);
+            }
+        });
     }
 
     fn pick_project(
@@ -2259,13 +2275,32 @@ impl TuxFlowWindow {
         let stack_git = terminal_stack.clone();
         let last_proj_git = last_selected_project.clone();
         let sidebar_git = sidebar.clone();
+        let status_bar_git = status_bar.clone();
         status_bar.connect_git_changes(move |btn| {
             let project_name =
                 Self::resolve_active_project(&stack_git, &last_proj_git, &sidebar_git);
             if let Some(proj_name) = project_name {
                 let ws_borrow = ws_git.borrow();
                 if let Some(dir) = ws_borrow.get_project_dir(&proj_name) {
-                    GitChangesDialog::show(btn, &dir);
+                    // Refresh the badge as the dialog opens — cheap, no fetch.
+                    Self::refresh_status_bar_git(dir.clone(), status_bar_git.clone(), false);
+
+                    let cb = {
+                        let ws = ws_git.clone();
+                        let sb = status_bar_git.clone();
+                        let stack = stack_git.clone();
+                        let last_proj = last_proj_git.clone();
+                        let sidebar = sidebar_git.clone();
+                        move || {
+                            if let Some(proj) =
+                                Self::resolve_active_project(&stack, &last_proj, &sidebar)
+                                && let Some(dir) = ws.borrow().get_project_dir(&proj)
+                            {
+                                Self::refresh_status_bar_git(dir, sb.clone(), true);
+                            }
+                        }
+                    };
+                    GitChangesDialog::show(btn, &dir, cb);
                 }
             }
         });
@@ -2293,21 +2328,7 @@ impl TuxFlowWindow {
                     sb_vis.set_git_available(has_git);
                     if has_git {
                         if let Some(dir) = dir_opt {
-                            let dir = dir.clone();
-                            let sb = sb_vis.clone();
-                            let (tx, rx) = std::sync::mpsc::channel::<(usize, usize)>();
-                            std::thread::spawn(move || {
-                                git_fetch(&dir);
-                                let _ = tx.send((commits_behind(&dir), dirty_file_count(&dir)));
-                            });
-                            glib::idle_add_local(move || {
-                                if let Ok((behind, dirty)) = rx.try_recv() {
-                                    sb.set_git_pull_indicator(behind);
-                                    sb.set_git_dirty(dirty);
-                                    return glib::ControlFlow::Break;
-                                }
-                                glib::ControlFlow::Continue
-                            });
+                            Self::refresh_status_bar_git(dir.clone(), sb_vis.clone(), true);
                         }
                     } else {
                         sb_vis.set_git_pull_indicator(0);
@@ -2339,21 +2360,11 @@ impl TuxFlowWindow {
                     let ws_borrow = ws_poll.borrow();
                     if let Some(dir) = ws_borrow.get_project_dir(&proj_name) {
                         if dir.join(".git").exists() {
-                            let dir = dir.clone();
-                            let sb = sb_poll.clone();
-                            let (tx, rx) = std::sync::mpsc::channel::<(usize, usize)>();
-                            std::thread::spawn(move || {
-                                git_fetch(&dir);
-                                let _ = tx.send((commits_behind(&dir), dirty_file_count(&dir)));
-                            });
-                            glib::idle_add_local(move || {
-                                if let Ok((behind, dirty)) = rx.try_recv() {
-                                    sb.set_git_pull_indicator(behind);
-                                    sb.set_git_dirty(dirty);
-                                    return glib::ControlFlow::Break;
-                                }
-                                glib::ControlFlow::Continue
-                            });
+                            TuxFlowWindow::refresh_status_bar_git(
+                                dir.clone(),
+                                sb_poll.clone(),
+                                true,
+                            );
                         }
                     }
                 }

@@ -4,7 +4,8 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::LazyLock;
-use std::sync::mpsc;
+
+use tokio::sync::oneshot;
 
 use adw::prelude::*;
 use gtk4::glib;
@@ -236,23 +237,40 @@ fn load_diff_for_file(project_dir: &Path, file: &ChangedFile) -> DiffResult {
             .output()
     };
 
+    // Cap diff text before highlighting. Minified files produce one giant
+    // line that blows past the 5000-line guard, then locks the main thread
+    // inside apply_styling's per-token iter_at_offset walks. The byte cap
+    // is the real guard; the line cap handles ordinary huge diffs.
+    const MAX_DIFF_BYTES: usize = 256 * 1024;
+    const MAX_DIFF_LINES: usize = 5000;
+
     let text = match output {
         Ok(o) => {
             let raw = String::from_utf8_lossy(&o.stdout);
             // Strip diff header lines and hunk headers (@@)
-            let text: String = raw
+            let mut text: String = raw
                 .lines()
                 .skip_while(|l| !l.starts_with("@@"))
                 .filter(|l| !l.starts_with("@@"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let lines: Vec<&str> = text.lines().collect();
-            if lines.len() > 5000 {
-                let mut truncated: String = lines[..5000].join("\n");
-                truncated.push_str("\n\n... (truncated — diff exceeds 5000 lines)");
-                truncated
-            } else {
+            if text.len() > MAX_DIFF_BYTES {
+                let mut cut = MAX_DIFF_BYTES;
+                while cut > 0 && !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                text.truncate(cut);
+                text.push_str("\n\n... (truncated — diff exceeds 256 KB)");
                 text
+            } else {
+                let lines: Vec<&str> = text.lines().collect();
+                if lines.len() > MAX_DIFF_LINES {
+                    let mut truncated: String = lines[..MAX_DIFF_LINES].join("\n");
+                    truncated.push_str("\n\n... (truncated — diff exceeds 5000 lines)");
+                    truncated
+                } else {
+                    text
+                }
             }
         }
         Err(_) => String::from("Failed to load diff"),
@@ -394,7 +412,13 @@ fn apply_styling(buffer: &gtk4::TextBuffer, result: &DiffResult) {
 pub struct GitChangesDialog;
 
 impl GitChangesDialog {
-    pub fn show(parent: &impl IsA<gtk4::Widget>, project_dir: &Path) {
+    pub fn show(
+        parent: &impl IsA<gtk4::Widget>,
+        project_dir: &Path,
+        on_git_state_changed: impl Fn() + 'static,
+    ) {
+        let on_changed: Rc<dyn Fn()> = Rc::new(on_git_state_changed);
+
         // Match the parent window size
         let (w, h) = parent
             .root()
@@ -590,20 +614,18 @@ impl GitChangesDialog {
             let dir_init = dir.clone();
             let push_btn_init = push_btn.clone();
             let pull_btn_init = pull_btn.clone();
-            let (tx, rx) = mpsc::channel::<(usize, usize)>();
+            let (tx, rx) = oneshot::channel::<(usize, usize)>();
             std::thread::spawn(move || {
                 git_fetch(&dir_init);
                 let ahead = commits_ahead(&dir_init);
                 let behind = commits_behind(&dir_init);
                 let _ = tx.send((ahead, behind));
             });
-            glib::idle_add_local(move || {
-                if let Ok((ahead, behind)) = rx.try_recv() {
+            glib::spawn_future_local(async move {
+                if let Ok((ahead, behind)) = rx.await {
                     update_push_button(&push_btn_init, ahead);
                     update_pull_button(&pull_btn_init, behind);
-                    return glib::ControlFlow::Break;
                 }
-                glib::ControlFlow::Continue
             });
         }
 
@@ -633,23 +655,21 @@ impl GitChangesDialog {
                     Self::clear_tags(&buffer);
                     buffer.set_text("Loading...");
 
-                    let (tx, rx) = mpsc::channel::<DiffResult>();
+                    let (tx, rx) = oneshot::channel::<DiffResult>();
                     std::thread::spawn(move || {
                         let result = load_diff_for_file(&dir, &file);
                         let _ = tx.send(result);
                     });
 
                     let buffer_ref = buffer.clone();
-                    glib::idle_add_local(move || {
-                        if let Ok(result) = rx.try_recv() {
+                    glib::spawn_future_local(async move {
+                        if let Ok(result) = rx.await {
                             if result.text.is_empty() {
                                 buffer_ref.set_text("(no diff available)");
                             } else {
                                 apply_styling(&buffer_ref, &result);
                             }
-                            return glib::ControlFlow::Break;
                         }
-                        glib::ControlFlow::Continue
                     });
                 }
             }
@@ -688,6 +708,7 @@ impl GitChangesDialog {
         let dialog_commit = dialog.clone();
         let buffer_commit = commit_textview.buffer();
         let push_btn_commit = push_btn.clone();
+        let on_changed_commit = on_changed.clone();
         commit_btn.connect_clicked(move |btn| {
             let msg = {
                 let buf = &buffer_commit;
@@ -705,7 +726,7 @@ impl GitChangesDialog {
             let buf = buffer_commit.clone();
             let pb = push_btn_commit.clone();
             let cb = btn.clone();
-            let (tx, rx) = mpsc::channel::<Result<usize, String>>();
+            let (tx, rx) = oneshot::channel::<Result<usize, String>>();
             std::thread::spawn(move || {
                 if let Err(e) = run_git_command(&dir, &["add", "-A"]) {
                     let _ = tx.send(Err(e));
@@ -717,22 +738,21 @@ impl GitChangesDialog {
                 }
                 let _ = tx.send(Ok(commits_ahead(&dir)));
             });
-            glib::idle_add_local(move || {
-                if let Ok(result) = rx.try_recv() {
-                    cb.set_label("Commit");
-                    match result {
-                        Ok(ahead) => {
-                            buf.set_text("");
-                            update_push_button(&pb, ahead);
-                        }
-                        Err(err) => {
-                            cb.set_sensitive(true);
-                            show_error_dialog(&dlg, "Commit Failed", &err);
-                        }
+            let on_changed = on_changed_commit.clone();
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.await else { return };
+                cb.set_label("Commit");
+                match result {
+                    Ok(ahead) => {
+                        buf.set_text("");
+                        update_push_button(&pb, ahead);
+                        on_changed();
                     }
-                    return glib::ControlFlow::Break;
+                    Err(err) => {
+                        cb.set_sensitive(true);
+                        show_error_dialog(&dlg, "Commit Failed", &err);
+                    }
                 }
-                glib::ControlFlow::Continue
             });
         });
 
@@ -763,6 +783,7 @@ impl GitChangesDialog {
         let dialog_push = dialog.clone();
         let push_btn_push = push_btn.clone();
         let pushing_click = pushing.clone();
+        let on_changed_push = on_changed.clone();
         push_btn.connect_clicked(move |btn| {
             pushing_click.set(true);
             btn.set_label("Pushing...");
@@ -770,7 +791,7 @@ impl GitChangesDialog {
             let dir = dir_push.clone();
             let dlg = dialog_push.clone();
             let pb = push_btn_push.clone();
-            let (tx, rx) = mpsc::channel::<Result<usize, String>>();
+            let (tx, rx) = oneshot::channel::<Result<usize, String>>();
             std::thread::spawn(move || {
                 // Try normal push first; if no upstream, push with -u
                 let result = match run_git_command(&dir, &["push"]) {
@@ -799,21 +820,20 @@ impl GitChangesDialog {
                 }
             });
             let pushing_done = pushing_click.clone();
-            glib::idle_add_local(move || {
-                if let Ok(result) = rx.try_recv() {
-                    pushing_done.set(false);
-                    match result {
-                        Ok(_) => {
-                            dlg.close();
-                        }
-                        Err(err) => {
-                            update_push_button(&pb, 1); // re-enable on error
-                            show_error_dialog(&dlg, "Push Failed", &err);
-                        }
+            let on_changed = on_changed_push.clone();
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.await else { return };
+                pushing_done.set(false);
+                match result {
+                    Ok(_) => {
+                        on_changed();
+                        dlg.close();
                     }
-                    return glib::ControlFlow::Break;
+                    Err(err) => {
+                        update_push_button(&pb, 1); // re-enable on error
+                        show_error_dialog(&dlg, "Push Failed", &err);
+                    }
                 }
-                glib::ControlFlow::Continue
             });
         });
 
@@ -828,6 +848,7 @@ impl GitChangesDialog {
         let stack_pull = content_stack.clone();
         let diff_view_pull = diff_view.clone();
         let files_store_pull = files_store.clone();
+        let on_changed_pull = on_changed.clone();
         pull_btn.connect_clicked(move |btn| {
             pulling_click.set(true);
             btn.set_label("Pulling...");
@@ -840,7 +861,7 @@ impl GitChangesDialog {
             let cs = stack_pull.clone();
             let dv = diff_view_pull.clone();
             let fs = files_store_pull.clone();
-            let (tx, rx) = mpsc::channel::<Result<(usize, usize), String>>();
+            let (tx, rx) = oneshot::channel::<Result<(usize, usize), String>>();
             std::thread::spawn(move || {
                 let result = run_git_command(&dir, &["pull", "--ff-only"]).or_else(|e| {
                     // Transient: initial pull occasionally fails with "no such ref
@@ -869,29 +890,28 @@ impl GitChangesDialog {
             });
             let pulling_done = pulling_click.clone();
             let dir_reload = dir_pull.clone();
-            glib::idle_add_local(move || {
-                if let Ok(result) = rx.try_recv() {
-                    pulling_done.set(false);
-                    match result {
-                        Ok((ahead, behind)) => {
-                            update_push_button(&pb_push, ahead);
-                            update_pull_button(&pb_pull, behind);
-                            GitChangesDialog::load_files(
-                                dir_reload.clone(),
-                                lb.clone(),
-                                cs.clone(),
-                                dv.clone(),
-                                fs.clone(),
-                            );
-                        }
-                        Err(err) => {
-                            pb_pull.set_sensitive(true);
-                            show_error_dialog(&dlg, "Pull Failed", &err);
-                        }
+            let on_changed = on_changed_pull.clone();
+            glib::spawn_future_local(async move {
+                let Ok(result) = rx.await else { return };
+                pulling_done.set(false);
+                match result {
+                    Ok((ahead, behind)) => {
+                        update_push_button(&pb_push, ahead);
+                        update_pull_button(&pb_pull, behind);
+                        GitChangesDialog::load_files(
+                            dir_reload.clone(),
+                            lb.clone(),
+                            cs.clone(),
+                            dv.clone(),
+                            fs.clone(),
+                        );
+                        on_changed();
                     }
-                    return glib::ControlFlow::Break;
+                    Err(err) => {
+                        pb_pull.set_sensitive(true);
+                        show_error_dialog(&dlg, "Pull Failed", &err);
+                    }
                 }
-                glib::ControlFlow::Continue
             });
         });
 
@@ -937,7 +957,7 @@ impl GitChangesDialog {
             let fetch_tick = fetch_counter.get();
             fetch_counter.set(fetch_tick + 1);
 
-            let (tx, rx) = mpsc::channel::<(u64, usize, usize, Option<String>)>();
+            let (tx, rx) = oneshot::channel::<(u64, usize, usize, Option<String>)>();
             std::thread::spawn(move || {
                 // Fetch every ~30 seconds (15 ticks * 2 seconds)
                 if fetch_tick % 15 == 0 {
@@ -951,37 +971,36 @@ impl GitChangesDialog {
             });
 
             let dir2 = poll_dir.clone();
-            glib::idle_add_local(move || {
+            glib::spawn_future_local(async move {
+                let Ok((hash, ahead, behind, branch)) = rx.await else {
+                    return;
+                };
                 if !alive_ref.get() {
-                    return glib::ControlFlow::Break;
+                    return;
                 }
-                if let Ok((hash, ahead, behind, branch)) = rx.try_recv() {
-                    if !is_pushing.get() {
-                        update_push_button(&pb, ahead);
-                    }
-                    if !is_pulling.get() {
-                        update_pull_button(&pl, behind);
-                    }
-                    if let Some(name) = branch {
-                        let new_text = format!("⎇ {name}");
-                        if bl.label().as_str() != new_text {
-                            bl.set_label(&new_text);
-                        }
-                    }
-                    let prev = hash_ref.get();
-                    hash_ref.set(hash);
-                    if prev != 0 && hash != prev {
-                        GitChangesDialog::load_files(
-                            dir2.clone(),
-                            lb.clone(),
-                            cs.clone(),
-                            dv.clone(),
-                            fs.clone(),
-                        );
-                    }
-                    return glib::ControlFlow::Break;
+                if !is_pushing.get() {
+                    update_push_button(&pb, ahead);
                 }
-                glib::ControlFlow::Continue
+                if !is_pulling.get() {
+                    update_pull_button(&pl, behind);
+                }
+                if let Some(name) = branch {
+                    let new_text = format!("⎇ {name}");
+                    if bl.label().as_str() != new_text {
+                        bl.set_label(&new_text);
+                    }
+                }
+                let prev = hash_ref.get();
+                hash_ref.set(hash);
+                if prev != 0 && hash != prev {
+                    GitChangesDialog::load_files(
+                        dir2.clone(),
+                        lb.clone(),
+                        cs.clone(),
+                        dv.clone(),
+                        fs.clone(),
+                    );
+                }
             });
 
             glib::ControlFlow::Continue
@@ -1011,41 +1030,38 @@ impl GitChangesDialog {
         diff_view: gtk4::TextView,
         files_store: std::rc::Rc<std::cell::RefCell<Vec<ChangedFile>>>,
     ) {
-        let (tx, rx) = mpsc::channel::<Vec<ChangedFile>>();
+        let (tx, rx) = oneshot::channel::<Vec<ChangedFile>>();
 
         std::thread::spawn(move || {
             let files = load_changed_files(&project_dir);
             let _ = tx.send(files);
         });
 
-        glib::idle_add_local(move || {
-            if let Ok(files) = rx.try_recv() {
-                // Clear existing rows
-                while let Some(child) = listbox.first_child() {
-                    listbox.remove(&child);
-                }
+        glib::spawn_future_local(async move {
+            let Ok(files) = rx.await else { return };
 
-                diff_view.buffer().set_text("");
-
-                if files.is_empty() {
-                    content_stack.set_visible_child_name("empty");
-                } else {
-                    for file in &files {
-                        let row_content = build_file_row(file);
-                        listbox.append(&row_content);
-                    }
-                    *files_store.borrow_mut() = files;
-                    content_stack.set_visible_child_name("content");
-
-                    // Auto-select first file
-                    if let Some(first) = listbox.row_at_index(0) {
-                        listbox.select_row(Some(&first));
-                    }
-                }
-
-                return glib::ControlFlow::Break;
+            // Clear existing rows
+            while let Some(child) = listbox.first_child() {
+                listbox.remove(&child);
             }
-            glib::ControlFlow::Continue
+
+            diff_view.buffer().set_text("");
+
+            if files.is_empty() {
+                content_stack.set_visible_child_name("empty");
+            } else {
+                for file in &files {
+                    let row_content = build_file_row(file);
+                    listbox.append(&row_content);
+                }
+                *files_store.borrow_mut() = files;
+                content_stack.set_visible_child_name("content");
+
+                // Auto-select first file
+                if let Some(first) = listbox.row_at_index(0) {
+                    listbox.select_row(Some(&first));
+                }
+            }
         });
     }
 }

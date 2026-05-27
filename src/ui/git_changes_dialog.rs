@@ -283,6 +283,16 @@ fn load_diff_for_file(project_dir: &Path, file: &ChangedFile) -> DiffResult {
 fn highlight_diff(text: &str, file_path: &str) -> Vec<(usize, usize, usize, String)> {
     use syntect::easy::HighlightLines;
 
+    // Minified files (bundled JS/CSS) have one logical line that's tens or
+    // hundreds of KB long. syntect emits thousands of style spans for such a
+    // line, and the downstream tag application on the main thread chokes on
+    // applying them. Skip highlighting entirely — `+`/`-` background bands
+    // from apply_styling still convey the diff.
+    const MAX_HIGHLIGHTABLE_LINE: usize = 2000;
+    if text.lines().any(|l| l.len() > MAX_HIGHLIGHTABLE_LINE) {
+        return Vec::new();
+    }
+
     let ss = &*SYNTAX_SET;
     let ts = &*THEME_SET;
     let theme = &ts.themes["base16-eighties.dark"];
@@ -363,33 +373,44 @@ fn apply_styling(buffer: &gtk4::TextBuffer, result: &DiffResult) {
     );
     buffer.set_text(&result.text);
 
-    // Build line start offsets for syntax highlight positioning
-    let mut line_starts = Vec::new();
-    let mut offset = 0;
-    for line in result.text.lines() {
-        line_starts.push(offset);
-        offset += line.len() + 1; // +1 for newline
+    // Cache an iter at the start of each line by walking the buffer once.
+    // The previous version called `buffer.iter_at_offset(abs)` per tag span,
+    // which is O(buffer_size) each — a few thousand spans against a 100 KB+
+    // buffer froze the main loop. Walking once and cloning/advancing is
+    // O(buffer + spans).
+    let line_count = result.text.lines().count();
+    let mut line_start_iters: Vec<gtk4::TextIter> = Vec::with_capacity(line_count);
+    let mut walker = buffer.start_iter();
+    for _ in 0..line_count {
+        line_start_iters.push(walker.clone());
+        if !walker.forward_line() {
+            break;
+        }
     }
 
-    // Apply diff background tags
+    // Apply diff background tags by cloning each cached line-start iter and
+    // advancing to line end (cheap — O(line length)).
     for (line_idx, line) in result.text.lines().enumerate() {
-        let line_start = line_starts[line_idx];
-        let line_end = line_start + line.len();
-        let start_iter = buffer.iter_at_offset(line_start as i32);
-        let end_iter = buffer.iter_at_offset(line_end as i32);
+        let Some(start) = line_start_iters.get(line_idx) else {
+            break;
+        };
+        let mut end = start.clone();
+        end.forward_to_line_end();
 
         if line.starts_with('+') && !line.starts_with("+++") {
-            buffer.apply_tag_by_name("addition", &start_iter, &end_iter);
+            buffer.apply_tag_by_name("addition", start, &end);
         } else if line.starts_with('-') && !line.starts_with("---") {
-            buffer.apply_tag_by_name("deletion", &start_iter, &end_iter);
+            buffer.apply_tag_by_name("deletion", start, &end);
         }
     }
 
-    // Apply syntax foreground tags
+    // Apply syntax foreground tags via short forward_chars hops from the
+    // cached line-start iter. (Note: this treats syntect's byte offsets as
+    // char offsets — matches prior behavior, correct for ASCII source.)
     for (line_idx, byte_off, len, color) in &result.highlights {
-        if *line_idx >= line_starts.len() {
+        let Some(line_start) = line_start_iters.get(*line_idx) else {
             continue;
-        }
+        };
         let tag_name = format!("fg_{color}");
         if tag_table.lookup(&tag_name).is_none() {
             tag_table.add(
@@ -399,13 +420,11 @@ fn apply_styling(buffer: &gtk4::TextBuffer, result: &DiffResult) {
                     .build(),
             );
         }
-        let abs_start = line_starts[*line_idx] + byte_off;
-        let abs_end = abs_start + len;
-        buffer.apply_tag_by_name(
-            &tag_name,
-            &buffer.iter_at_offset(abs_start as i32),
-            &buffer.iter_at_offset(abs_end as i32),
-        );
+        let mut span_start = line_start.clone();
+        span_start.forward_chars(*byte_off as i32);
+        let mut span_end = span_start.clone();
+        span_end.forward_chars(*len as i32);
+        buffer.apply_tag_by_name(&tag_name, &span_start, &span_end);
     }
 }
 

@@ -345,6 +345,12 @@ impl TuxFlowWindow {
             auto_hide_for_cb.set(enabled);
         });
 
+        // Toggle the sidebar's Ctrl+N keybind hints live when the setting changes
+        let sidebar_for_keybind = sidebar.clone();
+        let on_keybind_hints_changed: Rc<dyn Fn(bool)> = Rc::new(move |enabled: bool| {
+            sidebar_for_keybind.set_show_keybind_hints(enabled);
+        });
+
         // Build theme-change callback that applies to all existing terminals
         let ws_for_theme = ws.clone();
         let on_terminal_theme_changed: Rc<dyn Fn(&str)> = Rc::new(move |theme_name: &str| {
@@ -396,6 +402,7 @@ impl TuxFlowWindow {
             &project_name_cells,
             &on_single_expand_changed,
             &on_auto_hide_changed,
+            &on_keybind_hints_changed,
             &on_terminal_theme_changed,
             &on_font_changed,
             &on_resource_thresholds_changed,
@@ -1376,6 +1383,7 @@ impl TuxFlowWindow {
         project_name_cells: &ProjectNameCells,
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
+        on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
@@ -2067,6 +2075,7 @@ impl TuxFlowWindow {
             sidebar,
             on_single_expand_changed,
             on_auto_hide_changed,
+            on_keybind_hints_changed,
             on_terminal_theme_changed,
             on_font_changed,
             on_resource_thresholds_changed,
@@ -2443,6 +2452,7 @@ impl TuxFlowWindow {
             sidebar,
             on_single_expand_changed,
             on_auto_hide_changed,
+            on_keybind_hints_changed,
             on_terminal_theme_changed,
             on_font_changed,
             on_resource_thresholds_changed,
@@ -2468,6 +2478,7 @@ impl TuxFlowWindow {
         sidebar: &Rc<ProjectList>,
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
+        on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
@@ -2491,6 +2502,7 @@ impl TuxFlowWindow {
         let sidebar_ref = sidebar.clone();
         let single_expand_cb = on_single_expand_changed.clone();
         let auto_hide_cb = on_auto_hide_changed.clone();
+        let keybind_hints_cb = on_keybind_hints_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
         let thresh_cb = on_resource_thresholds_changed.clone();
@@ -2566,6 +2578,7 @@ impl TuxFlowWindow {
                             &window_ref,
                             Some(single_expand_cb.clone()),
                             Some(auto_hide_cb.clone()),
+                            Some(keybind_hints_cb.clone()),
                             Some(theme_cb.clone()),
                             Some(font_cb.clone()),
                             Some(thresh_cb.clone()),
@@ -2755,6 +2768,7 @@ impl TuxFlowWindow {
         sidebar: &Rc<ProjectList>,
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
+        on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
@@ -2796,6 +2810,7 @@ impl TuxFlowWindow {
         let window_ref = window.clone();
         let single_expand_cb = on_single_expand_changed.clone();
         let auto_hide_cb = on_auto_hide_changed.clone();
+        let keybind_hints_cb = on_keybind_hints_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
         let thresh_cb = on_resource_thresholds_changed.clone();
@@ -2805,6 +2820,7 @@ impl TuxFlowWindow {
                 &window_ref,
                 Some(single_expand_cb.clone()),
                 Some(auto_hide_cb.clone()),
+                Some(keybind_hints_cb.clone()),
                 Some(theme_cb.clone()),
                 Some(font_cb.clone()),
                 Some(thresh_cb.clone()),

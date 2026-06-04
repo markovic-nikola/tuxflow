@@ -21,6 +21,7 @@ pub struct ProcessRow {
     action_name: Rc<RefCell<String>>,
     /// Shared qualified name (project::process) for context actions.
     pub qualified_name: Rc<RefCell<String>>,
+    keybind_label: gtk4::Label,
     cpu_label: gtk4::Label,
     memory_label: gtk4::Label,
     port_label: gtk4::Label,
@@ -154,6 +155,14 @@ impl ProcessRow {
             .build();
         container.append(&stop_button);
 
+        // Ctrl+N shortcut hint at the right end (shown for the first 9 running
+        // processes, hidden on hover so the action buttons take its place).
+        let keybind_label = gtk4::Label::builder()
+            .css_classes(["caption", "dim-label", "process-keybind"])
+            .visible(false)
+            .build();
+        container.append(&keybind_label);
+
         let on_context_action: ActionCallback = Rc::new(RefCell::new(None));
         let action_name: Rc<RefCell<String>> = Rc::new(RefCell::new(name.to_string()));
 
@@ -236,6 +245,7 @@ impl ProcessRow {
             name_label,
             action_name,
             qualified_name: Rc::new(RefCell::new(String::new())),
+            keybind_label,
             cpu_label,
             memory_label,
             port_label,
@@ -456,6 +466,17 @@ impl ProcessRow {
                 }
                 self.port_label.set_visible(false);
             }
+        }
+    }
+
+    /// Show the "Ctrl+N" shortcut hint, or hide it when `n` is `None`.
+    pub fn set_keybind(&self, n: Option<usize>) {
+        match n {
+            Some(n) => {
+                self.keybind_label.set_label(&format!("Ctrl+{n}"));
+                self.keybind_label.set_visible(true);
+            }
+            None => self.keybind_label.set_visible(false),
         }
     }
 

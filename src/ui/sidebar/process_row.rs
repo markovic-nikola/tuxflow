@@ -133,35 +133,52 @@ impl ProcessRow {
             }
         });
 
-        // Action buttons (visible on hover via CSS)
+        // Right-end cluster: the action buttons and the Ctrl+N keybind hint
+        // share the same slot via an Overlay so neither reserves separate width
+        // (which would squeeze the name) and the buttons don't shift on hover.
+        // Both the button box and the hint are right-aligned so they sit in the
+        // exact same place — at rest the hint shows, on hover (CSS) the hint
+        // fades out and the buttons fade in.
+        let actions_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        actions_box.set_halign(gtk4::Align::End);
+
         let play_button = gtk4::Button::builder()
             .icon_name("media-playback-start-symbolic")
             .tooltip_text(command)
             .css_classes(["flat", "circular", "process-play-btn", "btn-play"])
             .build();
-        container.append(&play_button);
+        actions_box.append(&play_button);
 
         let restart_button = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
             .tooltip_text("Restart")
             .css_classes(["flat", "circular", "process-play-btn"])
             .build();
-        container.append(&restart_button);
+        actions_box.append(&restart_button);
 
         let stop_button = gtk4::Button::builder()
             .icon_name("media-playback-stop-symbolic")
             .tooltip_text("Stop")
             .css_classes(["flat", "circular", "process-play-btn", "btn-stop"])
             .build();
-        container.append(&stop_button);
+        actions_box.append(&stop_button);
 
-        // Ctrl+N shortcut hint at the right end (shown for the first 9 running
-        // processes, hidden on hover so the action buttons take its place).
+        // Ctrl+N shortcut hint (shown for the first 9 running processes).
         let keybind_label = gtk4::Label::builder()
             .css_classes(["caption", "dim-label", "process-keybind"])
+            .halign(gtk4::Align::End)
+            .valign(gtk4::Align::Center)
             .visible(false)
             .build();
-        container.append(&keybind_label);
+
+        let actions_overlay = gtk4::Overlay::new();
+        actions_overlay.set_halign(gtk4::Align::End);
+        actions_overlay.set_child(Some(&actions_box));
+        actions_overlay.add_overlay(&keybind_label);
+        // Size the overlay to the action buttons only, so the keybind hint
+        // never reserves extra width and squeezes the name label.
+        actions_overlay.set_measure_overlay(&keybind_label, false);
+        container.append(&actions_overlay);
 
         let on_context_action: ActionCallback = Rc::new(RefCell::new(None));
         let action_name: Rc<RefCell<String>> = Rc::new(RefCell::new(name.to_string()));

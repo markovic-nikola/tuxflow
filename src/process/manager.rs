@@ -489,6 +489,23 @@ impl ProcessManager {
             .collect()
     }
 
+    /// Running process names in sidebar visual order: grouped by category
+    /// (Agent, Command, Terminal, SSH), preserving each category's saved order.
+    /// The category order MUST stay in sync with the `categories` array in
+    /// `ui/sidebar/project_list.rs` so Ctrl+1..9 matches what the sidebar shows.
+    pub fn running_names_in_sidebar_order(&self) -> Vec<&str> {
+        use crate::config::schema::ProcessCategory::*;
+        [Agent, Command, Terminal, SSH]
+            .into_iter()
+            .flat_map(|cat| {
+                self.processes_by_category(cat)
+                    .into_iter()
+                    .filter(|p| p.status == ProcessStatus::Running)
+                    .map(|p| p.config.name.as_str())
+            })
+            .collect()
+    }
+
     pub fn total_count(&self) -> usize {
         self.processes.len()
     }

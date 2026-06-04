@@ -320,6 +320,9 @@ impl ProjectList {
         });
         project_row.header_row().add_controller(drop_target);
 
+        // Category order here defines the sidebar's visual order. Keep it in
+        // sync with `ProcessManager::running_names_in_sidebar_order` so the
+        // Ctrl+1..9 shortcuts match the order shown here.
         let categories = [
             ("AGENTS", "ai-brain-symbolic", ProcessCategory::Agent),
             ("COMMANDS", "view-list-symbolic", ProcessCategory::Command),

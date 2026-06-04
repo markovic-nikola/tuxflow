@@ -271,8 +271,11 @@ impl TuxFlowWindow {
                 let ws_idle = ws_select.clone();
                 let sb_idle = status_bar_ref.clone();
                 let proj_owned = proj.to_string();
+                let qname_owned = qname.to_string();
                 glib::idle_add_local_once(move || {
                     let ws_borrow = ws_idle.borrow();
+                    let running = is_qualified_process_running(&ws_borrow, Some(&qname_owned));
+                    sb_idle.set_process_running(running);
                     let mut global_r = 0usize;
                     let mut global_t = 0usize;
                     let mut proj_r = 0usize;
@@ -2088,13 +2091,18 @@ impl TuxFlowWindow {
             let ws_ref = ws.clone();
             let sb_ref = status_bar.clone();
             let last_proj = last_selected_project.clone();
+            let selected_ref = selected_process.clone();
             Rc::new(move || {
                 let ws_inner = ws_ref.clone();
                 let sb = sb_ref.clone();
                 let proj = last_proj.clone();
+                let selected = selected_ref.clone();
                 glib::idle_add_local_once(move || {
                     let ws_borrow = ws_inner.borrow();
                     let selected_proj = proj.borrow();
+                    let running =
+                        is_qualified_process_running(&ws_borrow, selected.borrow().as_deref());
+                    sb.set_process_running(running);
                     let mut global_r = 0usize;
                     let mut global_t = 0usize;
                     let mut proj_r = 0usize;
@@ -2440,6 +2448,10 @@ impl TuxFlowWindow {
         vbox.append(&headerbar);
         vbox.append(&split_view);
         vbox.append(status_bar.widget());
+
+        // No process is selected at startup (welcome screen) — hide the Stop button
+        // until a running process is selected.
+        status_bar.set_process_running(false);
 
         Self::setup_keyboard_shortcuts(
             window,
@@ -3413,6 +3425,28 @@ impl TuxFlowWindow {
         }
         CommandResult::Error(format!("Process '{}' not found", process_name))
     }
+}
+
+/// Whether the qualified process (`proj::proc`) is currently running.
+/// Uses the same `Running | Restarting` predicate as the sidebar rows so the
+/// status bar and the row agree on what counts as "running".
+fn is_qualified_process_running(ws: &Workspace, qname: Option<&str>) -> bool {
+    let Some(qname) = qname else {
+        return false;
+    };
+    let Some((proj, proc_name)) = qname.split_once("::") else {
+        return false;
+    };
+    let Some(project) = ws.projects().iter().find(|p| p.name == proj) else {
+        return false;
+    };
+    let Ok(mgr) = project.manager.try_borrow() else {
+        return false;
+    };
+    matches!(
+        mgr.get_process(proc_name).map(|p| p.status),
+        Some(ProcessStatus::Running | ProcessStatus::Restarting)
+    )
 }
 
 /// Set X11 WM position hints before the window is mapped, so the WM respects our position.

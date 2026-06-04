@@ -323,6 +323,13 @@ impl StatusBar {
         });
     }
 
+    /// Show the Stop button only when the selected process is running.
+    /// When no process is selected, or it is stopped/crashed, hide it —
+    /// you can't stop something that isn't running.
+    pub fn set_process_running(&self, running: bool) {
+        self.stop_btn.set_visible(running);
+    }
+
     pub fn set_git_available(&self, available: bool) {
         if let Some(parent) = self.git_btn.parent() {
             parent.set_visible(available);

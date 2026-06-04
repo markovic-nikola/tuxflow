@@ -22,6 +22,7 @@ impl SettingsWindow {
         parent: &impl IsA<gtk4::Widget>,
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
+        on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
         on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
@@ -38,6 +39,7 @@ impl SettingsWindow {
             &settings,
             on_single_expand_changed,
             on_auto_hide_changed,
+            on_keybind_hints_changed,
             on_terminal_theme_changed,
             on_font_changed,
             on_resource_thresholds_changed,
@@ -50,6 +52,7 @@ impl SettingsWindow {
         settings: &SettingsRef,
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
+        on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
         on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
@@ -68,6 +71,7 @@ impl SettingsWindow {
             settings,
             on_single_expand_changed,
             on_auto_hide_changed,
+            on_keybind_hints_changed,
             on_resource_thresholds_changed,
         );
         dialog.add(&sidebar_page);
@@ -711,6 +715,7 @@ impl SettingsWindow {
         settings: &SettingsRef,
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
+        on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
         on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
     ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
@@ -753,6 +758,22 @@ impl SettingsWindow {
             }
         });
         display_group.add(&auto_hide_row);
+
+        let keybind_hints_row = adw::SwitchRow::builder()
+            .title("Show Keybind Hints")
+            .subtitle("Show Ctrl+1..9 shortcuts on running processes in the sidebar")
+            .active(s.sidebar.show_keybind_hints)
+            .build();
+        let settings_ref = settings.clone();
+        keybind_hints_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            settings_ref.borrow_mut().sidebar.show_keybind_hints = active;
+            settings_ref.borrow().save();
+            if let Some(ref cb) = on_keybind_hints_changed {
+                cb(active);
+            }
+        });
+        display_group.add(&keybind_hints_row);
 
         drop(s);
 

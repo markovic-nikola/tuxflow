@@ -54,6 +54,9 @@ pub struct ProjectList {
     // disk on every resource-monitor tick.
     cpu_threshold_idx: Cell<u32>,
     mem_threshold_idx: Cell<u32>,
+    // Whether to show the "Ctrl+N" keybind hints on running process rows.
+    // Refreshed by `set_show_keybind_hints` when the settings dialog saves.
+    show_keybind_hints: Cell<bool>,
 }
 
 impl ProjectList {
@@ -147,6 +150,7 @@ impl ProjectList {
             selected_qname: Rc::new(RefCell::new(None)),
             cpu_threshold_idx: Cell::new(settings.sidebar.process_cpu_threshold),
             mem_threshold_idx: Cell::new(settings.sidebar.process_mem_threshold),
+            show_keybind_hints: Cell::new(settings.sidebar.show_keybind_hints),
         }
     }
 
@@ -155,6 +159,13 @@ impl ProjectList {
     pub fn set_resource_thresholds(&self, cpu_idx: u32, mem_idx: u32) {
         self.cpu_threshold_idx.set(cpu_idx);
         self.mem_threshold_idx.set(mem_idx);
+    }
+
+    /// Toggle the "Ctrl+N" keybind hints. Call from the settings dialog's save
+    /// callback to update visible rows live.
+    pub fn set_show_keybind_hints(&self, enabled: bool) {
+        self.show_keybind_hints.set(enabled);
+        self.refresh_keybind_labels();
     }
 
     pub fn set_workspace(&self, ws: &WorkspaceRef) {
@@ -1553,10 +1564,81 @@ impl ProjectList {
             .borrow_mut()
             .insert(qualified_name.to_string(), status);
         self.refresh_section_counts();
+        self.refresh_keybind_labels();
         if let Some((project_name, _)) = qualified_name.split_once("::") {
             self.refresh_project_running_state(project_name);
         }
         self.notify_counts_changed();
+    }
+
+    /// Show "Ctrl+N" hints on the first 9 running processes, in the same global
+    /// order `switch_to_nth_global` uses (workspace project order × category
+    /// order). Cleared on every other row.
+    ///
+    /// This reads only the sidebar's own state (`sections` + `process_statuses`)
+    /// and never borrows a project's `ProcessManager`. That matters because this
+    /// runs from the `on_status_change` callback, which fires while the manager
+    /// is already `borrow_mut`-ed — re-borrowing it here would panic. The section
+    /// list is already category-ordered and intra-section ordered; we only need
+    /// the workspace for the project order (project drag updates the workspace
+    /// but not the `sections` Vec), and reading `project.name` needs no manager.
+    fn refresh_keybind_labels(&self) {
+        let rows = self.process_rows.borrow();
+        for row in rows.values() {
+            row.set_keybind(None);
+        }
+
+        // Disabled by setting — leave all hints cleared.
+        if !self.show_keybind_hints.get() {
+            return;
+        }
+
+        // Project order as shown in the sidebar (workspace order). Empty when no
+        // workspace is wired yet, in which case the `sections` order is used.
+        let project_order: Vec<String> = match self.workspace.borrow().clone() {
+            Some(ws) => ws
+                .borrow()
+                .projects()
+                .iter()
+                .map(|p| p.name.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        let project_rank = |name: &str| {
+            project_order
+                .iter()
+                .position(|p| p == name)
+                .unwrap_or(usize::MAX)
+        };
+
+        let sections = self.sections.borrow();
+        let statuses = self.process_statuses.borrow();
+        let mut ordered: Vec<&SectionInfo> = sections.iter().collect();
+        ordered.sort_by_key(|s| {
+            (
+                project_rank(&s.project_name),
+                Self::section_order(&s.category_title),
+            )
+        });
+
+        let mut n = 1;
+        'outer: for section in ordered {
+            for qname in &section.process_names {
+                let running = statuses
+                    .get(qname.as_str())
+                    .is_some_and(|s| *s == ProcessStatus::Running);
+                if !running {
+                    continue;
+                }
+                if let Some(row) = rows.get(qname.as_str()) {
+                    row.set_keybind(Some(n));
+                }
+                n += 1;
+                if n > 9 {
+                    break 'outer;
+                }
+            }
+        }
     }
 
     fn section_order(category_title: &str) -> u8 {

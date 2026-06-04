@@ -3232,17 +3232,17 @@ impl TuxFlowWindow {
         last_selected_project: &Rc<RefCell<Option<String>>>,
         n: usize,
     ) {
-        let project_name = {
+        let found = {
             let ws_borrow = ws.borrow();
             let mut idx = 0;
             let mut found = None;
             for project in ws_borrow.projects() {
                 let mgr = project.manager.borrow();
-                for name in mgr.process_names() {
+                for name in mgr.running_names_in_sidebar_order() {
                     if idx == n {
                         let qname = workspace::qualified_name(&project.name, name);
                         stack.set_visible_child_name(&qname);
-                        found = Some(project.name.clone());
+                        found = Some((project.name.clone(), qname));
                         break;
                     }
                     idx += 1;
@@ -3253,7 +3253,8 @@ impl TuxFlowWindow {
             }
             found
         };
-        if let Some(name) = project_name {
+        if let Some((name, qname)) = found {
+            sidebar.select_process(&qname);
             sidebar.set_active_project(&name);
             Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &name);
         }

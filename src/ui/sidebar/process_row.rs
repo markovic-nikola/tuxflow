@@ -168,6 +168,10 @@ impl ProcessRow {
             .css_classes(["caption", "dim-label", "process-keybind"])
             .halign(gtk4::Align::End)
             .valign(gtk4::Align::Center)
+            // Decorative overlay — must not intercept clicks to the action
+            // buttons beneath it (CSS opacity:0 on hover hides it visually but
+            // would otherwise still swallow pointer events).
+            .can_target(false)
             .visible(false)
             .build();
 

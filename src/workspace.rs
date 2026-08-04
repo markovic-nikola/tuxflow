@@ -4,27 +4,116 @@ use std::rc::Rc;
 
 use crate::config::loader;
 use crate::config::projects::SavedProjects;
-use crate::config::schema::{ProcessCategory, ProcessConfig};
+use crate::config::schema::{ProcessCategory, ProcessConfig, TuxFlowConfig};
 use crate::detect::detector::{self, DetectedStack};
 use crate::process::manager::{ProcessManager, ProcessManagerRef};
+use crate::remote::ProjectLocation;
+use crate::remote::fs::{ProjectFs, SshFs};
 use crate::util::icon_detector;
 use crate::watcher::file_watcher::FileWatcher;
 
 pub struct Project {
     pub name: String,
-    pub dir: PathBuf,
+    pub location: ProjectLocation,
     pub manager: ProcessManagerRef,
     pub icon_path: Option<String>,
+    /// Whether a tuxflow.toml was found and parsed at load time.
+    pub config_loaded: bool,
     pub _file_watcher: Option<FileWatcher>,
+}
+
+impl Project {
+    /// Opaque key used for all per-project persisted state.
+    pub fn key(&self) -> String {
+        self.location.key()
+    }
+
+    /// Local directory, only for actions that operate on the local
+    /// filesystem (git UI, open-in-editor, reveal). None when remote.
+    pub fn local_dir(&self) -> Option<PathBuf> {
+        match &self.location {
+            ProjectLocation::Local(p) => Some(p.clone()),
+            ProjectLocation::Ssh { .. } => None,
+        }
+    }
 }
 
 pub struct PreparedProject {
     pub name: String,
-    pub dir: PathBuf,
-    pub dir_string: String,
+    pub location: ProjectLocation,
+    pub key: String,
     pub manager: ProcessManagerRef,
     pub stacks: Vec<DetectedStack>,
     pub config_loaded: bool,
+}
+
+/// Everything fetched from a remote host during project preparation.
+/// Produced on a worker thread (ssh round trips), consumed on the main thread.
+pub struct RemoteProbe {
+    pub config: Option<TuxFlowConfig>,
+    pub stacks: Vec<DetectedStack>,
+    /// tmux sessions alive on the host — processes still running detached
+    /// from a previous app run; the loader reattaches them.
+    pub live_sessions: Vec<String>,
+}
+
+/// Why a remote probe failed — decides whether retrying makes sense.
+#[derive(Debug, Clone)]
+pub enum ProbeError {
+    /// ssh couldn't reach or authenticate to the host. Transient: the
+    /// startup loader retries these in the background.
+    Unreachable(String),
+    /// The host answered but the project itself is bad (missing directory,
+    /// broken config). Retrying won't help.
+    Invalid(String),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(msg) | Self::Invalid(msg) => f.write_str(msg),
+        }
+    }
+}
+
+/// Probe a remote project dir over ssh: read tuxflow.toml or run stack
+/// detection. Blocking — call from a worker thread, never the GTK main thread.
+pub fn probe_remote(host: &str, dir: &str, conservative: bool) -> Result<RemoteProbe, ProbeError> {
+    match crate::remote::fs::remote_dir_exists(host, dir) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(ProbeError::Invalid(format!(
+                "No such directory on {host}: {dir}"
+            )));
+        }
+        Err(e) => return Err(ProbeError::Unreachable(e)),
+    }
+    let live_sessions = crate::remote::list_live_sessions(host);
+    let fs = SshFs::new(host, dir);
+    if let Ok(content) = fs.read_to_string("tuxflow.toml") {
+        return match loader::load_config_str(&content) {
+            Ok(config) => Ok(RemoteProbe {
+                config: Some(config),
+                stacks: Vec::new(),
+                live_sessions,
+            }),
+            Err(e) => {
+                return Err(ProbeError::Invalid(format!(
+                    "Failed to parse tuxflow.toml on {host}: {e}"
+                )));
+            }
+        };
+    }
+    let stacks = if conservative {
+        detector::detect_stacks_conservative_fs(&fs)
+    } else {
+        detector::detect_stacks_fs(&fs)
+    };
+    Ok(RemoteProbe {
+        config: None,
+        stacks,
+        live_sessions,
+    })
 }
 
 pub type WorkspaceRef = Rc<RefCell<Workspace>>;
@@ -69,45 +158,13 @@ impl Workspace {
     }
 
     fn prepare_project_inner(&mut self, dir: &Path, conservative: bool) -> Option<PreparedProject> {
-        let dir_str = dir.to_string_lossy().to_string();
-        if self
-            .projects
-            .iter()
-            .any(|p| p.dir.to_string_lossy() == dir_str)
-        {
-            log::info!("Project already loaded: {}", dir.display());
-            return None;
-        }
-
-        let manager = ProcessManager::new();
-        let mut project_name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "project".to_string());
-
-        let dir_string = dir.to_string_lossy().to_string();
-
-        if let Some(custom_name) = self.saved.get_name(&dir_string) {
-            project_name = custom_name.clone();
-        }
-
-        let mut config_loaded = false;
+        let mut config = None;
         let mut stacks = Vec::new();
 
         if let Some(config_path) = loader::find_config(dir) {
             match loader::load_config(&config_path) {
-                Ok(config) => {
-                    if self.saved.get_name(&dir_string).is_none() {
-                        project_name = config.project.name.clone();
-                    }
-                    let mut mgr = manager.borrow_mut();
-                    for mut proc_config in config.process {
-                        if proc_config.working_dir.is_none() {
-                            proc_config.working_dir = Some(dir_string.clone());
-                        }
-                        mgr.add_process(proc_config);
-                    }
-                    config_loaded = true;
+                Ok(c) => {
+                    config = Some(c);
                     log::info!("Loaded config from {}", config_path.display());
                 }
                 Err(e) => log::error!("Failed to load config: {e}"),
@@ -131,10 +188,64 @@ impl Workspace {
             }
         }
 
+        self.assemble_prepared(ProjectLocation::Local(dir.to_path_buf()), config, stacks)
+    }
+
+    /// Prepare a remote project from data already fetched off-thread.
+    pub fn prepare_project_probed(
+        &mut self,
+        location: ProjectLocation,
+        probe: RemoteProbe,
+    ) -> Option<PreparedProject> {
+        log::info!(
+            "Preparing remote project {} (config: {}, detected stacks: {})",
+            location.key(),
+            probe.config.is_some(),
+            probe.stacks.len()
+        );
+        self.assemble_prepared(location, probe.config, probe.stacks)
+    }
+
+    /// Shared assembly for local and remote preparation: dedupe check,
+    /// manager creation, name resolution, config-process registration.
+    fn assemble_prepared(
+        &mut self,
+        location: ProjectLocation,
+        config: Option<TuxFlowConfig>,
+        stacks: Vec<DetectedStack>,
+    ) -> Option<PreparedProject> {
+        let key = location.key();
+        if self.projects.iter().any(|p| p.key() == key) {
+            log::info!("Project already loaded: {key}");
+            return None;
+        }
+
+        let manager = ProcessManager::new(location.clone());
+        let mut project_name = location.base_name();
+        if let Some(custom_name) = self.saved.get_name(&key) {
+            project_name = custom_name.clone();
+        }
+
+        let mut config_loaded = false;
+        if let Some(config) = config {
+            if self.saved.get_name(&key).is_none() {
+                project_name = config.project.name.clone();
+            }
+            let dir_str = location.dir_str();
+            let mut mgr = manager.borrow_mut();
+            for mut proc_config in config.process {
+                if proc_config.working_dir.is_none() {
+                    proc_config.working_dir = Some(dir_str.clone());
+                }
+                mgr.add_process(proc_config);
+            }
+            config_loaded = true;
+        }
+
         Some(PreparedProject {
             name: project_name,
-            dir: dir.to_path_buf(),
-            dir_string,
+            location,
+            key,
             manager,
             stacks,
             config_loaded,
@@ -149,18 +260,21 @@ impl Workspace {
     ) -> Option<&Project> {
         let PreparedProject {
             name: project_name,
-            dir,
-            dir_string,
+            location,
+            key: dir_string,
             manager,
+            config_loaded,
             ..
         } = prepared;
 
-        // Add the selected detected processes
+        // Add the selected detected processes. working_dir is a path on the
+        // machine that owns the files — the remote dir for ssh projects.
         {
+            let default_dir = location.dir_str();
             let mut mgr = manager.borrow_mut();
             for mut pc in selected_processes {
                 if pc.working_dir.is_none() {
-                    pc.working_dir = Some(dir_string.clone());
+                    pc.working_dir = Some(default_dir.clone());
                 }
                 mgr.add_process(pc);
             }
@@ -207,8 +321,15 @@ impl Workspace {
 
         // Auto-restart is set up lazily via on_materialized when terminals are created
 
+        // Icon detection and file watching read the local filesystem —
+        // both are skipped for remote projects (generic icon, no watch).
+        let local_dir = match &location {
+            ProjectLocation::Local(p) => Some(p.clone()),
+            ProjectLocation::Ssh { .. } => None,
+        };
+
         let icon_path = self.saved.get_icon(&dir_string).cloned().or_else(|| {
-            let detected = icon_detector::detect_icon(&dir);
+            let detected = local_dir.as_deref().and_then(icon_detector::detect_icon);
             if let Some(ref path) = detected {
                 log::info!("Auto-detected project icon: {path}");
                 self.saved.set_icon(&dir_string, Some(path.clone()));
@@ -217,20 +338,39 @@ impl Workspace {
         });
 
         // Start file watcher for restart_when_changed patterns
-        let file_watcher = FileWatcher::new(&dir, &manager);
+        let file_watcher = local_dir
+            .as_deref()
+            .and_then(|dir| FileWatcher::new(dir, &manager));
 
         let project = Project {
             name: project_name,
-            dir,
+            location,
             manager,
             icon_path,
+            config_loaded,
             _file_watcher: file_watcher,
         };
 
         self.saved.add(&dir_string);
 
-        self.projects.push(project);
-        self.projects.last()
+        // Insert respecting the saved sidebar order: remote projects finish
+        // their async probe at unpredictable times, so a plain push would
+        // order projects by load completion instead of by the user's order.
+        let saved_order = self.saved.directories.clone();
+        let pos_of = |key: &str| {
+            saved_order
+                .iter()
+                .position(|k| k == key)
+                .unwrap_or(usize::MAX)
+        };
+        let my_pos = pos_of(&dir_string);
+        let insert_idx = self
+            .projects
+            .iter()
+            .position(|p| pos_of(&p.key()) > my_pos)
+            .unwrap_or(self.projects.len());
+        self.projects.insert(insert_idx, project);
+        self.projects.get(insert_idx)
     }
 
     /// Convenience: prepare + finalize with detected processes (used for startup/CLI loading).
@@ -241,39 +381,44 @@ impl Workspace {
     /// the project's tooling changes (e.g. new Makefile targets, new npm scripts).
     pub fn add_project_from_dir(&mut self, dir: &Path) -> Option<&Project> {
         let prepared = self.prepare_project_conservative(dir)?;
-        let dir_string = dir.to_string_lossy().to_string();
+        let processes = self.auto_select_processes(&prepared);
+        self.finalize_project(prepared, processes)
+    }
 
-        let is_curated = self.saved.get_process_order(&dir_string).is_some();
+    /// The non-interactive selection used at startup: all detected processes,
+    /// with never-seen commands auto-hidden once the project has been curated.
+    pub fn auto_select_processes(&mut self, prepared: &PreparedProject) -> Vec<ProcessConfig> {
+        let key = &prepared.key;
+        let is_curated = self.saved.get_process_order(key).is_some();
 
         if is_curated && !prepared.config_loaded {
             let known: std::collections::HashSet<String> = self
                 .saved
-                .get_process_order(&dir_string)
+                .get_process_order(key)
                 .map(|order| order.iter().cloned().collect())
                 .unwrap_or_default();
             let custom: std::collections::HashSet<String> = self
                 .saved
-                .get_custom_commands(&dir_string)
+                .get_custom_commands(key)
                 .map(|cmds| cmds.iter().map(|c| c.name.clone()).collect())
                 .unwrap_or_default();
             for stack in &prepared.stacks {
                 for proc in &stack.suggested_processes {
                     if !known.contains(&proc.name)
                         && !custom.contains(&proc.name)
-                        && !self.saved.is_process_deleted(&dir_string, &proc.name)
+                        && !self.saved.is_process_deleted(key, &proc.name)
                     {
-                        self.saved.add_deleted_process(&dir_string, &proc.name);
+                        self.saved.add_deleted_process(key, &proc.name);
                     }
                 }
             }
         }
 
-        let processes: Vec<ProcessConfig> = prepared
+        prepared
             .stacks
             .iter()
             .flat_map(|s| s.suggested_processes.clone())
-            .collect();
-        self.finalize_project(prepared, processes)
+            .collect()
     }
 
     pub fn projects(&self) -> &[Project] {
@@ -299,7 +444,7 @@ impl Workspace {
     pub fn remove_project(&mut self, project_name: &str) {
         if let Some(idx) = self.projects.iter().position(|p| p.name == project_name) {
             let project = &self.projects[idx];
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             project.manager.borrow_mut().stop_all();
             self.saved.remove(&dir_str);
             self.projects.remove(idx);
@@ -312,22 +457,31 @@ impl Workspace {
 
     pub fn rename_project(&mut self, old_name: &str, new_name: &str) {
         if let Some(project) = self.projects.iter_mut().find(|p| p.name == old_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             project.name = new_name.to_string();
             self.saved.set_name(&dir_str, new_name);
         }
     }
 
+    /// Local project directory — None for remote projects, which naturally
+    /// gates local-only actions (git UI, open-in-editor, reveal) off for them.
     pub fn get_project_dir(&self, project_name: &str) -> Option<PathBuf> {
         self.projects
             .iter()
             .find(|p| p.name == project_name)
-            .map(|p| p.dir.clone())
+            .and_then(|p| p.local_dir())
+    }
+
+    pub fn get_project_location(&self, project_name: &str) -> Option<ProjectLocation> {
+        self.projects
+            .iter()
+            .find(|p| p.name == project_name)
+            .map(|p| p.location.clone())
     }
 
     pub fn set_project_icon(&mut self, project_name: &str, icon_path: Option<String>) {
         if let Some(project) = self.projects.iter_mut().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             project.icon_path = icon_path.clone();
             self.saved.set_icon(&dir_str, icon_path);
         }
@@ -342,14 +496,14 @@ impl Workspace {
 
     pub fn save_process_order(&mut self, project_name: &str, order: Vec<String>) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             self.saved.set_process_order(&dir_str, order);
         }
     }
 
     pub fn set_project_expanded(&mut self, project_name: &str, expanded: bool) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             self.saved.set_expanded(&dir_str, expanded);
         }
     }
@@ -358,7 +512,7 @@ impl Workspace {
         self.projects
             .iter()
             .find(|p| p.name == project_name)
-            .and_then(|p| self.saved.is_expanded(p.dir.to_string_lossy().as_ref()))
+            .and_then(|p| self.saved.is_expanded(&p.key()))
     }
 
     pub fn save_custom_command(
@@ -367,14 +521,14 @@ impl Workspace {
         config: crate::config::schema::ProcessConfig,
     ) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             self.saved.add_custom_command(&dir_str, config);
         }
     }
 
     pub fn set_display_name(&mut self, project_name: &str, process_name: &str, display_name: &str) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             self.saved
                 .set_display_name(&dir_str, process_name, display_name);
         }
@@ -382,7 +536,7 @@ impl Workspace {
 
     pub fn mark_process_deleted(&mut self, project_name: &str, process_name: &str) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             // Remove from custom commands if it was user-added
             self.saved.remove_custom_command(&dir_str, process_name);
             // Mark as deleted so auto-detected ones don't reappear
@@ -396,7 +550,7 @@ impl Workspace {
 
     pub fn unmark_process_deleted(&mut self, project_name: &str, process_name: &str) {
         if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
-            let dir_str = project.dir.to_string_lossy().to_string();
+            let dir_str = project.key();
             self.saved.unmark_process_deleted(&dir_str, process_name);
         }
     }
@@ -408,7 +562,7 @@ impl Workspace {
         let Some(project) = self.projects.iter().find(|p| p.name == project_name) else {
             return Vec::new();
         };
-        let dir_str = project.dir.to_string_lossy().to_string();
+        let dir_str = project.key();
         let mut entries: Vec<CommandToggleEntry> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -437,9 +591,15 @@ impl Workspace {
             }
         }
 
+        // Live re-detection would block the UI thread on ssh round trips for
+        // remote projects — skip it there (active + hidden custom still listed).
+        let detected_now: Vec<DetectedStack> = match project.local_dir() {
+            Some(dir) => detector::detect_stacks(&dir),
+            None => Vec::new(),
+        };
+
         // 2. Hidden commands (in deleted_processes), resolved from custom_commands or detection
         if let Some(deleted) = self.saved.deleted_processes.get(&dir_str) {
-            let detected_now = detector::detect_stacks(&project.dir);
             for name in deleted {
                 if seen.contains(name) {
                     continue;
@@ -476,8 +636,8 @@ impl Workspace {
         }
 
         // 3. Newly detected commands not already in active or hidden
-        for stack in detector::detect_stacks(&project.dir) {
-            for cfg in stack.suggested_processes {
+        for stack in &detected_now {
+            for cfg in stack.suggested_processes.clone() {
                 if seen.contains(&cfg.name) {
                     continue;
                 }
@@ -512,13 +672,8 @@ impl Workspace {
             .unwrap_or(0);
         let insert_idx = if before { target_idx } else { target_idx + 1 };
         self.projects.insert(insert_idx, project);
-        self.saved.reorder_to_match(
-            &self
-                .projects
-                .iter()
-                .map(|p| p.dir.to_string_lossy().to_string())
-                .collect::<Vec<_>>(),
-        );
+        self.saved
+            .reorder_to_match(&self.projects.iter().map(|p| p.key()).collect::<Vec<_>>());
     }
 }
 

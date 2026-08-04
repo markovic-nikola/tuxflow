@@ -219,6 +219,7 @@ impl AddSshDialog {
                 working_dir: None,
                 start_with_project: auto_connect_row.is_active(),
                 auto_restart: auto_reconnect_row.is_active(),
+                open_in_browser: false,
                 restart_when_changed: Vec::new(),
                 env: std::collections::HashMap::new(),
                 category: ProcessCategory::SSH,

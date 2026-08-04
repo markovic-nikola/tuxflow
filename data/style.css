@@ -17,6 +17,28 @@
     color: #cca700;
 }
 
+/* Agent actively producing output: amber (busy), pulsing where the CSS
+   engine supports it. Steady green = running and waiting for input. */
+.status-working {
+    color: #e0a030;
+    animation: tf-working-pulse 1.2s ease-in-out infinite;
+}
+
+/* NOTE: GTK's keyframes parser rejects comma-separated selectors
+   ("0%, 100% { }") — use from/50%/to. Verify with `cargo run --example
+   css_check` after editing this file. */
+@keyframes tf-working-pulse {
+    from {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.3;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
 .status-spinner {
     color: #73c991;
     -gtk-icon-size: 10px;

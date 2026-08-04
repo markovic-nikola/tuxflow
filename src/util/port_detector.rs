@@ -25,12 +25,20 @@ const TOOL_CONTENT_PHRASES: &[&str] = &[
 
 pub struct PortDetector {
     ports: HashMap<String, Vec<DetectedPort>>,
+    /// Every distinct local port seen in a process's output — including
+    /// build-tool lines (vite &c.) that are excluded from the badge choice.
+    /// Remote projects tunnel all of these: the app port alone isn't enough
+    /// when e.g. a theme proxy on one port loads assets from vite on another.
+    seen_local: HashMap<String, Vec<u16>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DetectedPort {
     pub port: u16,
     pub url: Option<String>,
+    /// Whether the URL/port points at the machine the process runs on
+    /// (localhost/127.0.0.1/0.0.0.0) rather than some other host.
+    pub local: bool,
 }
 
 impl Default for PortDetector {
@@ -43,40 +51,81 @@ impl PortDetector {
     pub fn new() -> Self {
         Self {
             ports: HashMap::new(),
+            seen_local: HashMap::new(),
         }
     }
 
-    /// Returns true once a port has been locked for this process.
-    /// Callers can use this to skip expensive scans.
+    /// Returns true once any port (local or provisional remote) is known.
     pub fn has_port(&self, process_name: &str) -> bool {
         self.ports.get(process_name).is_some_and(|v| !v.is_empty())
+    }
+
+    /// Returns true once a *local* port is locked — the final state; callers
+    /// can stop scanning. A remote-URL fallback doesn't count: it stays
+    /// provisional so a later local URL can replace it.
+    pub fn has_local_port(&self, process_name: &str) -> bool {
+        self.ports
+            .get(process_name)
+            .and_then(|v| v.first())
+            .is_some_and(|p| p.local)
+    }
+
+    /// All distinct local ports seen in this process's output, in first-seen
+    /// order — the full set a remote project needs tunnelled.
+    pub fn all_local_ports(&self, process_name: &str) -> Vec<u16> {
+        self.seen_local
+            .get(process_name)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Forget the port for a process so the next scan re-detects.
     /// Call on stop/restart.
     pub fn clear(&mut self, process_name: &str) {
         self.ports.remove(process_name);
+        self.seen_local.remove(process_name);
     }
 
     pub fn scan_output(&mut self, process_name: &str, text: &str) {
-        // Stickiness: once a port is chosen, keep it until clear().
-        if self.has_port(process_name) {
-            return;
-        }
+        // Badge stickiness: a local detection is final; a remote-URL
+        // fallback is provisional (an OAuth link printed during startup
+        // must not shadow the real dev-server URL appearing later). But
+        // port *harvesting* into seen_local is monotonic — a scan arriving
+        // after the badge locked (e.g. the reattach history seed racing a
+        // partial-redraw screen scan) must still register secondary ports,
+        // or their tunnels never come up.
+        let badge_locked = self.has_local_port(process_name);
 
         let mut local: Vec<DetectedPort> = Vec::new();
         let mut remote: Vec<DetectedPort> = Vec::new();
 
         for line in text.lines() {
-            if is_tool_line(line) {
-                continue;
+            let mut line_local: Vec<DetectedPort> = Vec::new();
+            let mut line_remote: Vec<DetectedPort> = Vec::new();
+            scan_line(line, &mut line_local, &mut line_remote);
+
+            // Tool lines don't compete for the badge, but their local ports
+            // (vite asset server &c.) still count for tunnelling.
+            let seen = self.seen_local.entry(process_name.to_string()).or_default();
+            for d in &line_local {
+                if !seen.contains(&d.port) {
+                    seen.push(d.port);
+                }
             }
-            scan_line(line, &mut local, &mut remote);
+
+            if !is_tool_line(line) {
+                local.extend(line_local);
+                remote.extend(line_remote);
+            }
+        }
+
+        if badge_locked {
+            return; // seen_local harvested above; badge already final
         }
 
         let chosen = if !local.is_empty() {
             local
-        } else if !remote.is_empty() {
+        } else if !remote.is_empty() && !self.has_port(process_name) {
             remote
         } else {
             return;
@@ -128,11 +177,13 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
 
         if word.starts_with("http://") || word.starts_with("https://") {
             if let Some((host, port)) = extract_host_port_from_url(word) {
+                let is_local = is_local_host(&host);
                 let detected = DetectedPort {
                     port,
                     url: Some(word.to_string()),
+                    local: is_local,
                 };
-                if is_local_host(&host) {
+                if is_local {
                     local.push(detected);
                 } else {
                     remote.push(detected);
@@ -149,6 +200,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
             local.push(DetectedPort {
                 port,
                 url: Some(format!("http://localhost:{port}")),
+                local: true,
             });
             continue;
         }
@@ -163,6 +215,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
                 local.push(DetectedPort {
                     port,
                     url: Some(format!("http://localhost:{port}")),
+                    local: true,
                 });
             }
             continue;
@@ -181,6 +234,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
             local.push(DetectedPort {
                 port,
                 url: Some(format!("http://localhost:{port}")),
+                local: true,
             });
         }
     }
@@ -209,4 +263,31 @@ fn extract_host_port_from_url(url: &str) -> Option<(String, u16)> {
     } else {
         Some((host_port.to_string(), default_port))
     }
+}
+
+/// Rewrite `:{from}` to `:{to}` in a URL, but only where the port number
+/// actually ends there — a plain string replace would corrupt
+/// `http://localhost:8080` when remapping port 80. Used when a remote
+/// project's detected port is tunnelled to a different local port.
+pub fn remap_url_port(url: &str, from: u16, to: u16) -> String {
+    let needle = format!(":{from}");
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some(i) = rest.find(&needle) {
+        let end = i + needle.len();
+        let next_is_digit = rest[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit());
+        if next_is_digit {
+            // Prefix of a longer number ("":80" inside ":8080") — keep it
+            out.push_str(&rest[..end]);
+        } else {
+            out.push_str(&rest[..i]);
+            out.push_str(&format!(":{to}"));
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }

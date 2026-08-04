@@ -3,6 +3,7 @@ mod config;
 mod detect;
 mod mcp;
 mod process;
+mod remote;
 mod ui;
 mod util;
 mod watcher;

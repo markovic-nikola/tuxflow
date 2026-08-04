@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use crate::ui::add_command_dialog::AddCommandDialog;
 use crate::ui::add_ssh_dialog::AddSshDialog;
 use crate::ui::command_palette::CommandPalette;
 use crate::ui::git_changes_dialog::{
-    GitChangesDialog, commits_behind, dirty_file_count, git_fetch,
+    GitChangesDialog, commits_behind, dirty_file_count, git_fetch, has_git_repo,
 };
 use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
@@ -165,20 +165,15 @@ impl TuxFlowWindow {
 
         // Check for updates in background
         {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                if let Some(update) = crate::util::update_checker::check_for_update() {
-                    let _ = tx.send(update);
-                }
-            });
             let status_bar_ref = status_bar.clone();
-            glib::idle_add_local(move || {
-                if let Ok(update) = rx.try_recv() {
-                    status_bar_ref.show_update(&update.latest_version, &update.release_url);
-                    return glib::ControlFlow::Break;
-                }
-                glib::ControlFlow::Continue
-            });
+            crate::util::worker::run(
+                crate::util::update_checker::check_for_update,
+                move |update| {
+                    if let Some(update) = update {
+                        status_bar_ref.show_update(&update.latest_version, &update.release_url);
+                    }
+                },
+            );
         }
 
         // Load projects progressively on idle ticks so the window paints first.
@@ -186,17 +181,20 @@ impl TuxFlowWindow {
         // process row; serialising 15-20 projects on the main thread before
         // present() was costing many seconds of "blank screen" on launch.
         {
-            let mut queue: Vec<std::path::PathBuf> = ws
+            // Saved entries are location keys: local paths or ssh://host/path
+            let mut queue: Vec<String> = ws
                 .borrow()
                 .saved_directories()
                 .into_iter()
-                .map(std::path::PathBuf::from)
-                .filter(|p| p.is_dir())
+                .filter(|key| match crate::remote::ProjectLocation::parse(key) {
+                    crate::remote::ProjectLocation::Local(p) => p.is_dir(),
+                    crate::remote::ProjectLocation::Ssh { .. } => true,
+                })
                 .collect();
             if let Some(dir) = project_dir {
-                let dir = dir.to_path_buf();
-                if !queue.iter().any(|p| p == &dir) {
-                    queue.push(dir);
+                let key = dir.to_string_lossy().to_string();
+                if !queue.iter().any(|k| k == &key) {
+                    queue.push(key);
                 }
             }
             let ws_load = ws.clone();
@@ -208,17 +206,17 @@ impl TuxFlowWindow {
             let cells_load = project_name_cells.clone();
             let focus_gate_load = focus_gate.clone();
             let icon_resolver_load = icon_resolver.clone();
-            let queue_cell: Rc<RefCell<std::vec::IntoIter<std::path::PathBuf>>> =
+            let queue_cell: Rc<RefCell<std::vec::IntoIter<String>>> =
                 Rc::new(RefCell::new(queue.into_iter()));
             glib::idle_add_local(move || {
                 let next = queue_cell.borrow_mut().next();
                 match next {
-                    Some(path) => {
+                    Some(key) => {
                         Self::load_project(
                             &ws_load,
                             &sidebar_load,
                             &stack_load,
-                            &path,
+                            &key,
                             &pid_file_load,
                             &status_bar_load,
                             &selected_load,
@@ -436,6 +434,11 @@ impl TuxFlowWindow {
                     let ws_borrow = ws_ref.borrow();
                     let mut pids = Vec::new();
                     for project in ws_borrow.projects() {
+                        // Remote processes: the local PID is just the ssh
+                        // client — its /proc stats are meaningless here.
+                        if project.location.is_remote() {
+                            continue;
+                        }
                         let mgr = project.manager.borrow();
                         for (name, pid) in mgr.running_pids() {
                             let qname = workspace::qualified_name(&project.name, &name);
@@ -489,7 +492,14 @@ impl TuxFlowWindow {
             }
             let ws_borrow = ws_shutdown.borrow();
             for project in ws_borrow.projects() {
-                project.manager.borrow_mut().stop_all();
+                let mut mgr = project.manager.borrow_mut();
+                if project.location.is_remote() {
+                    // Remote processes live in tmux sessions on the host —
+                    // quitting only detaches them; the next launch reattaches.
+                    mgr.detach_all();
+                } else {
+                    mgr.stop_all();
+                }
             }
             pid_file_shutdown.borrow_mut().clear();
             glib::Propagation::Proceed
@@ -535,6 +545,81 @@ impl TuxFlowWindow {
     /// Parse a shell window title into a short display name.
     /// Shells often set titles like "user@host: command" or "command - /path".
     /// We extract the most useful part.
+    /// `(host, is_agent)` for the currently visible terminal when it belongs
+    /// to a remote project — what image-paste bridging needs to decide how
+    /// (and whether) to act. None for local projects or no visible terminal.
+    fn remote_paste_target(ws: &WorkspaceRef, stack: &gtk4::Stack) -> Option<(String, bool)> {
+        let (proj, pname) = stack.visible_child_name().and_then(|n| {
+            n.split_once("::")
+                .map(|(p, pr)| (p.to_string(), pr.to_string()))
+        })?;
+        let ws_b = ws.borrow();
+        let project = ws_b.projects().iter().find(|p| p.name == proj)?;
+        let host = project.location.host()?.to_string();
+        let is_agent = project
+            .manager
+            .borrow()
+            .get_process(&pname)
+            .is_some_and(|p| p.config.category == crate::config::schema::ProcessCategory::Agent);
+        Some((host, is_agent))
+    }
+
+    /// If the clipboard holds an image, upload it to the remote host's
+    /// TuxFlow clipboard file (provisioning the `xclip` shim on first use) —
+    /// the bytes exist only in this machine's clipboard. Agent terminals
+    /// then receive a real Ctrl+V so the agent "reads the clipboard" through
+    /// the shim and shows its native attachment UI; other terminals get the
+    /// path typed. Returns whether the paste was handled (false = clipboard
+    /// has no image; caller should paste normally).
+    fn paste_image_to_remote(terminal: &vte4::Terminal, host: &str, is_agent: bool) -> bool {
+        let clipboard = terminal.clipboard();
+        if !clipboard
+            .formats()
+            .contains_type(gtk4::gdk::Texture::static_type())
+        {
+            return false;
+        }
+        let host = host.to_string();
+        let terminal = terminal.clone();
+        clipboard.read_texture_async(
+            gtk4::gio::Cancellable::NONE,
+            move |res: Result<Option<gtk4::gdk::Texture>, _>| {
+                let Ok(Some(texture)) = res else {
+                    log::warn!("image paste: couldn't read clipboard texture");
+                    return;
+                };
+                let png = texture.save_to_png_bytes();
+                let upload_host = host.clone();
+                crate::util::worker::run(
+                    move || crate::remote::upload_clipboard_image(&upload_host, png.as_ref()),
+                    move |result| match result {
+                        Ok(path) => {
+                            log::info!("image paste: uploaded to {host}:{path}");
+                            if is_agent {
+                                // Ctrl+V: the agent reads "the clipboard"
+                                // (our shim) and attaches the image natively
+                                terminal.feed_child(&[0x16]);
+                            } else {
+                                terminal.feed_child(format!("{path} ").as_bytes());
+                            }
+                        }
+                        Err(e) => log::error!("image paste: upload to {host} failed: {e}"),
+                    },
+                );
+            },
+        );
+        true
+    }
+
+    /// Change-detection hash for the tmux clipboard bridge — only stability
+    /// within one app run matters.
+    fn tmux_buffer_hash(text: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
+    }
+
     fn parse_window_title(title: &str) -> Option<String> {
         let title = title.trim();
         if title.is_empty() {
@@ -667,16 +752,37 @@ impl TuxFlowWindow {
             .or_else(|| sidebar.last_expanded_project())
     }
 
-    fn refresh_status_bar_git(dir: PathBuf, status_bar: Rc<StatusBar>, do_fetch: bool) {
+    fn refresh_status_bar_git(
+        location: crate::remote::ProjectLocation,
+        status_bar: Rc<StatusBar>,
+        do_fetch: bool,
+    ) {
+        Self::refresh_status_bar_git_guarded(location, status_bar, do_fetch, None)
+    }
+
+    /// `in_flight` (when given) is cleared once the refresh lands — the
+    /// periodic poller uses it to skip ticks while a slow refresh (remote
+    /// project with the link down: up to 10 s per git call) is still running,
+    /// instead of stacking a new blocked worker thread every tick.
+    fn refresh_status_bar_git_guarded(
+        location: crate::remote::ProjectLocation,
+        status_bar: Rc<StatusBar>,
+        do_fetch: bool,
+        in_flight: Option<Rc<Cell<bool>>>,
+    ) {
         let (tx, rx) = tokio::sync::oneshot::channel::<(usize, usize)>();
         std::thread::spawn(move || {
             if do_fetch {
-                git_fetch(&dir);
+                git_fetch(&location);
             }
-            let _ = tx.send((commits_behind(&dir), dirty_file_count(&dir)));
+            let _ = tx.send((commits_behind(&location), dirty_file_count(&location)));
         });
         glib::spawn_future_local(async move {
-            if let Ok((behind, dirty)) = rx.await {
+            let result = rx.await;
+            if let Some(flag) = in_flight {
+                flag.set(false);
+            }
+            if let Ok((behind, dirty)) = result {
                 status_bar.set_git_pull_indicator(behind);
                 status_bar.set_git_dirty(dirty);
             }
@@ -764,7 +870,7 @@ impl TuxFlowWindow {
         ws: &WorkspaceRef,
         sidebar: &Rc<ProjectList>,
         terminal_stack: &gtk4::Stack,
-        dir: &Path,
+        key: &str,
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         selected_process: &Rc<RefCell<Option<String>>>,
@@ -772,33 +878,245 @@ impl TuxFlowWindow {
         focus_gate: Option<crate::process::auto_restart::FocusGate>,
         icon_resolver: Option<crate::process::auto_restart::IconResolver>,
     ) {
-        let mut ws_mut = ws.borrow_mut();
-        if let Some(project) = ws_mut.add_project_from_dir(dir) {
-            let project_name = project.name.clone();
-            let manager = project.manager.clone();
-            let icon_path = project.icon_path.clone();
-            let dir_str = project.dir.to_string_lossy().to_string();
-            let saved_expanded = ws_mut.is_project_expanded(&project_name);
-            drop(ws_mut);
-            Self::wire_project(
-                &project_name,
-                &manager,
-                icon_path.as_deref(),
-                saved_expanded,
-                ws,
-                sidebar,
-                terminal_stack,
-                pid_file,
-                status_bar,
-                selected_process,
-                project_name_cells,
-                focus_gate,
-                icon_resolver,
-            );
-            if crate::mcp::bridge::is_mcp_enabled() {
-                Self::start_mcp_for_project(&manager, &project_name, &dir_str, ws);
+        match crate::remote::ProjectLocation::parse(key) {
+            crate::remote::ProjectLocation::Local(path) => {
+                let mut ws_mut = ws.borrow_mut();
+                if let Some(project) = ws_mut.add_project_from_dir(&path) {
+                    let project_name = project.name.clone();
+                    let manager = project.manager.clone();
+                    let icon_path = project.icon_path.clone();
+                    let dir_str = project.key();
+                    let saved_expanded = ws_mut.is_project_expanded(&project_name);
+                    drop(ws_mut);
+                    Self::wire_project(
+                        &project_name,
+                        &manager,
+                        icon_path.as_deref(),
+                        saved_expanded,
+                        ws,
+                        sidebar,
+                        terminal_stack,
+                        pid_file,
+                        status_bar,
+                        selected_process,
+                        project_name_cells,
+                        focus_gate,
+                        icon_resolver,
+                    );
+                    if crate::mcp::bridge::is_mcp_enabled() {
+                        Self::start_mcp_for_project(&manager, &project_name, &dir_str, ws);
+                    }
+                }
+            }
+            location @ crate::remote::ProjectLocation::Ssh { .. } => {
+                Self::load_remote_project(
+                    ws,
+                    sidebar,
+                    terminal_stack,
+                    location,
+                    pid_file,
+                    status_bar,
+                    selected_process,
+                    project_name_cells,
+                    focus_gate,
+                    icon_resolver,
+                    1,
+                );
             }
         }
+    }
+
+    /// Load a remote project: ssh probing runs on a worker thread, then the
+    /// project is assembled and wired on the main thread. When the host is
+    /// unreachable the load retries itself with capped backoff until it
+    /// succeeds (notifying once per outage), so a laptop that comes online
+    /// after TuxFlow does still gets its remote projects. `attempt` starts
+    /// at 1 and tracks the backoff/notification state across retries.
+    #[allow(clippy::too_many_arguments)]
+    fn load_remote_project(
+        ws: &WorkspaceRef,
+        sidebar: &Rc<ProjectList>,
+        terminal_stack: &gtk4::Stack,
+        location: crate::remote::ProjectLocation,
+        pid_file: &Rc<RefCell<PidFile>>,
+        status_bar: &Rc<StatusBar>,
+        selected_process: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
+        attempt: u32,
+    ) {
+        let crate::remote::ProjectLocation::Ssh { host, dir } = location.clone() else {
+            return;
+        };
+
+        let ws = ws.clone();
+        let sidebar = sidebar.clone();
+        let terminal_stack = terminal_stack.clone();
+        let pid_file = pid_file.clone();
+        let status_bar = status_bar.clone();
+        let selected_process = selected_process.clone();
+        let project_name_cells = project_name_cells.clone();
+        let probe_host = host.clone();
+        crate::util::worker::run(
+            move || workspace::probe_remote(&probe_host, &dir, true),
+            move |result| match result {
+                Ok(probe) => {
+                    let live_sessions = probe.live_sessions.clone();
+                    let mut ws_mut = ws.borrow_mut();
+                    let Some(prepared) = ws_mut.prepare_project_probed(location.clone(), probe)
+                    else {
+                        return;
+                    };
+                    let selected = ws_mut.auto_select_processes(&prepared);
+                    if let Some(project) = ws_mut.finalize_project(prepared, selected) {
+                        let project_name = project.name.clone();
+                        let manager = project.manager.clone();
+                        let icon_path = project.icon_path.clone();
+                        let saved_expanded = ws_mut.is_project_expanded(&project_name);
+                        drop(ws_mut);
+                        Self::wire_project(
+                            &project_name,
+                            &manager,
+                            icon_path.as_deref(),
+                            saved_expanded,
+                            &ws,
+                            &sidebar,
+                            &terminal_stack,
+                            &pid_file,
+                            &status_bar,
+                            &selected_process,
+                            &project_name_cells,
+                            focus_gate.clone(),
+                            icon_resolver.clone(),
+                        );
+                        // MCP stays off for remote projects in v1: the Unix
+                        // socket is local, agent processes run remotely.
+
+                        // Reattach processes whose tmux sessions are still
+                        // running from a previous app run — otherwise they'd
+                        // show Stopped while actually alive on the host.
+                        // spawn() reattaches via `new-session -A` and is a
+                        // no-op for anything already Running.
+                        if !live_sessions.is_empty() {
+                            let key = location.key();
+                            let mut mgr = manager.borrow_mut();
+                            let names: Vec<String> = mgr.process_names().to_vec();
+                            for pname in names {
+                                let session = crate::remote::remote_session_name(&key, &pname);
+                                if live_sessions.contains(&session) {
+                                    log::info!(
+                                        "Reattaching {pname}: session {session} alive on host"
+                                    );
+                                    mgr.spawn_quiet(&pname);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(workspace::ProbeError::Invalid(e)) => {
+                    // Missing dir / broken config — retrying won't change it
+                    log::error!("Failed to load remote project {}: {e}", location.key());
+                }
+                Err(workspace::ProbeError::Unreachable(e)) => {
+                    log::warn!(
+                        "Remote project {} unreachable (attempt {attempt}): {e}",
+                        location.key()
+                    );
+                    if attempt == 1 {
+                        crate::util::notifications::notify_remote_unreachable(
+                            &location.base_name(),
+                            &host,
+                        );
+                    }
+                    // 3 s doubling to a 60 s cap, forever — a dead host costs
+                    // one idle worker thread per minute.
+                    let delay = (3u64 << (attempt - 1).min(5)).min(60);
+                    glib::timeout_add_local_once(Duration::from_secs(delay), move || {
+                        Self::load_remote_project(
+                            &ws,
+                            &sidebar,
+                            &terminal_stack,
+                            location,
+                            &pid_file,
+                            &status_bar,
+                            &selected_process,
+                            &project_name_cells,
+                            focus_gate,
+                            icon_resolver,
+                            attempt + 1,
+                        );
+                    });
+                }
+            },
+        );
+    }
+
+    /// Interactive add of a remote project: probe over ssh on a worker thread
+    /// (full detector), then run the same confirm/select flow as local adds.
+    #[allow(clippy::too_many_arguments)]
+    fn load_remote_project_interactive(
+        parent: &(impl IsA<gtk4::Widget> + Clone + 'static),
+        ws: &WorkspaceRef,
+        sidebar: &Rc<ProjectList>,
+        terminal_stack: &gtk4::Stack,
+        location: crate::remote::ProjectLocation,
+        pid_file: &Rc<RefCell<PidFile>>,
+        status_bar: &Rc<StatusBar>,
+        selected_process: &Rc<RefCell<Option<String>>>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
+    ) {
+        let crate::remote::ProjectLocation::Ssh { host, dir } = location.clone() else {
+            return;
+        };
+
+        let parent = parent.clone();
+        let ws = ws.clone();
+        let sidebar = sidebar.clone();
+        let terminal_stack = terminal_stack.clone();
+        let pid_file = pid_file.clone();
+        let status_bar = status_bar.clone();
+        let selected_process = selected_process.clone();
+        let last_selected_project = last_selected_project.clone();
+        let project_name_cells = project_name_cells.clone();
+        crate::util::worker::run(
+            move || workspace::probe_remote(&host, &dir, false),
+            move |result| match result {
+                Ok(probe) => {
+                    let prepared = ws
+                        .borrow_mut()
+                        .prepare_project_probed(location.clone(), probe);
+                    if let Some(prepared) = prepared {
+                        Self::present_prepared_interactive(
+                            &parent,
+                            &ws,
+                            &sidebar,
+                            &terminal_stack,
+                            &pid_file,
+                            &status_bar,
+                            &selected_process,
+                            &last_selected_project,
+                            &project_name_cells,
+                            focus_gate,
+                            icon_resolver,
+                            prepared,
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to add remote project {}: {e}", location.key());
+                    let alert = adw::AlertDialog::builder()
+                        .heading("Couldn't add remote project")
+                        .body(e.to_string())
+                        .build();
+                    alert.add_response("ok", "OK");
+                    alert.present(Some(&parent));
+                }
+            },
+        );
     }
 
     fn load_project_interactive(
@@ -820,6 +1138,42 @@ impl TuxFlowWindow {
             ws_mut.prepare_project(dir)
         };
         let Some(prepared) = prepared else { return };
+        Self::present_prepared_interactive(
+            parent,
+            ws,
+            sidebar,
+            terminal_stack,
+            pid_file,
+            status_bar,
+            selected_process,
+            last_selected_project,
+            project_name_cells,
+            focus_gate,
+            icon_resolver,
+            prepared,
+        );
+    }
+
+    /// Shared interactive continuation of adding a project (local or remote):
+    /// confirm/select-commands dialog, finalize, wire into the UI.
+    #[allow(clippy::too_many_arguments)]
+    fn present_prepared_interactive(
+        parent: &impl IsA<gtk4::Widget>,
+        ws: &WorkspaceRef,
+        sidebar: &Rc<ProjectList>,
+        terminal_stack: &gtk4::Stack,
+        pid_file: &Rc<RefCell<PidFile>>,
+        status_bar: &Rc<StatusBar>,
+        selected_process: &Rc<RefCell<Option<String>>>,
+        last_selected_project: &Rc<RefCell<Option<String>>>,
+        project_name_cells: &ProjectNameCells,
+        focus_gate: Option<crate::process::auto_restart::FocusGate>,
+        icon_resolver: Option<crate::process::auto_restart::IconResolver>,
+        prepared: workspace::PreparedProject,
+    ) {
+        // MCP stays local-only in v1: the Unix socket can't be reached by
+        // processes running on the remote host.
+        let is_remote = prepared.location.is_remote();
 
         let total_detected: usize = prepared
             .stacks
@@ -835,7 +1189,7 @@ impl TuxFlowWindow {
                 .flat_map(|s| s.suggested_processes.clone())
                 .collect();
             let project_name = prepared.name.clone();
-            let dir_string = prepared.dir_string.clone();
+            let dir_string = prepared.key.clone();
             let ws = ws.clone();
             let sidebar = sidebar.clone();
             let terminal_stack = terminal_stack.clone();
@@ -858,7 +1212,7 @@ impl TuxFlowWindow {
                     let project_name = project.name.clone();
                     let manager = project.manager.clone();
                     let icon_path = project.icon_path.clone();
-                    let dir_str = project.dir.to_string_lossy().to_string();
+                    let dir_str = project.key();
                     let saved_expanded = ws_mut.is_project_expanded(&project_name);
                     drop(ws_mut);
                     Self::wire_project(
@@ -876,7 +1230,7 @@ impl TuxFlowWindow {
                         focus_gate.clone(),
                         icon_resolver.clone(),
                     );
-                    if crate::mcp::bridge::is_mcp_enabled() {
+                    if !is_remote && crate::mcp::bridge::is_mcp_enabled() {
                         Self::start_mcp_for_project(&manager, &project_name, &dir_str, &ws);
                     }
                     *last_selected_project.borrow_mut() = Some(project_name.clone());
@@ -886,7 +1240,7 @@ impl TuxFlowWindow {
         } else {
             // Show selection dialog
             let project_name = prepared.name.clone();
-            let dir_string = prepared.dir_string.clone();
+            let dir_string = prepared.key.clone();
             let stacks_for_dialog = prepared.stacks.clone();
             let all_detected_names: Vec<String> = prepared
                 .stacks
@@ -928,7 +1282,7 @@ impl TuxFlowWindow {
                         let project_name = project.name.clone();
                         let manager = project.manager.clone();
                         let icon_path = project.icon_path.clone();
-                        let dir_str = project.dir.to_string_lossy().to_string();
+                        let dir_str = project.key();
                         let saved_expanded = ws_mut.is_project_expanded(&project_name);
                         drop(ws_mut);
                         Self::wire_project(
@@ -946,7 +1300,7 @@ impl TuxFlowWindow {
                             focus_gate.clone(),
                             icon_resolver.clone(),
                         );
-                        if crate::mcp::bridge::is_mcp_enabled() {
+                        if !is_remote && crate::mcp::bridge::is_mcp_enabled() {
                             Self::start_mcp_for_project(&manager, &project_name, &dir_str, &ws);
                         }
                         *last_selected_project.borrow_mut() = Some(project_name.clone());
@@ -1038,6 +1392,37 @@ impl TuxFlowWindow {
 
         // Add placeholders to the stack (real terminals are created lazily)
         let detector = Rc::new(RefCell::new(PortDetector::new()));
+
+        // Remote projects get a tunnel manager: every detected port is
+        // forwarded locally over the shared ssh connection, so the browser
+        // button and Ctrl+click on localhost URLs work exactly like local.
+        let tunnels: Rc<RefCell<Option<crate::remote::tunnel::TunnelManager>>> =
+            Rc::new(RefCell::new(
+                manager
+                    .borrow()
+                    .location()
+                    .host()
+                    .map(crate::remote::tunnel::TunnelManager::new),
+            ));
+
+        // Clipboard bridge for tmux mouse-selections (no released VTE
+        // implements OSC 52): after a mouse-up on a remote terminal, fetch
+        // the newest tmux paste buffer and put it in the local clipboard if
+        // it changed. Primed at load so a stale buffer from a previous
+        // session doesn't clobber the clipboard on startup.
+        let clip_host: Option<String> = manager.borrow().location().host().map(str::to_string);
+        let clip_hash: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+        if let Some(host) = clip_host.clone() {
+            let clip_hash = clip_hash.clone();
+            crate::util::worker::run(
+                move || crate::remote::fetch_tmux_buffer(&host),
+                move |buf| {
+                    if let Some(text) = buf {
+                        clip_hash.set(Self::tmux_buffer_hash(&text));
+                    }
+                },
+            );
+        }
         {
             let mgr = manager.borrow();
             for name in mgr.process_names() {
@@ -1055,6 +1440,7 @@ impl TuxFlowWindow {
             let pname_cell_status = pname_cell.clone();
             let mcp_state = crate::mcp::bridge::MCP_PROCESS_STATE.clone();
             let detector_status = detector.clone();
+            let tunnels_status = tunnels.clone();
             let mut mgr = manager.borrow_mut();
             mgr.set_on_status_change(move |process_name, status| {
                 let qname = workspace::qualified_name(&pname_cell_status.borrow(), process_name);
@@ -1062,6 +1448,17 @@ impl TuxFlowWindow {
 
                 // Clear locked port on stop/crash/restart so the next run re-detects.
                 if !matches!(status, ProcessStatus::Running) {
+                    // Tear down every tunnel this process's output spawned
+                    // (badge port + secondary ports like a vite asset server)
+                    if let Some(tm) = tunnels_status.borrow_mut().as_mut() {
+                        let det = detector_status.borrow();
+                        if let Some(port) = det.get_port(process_name) {
+                            tm.close(port);
+                        }
+                        for port in det.all_local_ports(process_name) {
+                            tm.close(port);
+                        }
+                    }
                     detector_status.borrow_mut().clear(process_name);
                     sidebar_ref.set_process_port(&qname, None);
                     sidebar_ref.set_process_url(&qname, None);
@@ -1169,6 +1566,10 @@ impl TuxFlowWindow {
 
                 // Capture refs for the on_materialized closure
                 let detector_ref = detector.clone();
+                let tunnels_ref = tunnels.clone();
+                let clip_host_mat = clip_host.clone();
+                let clip_hash_mat = clip_hash.clone();
+                let manager_mat = manager.clone();
                 let sidebar_ref = sidebar.clone();
                 let sb_ref = status_bar.clone();
                 let sel_ref = selected_process.clone();
@@ -1207,16 +1608,68 @@ impl TuxFlowWindow {
                         handler(terminal);
                     }
 
+                    // Remote: bridge tmux mouse-selections to the local
+                    // clipboard. A drag-selection always ends with a button
+                    // release; shortly after, pull the newest tmux buffer.
+                    // EventControllerLegacy, not a gesture: VTE claims mouse
+                    // sequences (always, for tmux/mouse-tracking apps) and a
+                    // claimed sequence cancels other gestures — their
+                    // `released` never fires. The legacy controller observes
+                    // raw events without joining gesture claiming.
+                    if let Some(host) = clip_host_mat.clone() {
+                        let clip_hash = clip_hash_mat.clone();
+                        let ctrl = gtk4::EventControllerLegacy::new();
+                        ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+                        ctrl.connect_event(move |_, event| {
+                            if event.event_type() != gtk4::gdk::EventType::ButtonRelease {
+                                return glib::Propagation::Proceed;
+                            }
+                            log::debug!("clipboard bridge: button release, fetching tmux buffer");
+                            let host = host.clone();
+                            let clip_hash = clip_hash.clone();
+                            // Give tmux a beat to store the buffer on drag-end
+                            glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                                let fetch_host = host.clone();
+                                crate::util::worker::run(
+                                    move || crate::remote::fetch_tmux_buffer(&fetch_host),
+                                    move |buf| {
+                                        let Some(text) = buf else {
+                                            log::debug!("clipboard bridge: no tmux buffer");
+                                            return;
+                                        };
+                                        let hash = Self::tmux_buffer_hash(&text);
+                                        if clip_hash.replace(hash) == hash {
+                                            log::debug!("clipboard bridge: buffer unchanged");
+                                        } else if let Some(display) = gtk4::gdk::Display::default()
+                                        {
+                                            log::debug!(
+                                                "clipboard bridge: copied {} bytes",
+                                                text.len()
+                                            );
+                                            display.clipboard().set_text(&text);
+                                        }
+                                    },
+                                );
+                            });
+                            glib::Propagation::Proceed
+                        });
+                        terminal.add_controller(ctrl);
+                    }
+
                     // Connect port detection + MCP log capture
                     let log_buffers = crate::mcp::bridge::MCP_LOG_BUFFERS.clone();
                     let log_proc_name = proc_name.clone();
                     let last_row: Rc<Cell<i64>> = Rc::new(Cell::new(0));
                     let detector_ref = detector_ref.clone();
+                    let tunnels_cc = tunnels_ref.clone();
+                    let mgr_cc = manager_mat.clone();
                     let sidebar_ref = sidebar_ref.clone();
                     let sb_ref = sb_ref.clone();
                     let sel_ref = sel_ref.clone();
                     let proc_name = proc_name.clone();
                     let qname_cell_cc = qname_cell_mat.clone();
+                    let clip_host_cc = clip_host_mat.clone();
+                    let history_seeded: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
                     terminal.connect_contents_changed(move |terminal| {
                         let qname_contents = qname_cell_cc.borrow().clone();
@@ -1250,37 +1703,134 @@ impl TuxFlowWindow {
                             }
                         }
 
-                        // Port detection — skip for agents, skip when not running,
-                        // skip once a port has already been locked for this process.
-                        if !skip_port_detection
-                            && sidebar_ref.is_process_running(&qname_contents)
-                            && !detector_ref.borrow().has_port(&proc_name)
-                        {
-                            // Wide enough that the app's startup line isn't pushed out
-                            // of view by later log spam before detection locks in.
-                            const PORT_SCAN_LOOKBACK_ROWS: i64 = 200;
-                            let start_row = (row - PORT_SCAN_LOOKBACK_ROWS).max(0);
-                            let cols = terminal.column_count();
-                            let (text_opt, _len) = terminal.text_range_format(
-                                vte4::Format::Text,
-                                start_row,
-                                0,
-                                row,
-                                cols,
-                            );
-                            if let Some(text) = text_opt {
-                                let mut det = detector_ref.borrow_mut();
-                                det.scan_output(&proc_name, &text);
-                                if let Some(port) = det.get_port(&proc_name) {
-                                    sidebar_ref.set_process_port(&qname_contents, Some(port));
+                        // Port detection — skip for agents and stopped processes.
+                        // Scans continue until a *local* port locks: a remote-URL
+                        // fallback (e.g. an OAuth link during `shopify theme dev`
+                        // login) is provisional and upgradeable. The tunnel
+                        // ensure() runs on every tick so a forward that died
+                        // gets respawned.
+                        if !skip_port_detection && sidebar_ref.is_process_running(&qname_contents) {
+                            if !detector_ref.borrow().has_local_port(&proc_name) {
+                                // Remote, once per run: also scan the tmux pane
+                                // *history*. After reattaching to a live session
+                                // the startup banner (ports, URLs) has usually
+                                // scrolled out of the visible screen — without
+                                // this, tunnels don't come back until the
+                                // process is restarted.
+                                if let Some(host) = clip_host_cc.clone()
+                                    && !history_seeded.replace(true)
+                                    && let Some(session) = mgr_cc
+                                        .borrow()
+                                        .get_process(&proc_name)
+                                        .and_then(|p| p.remote_session.clone())
+                                {
+                                    let det_seed = detector_ref.clone();
+                                    let seed_name = proc_name.clone();
+                                    let term_seed = terminal.clone();
+                                    crate::util::worker::run(
+                                        move || crate::remote::fetch_pane_history(&host, &session),
+                                        move |text| {
+                                            if text.is_empty() {
+                                                return;
+                                            }
+                                            det_seed.borrow_mut().scan_output(&seed_name, &text);
+                                            // Re-fire the handler so the seeded
+                                            // ports get applied (tunnels/badges)
+                                            // immediately. An idle server emits
+                                            // no output on its own — and can't
+                                            // receive requests until the tunnel
+                                            // exists.
+                                            term_seed.emit_by_name::<()>("contents-changed", &[]);
+                                        },
+                                    );
                                 }
-                                let url = det.get_url(&proc_name).map(|u| u.to_string());
-                                if let Some(ref url_str) = url {
-                                    sidebar_ref.set_process_url(&qname_contents, Some(url_str));
-                                    if sel_ref.borrow().as_deref() == Some(qname_contents.as_str())
-                                    {
-                                        sb_ref.set_url(Some(url_str));
+
+                                // Wide enough that the app's startup line isn't
+                                // pushed out of view by later log spam before
+                                // detection locks in.
+                                const PORT_SCAN_LOOKBACK_ROWS: i64 = 200;
+                                let start_row = (row - PORT_SCAN_LOOKBACK_ROWS).max(0);
+                                let cols = terminal.column_count();
+                                let (text_opt, _len) = terminal.text_range_format(
+                                    vte4::Format::Text,
+                                    start_row,
+                                    0,
+                                    row,
+                                    cols,
+                                );
+                                if let Some(text) = text_opt {
+                                    detector_ref.borrow_mut().scan_output(&proc_name, &text);
+                                }
+                            }
+
+                            let det = detector_ref.borrow();
+                            // Remote project: forward the port locally as soon
+                            // as it's detected, so the URL is clickable the
+                            // moment the badge appears. Only genuinely local
+                            // ports are forwarded — a public-host URL has
+                            // nothing listening on the ssh host to forward to.
+                            // The forward may land on a different local port if
+                            // the same one is already taken here — badge and
+                            // URL then show the remapped local port.
+                            let ports = det.get_port(&proc_name).map(|port| {
+                                let mut local = port;
+                                if det.has_local_port(&proc_name)
+                                    && let Some(tm) = tunnels_cc.borrow_mut().as_mut()
+                                    && let Some(lp) = tm.ensure(port)
+                                {
+                                    local = lp;
+                                }
+                                (port, local)
+                            });
+                            // Also forward every other local port seen in the
+                            // output (e.g. the vite asset server the theme
+                            // proxy loads CSS/JS from) — best-effort, since
+                            // page-internal asset URLs can't be remapped.
+                            if let Some(tm) = tunnels_cc.borrow_mut().as_mut() {
+                                let badge_port = ports.map(|(p, _)| p);
+                                for port in det.all_local_ports(&proc_name) {
+                                    if badge_port != Some(port) {
+                                        let _ = tm.ensure(port);
                                     }
+                                }
+                            }
+                            if let Some((_, local)) = ports {
+                                sidebar_ref.set_process_port(&qname_contents, Some(local));
+                            }
+                            let url = det.get_url(&proc_name).map(|u| u.to_string());
+                            if let Some(mut url_str) = url {
+                                if let Some((remote, local)) = ports
+                                    && local != remote
+                                {
+                                    url_str = crate::util::port_detector::remap_url_port(
+                                        &url_str, remote, local,
+                                    );
+                                }
+                                sidebar_ref
+                                    .set_process_url(&qname_contents, Some(url_str.as_str()));
+                                if sel_ref.borrow().as_deref() == Some(qname_contents.as_str()) {
+                                    sb_ref.set_url(Some(url_str.as_str()));
+                                }
+                                // open_in_browser: one-shot armed by a
+                                // user-initiated start — fire on the first
+                                // detected URL (tunnel-remapped for remote).
+                                let armed = {
+                                    let mut m = mgr_cc.borrow_mut();
+                                    m.get_process_mut(&proc_name)
+                                        .map(|p| std::mem::take(&mut p.auto_open_armed))
+                                        .unwrap_or(false)
+                                };
+                                if armed {
+                                    log::info!("Opening {url_str} for {proc_name}");
+                                    let launcher = gtk4::UriLauncher::new(&url_str);
+                                    let window = terminal
+                                        .root()
+                                        .and_then(|r| r.downcast::<gtk4::Window>().ok());
+                                    launcher.launch(
+                                        window.as_ref(),
+                                        gtk4::gio::Cancellable::NONE,
+                                        |_| {},
+                                    );
                                 }
                             }
                         }
@@ -1304,6 +1854,9 @@ impl TuxFlowWindow {
 
         // Populate sidebar
         sidebar.add_project(manager, project_name, icon_path, saved_expanded);
+        if let crate::remote::ProjectLocation::Ssh { host, dir } = manager.borrow().location() {
+            sidebar.set_project_remote_hint(project_name, &format!("{host}:{dir}"));
+        }
 
         // Per-project ticker for the idle-silence fallback. Walks Agent-category
         // processes every 2 s and fires a "waiting for input" notification when
@@ -1316,6 +1869,7 @@ impl TuxFlowWindow {
             let pname_cell_tick = pname_cell.clone();
             let focus_gate_tick = focus_gate.clone();
             let icon_resolver_tick = icon_resolver.clone();
+            let sidebar_tick = sidebar.clone();
             glib::timeout_add_local(Duration::from_secs(2), move || {
                 let cells: Vec<(
                     String,
@@ -1347,6 +1901,16 @@ impl TuxFlowWindow {
                 let threshold = settings.notifications.agent_idle_silence_seconds;
                 let project_name = pname_cell_tick.borrow().clone();
                 for (name, kind, la, idle) in cells {
+                    // Working/waiting dot: an agent that produced output in
+                    // the last few seconds is actively working (its spinner
+                    // repaints the terminal continuously); a quiet one is
+                    // waiting for input.
+                    const AGENT_WORKING_WINDOW_SECS: u64 = 4;
+                    let qname = workspace::qualified_name(&project_name, &name);
+                    sidebar_tick.set_process_working(
+                        &qname,
+                        la.get().elapsed().as_secs() < AGENT_WORKING_WINDOW_SECS,
+                    );
                     crate::process::auto_restart::check_agent_silence(
                         &project_name,
                         &name,
@@ -1483,6 +2047,39 @@ impl TuxFlowWindow {
                         }
                     });
                 }
+                "add_remote_project" => {
+                    let win = window_ref.clone();
+                    let ws2 = ws_ref.clone();
+                    let sidebar2 = sidebar_ref.clone();
+                    let stack2 = stack_ref.clone();
+                    let pf2 = pf_ref.clone();
+                    let sb2 = sb_ref.clone();
+                    let sel2 = sel_ref.clone();
+                    let last_proj2 = last_proj_ref.clone();
+                    let pname_cells2 = pname_cells_ref.clone();
+                    let focus_gate2 = focus_gate_ref.clone();
+                    let icon_resolver2 = icon_resolver_ref.clone();
+                    let win_cb = win.clone();
+                    crate::ui::add_remote_project_dialog::AddRemoteProjectDialog::show(
+                        &win,
+                        move |host, dir| {
+                            Self::load_remote_project_interactive(
+                                &win_cb,
+                                &ws2,
+                                &sidebar2,
+                                &stack2,
+                                crate::remote::ProjectLocation::Ssh { host, dir },
+                                &pf2,
+                                &sb2,
+                                &sel2,
+                                &last_proj2,
+                                &pname_cells2,
+                                Some(focus_gate2.clone()),
+                                Some(icon_resolver2.clone()),
+                            );
+                        },
+                    );
+                }
                 "new_custom_agent" => {
                     let ws2 = ws_ref.clone();
                     let stack2 = stack_ref.clone();
@@ -1514,8 +2111,7 @@ impl TuxFlowWindow {
                                     .find(|p| p.name == selected_project)
                                     && config.working_dir.is_none()
                                 {
-                                    config.working_dir =
-                                        Some(project.dir.to_string_lossy().to_string());
+                                    config.working_dir = Some(project.location.dir_str());
                                 }
                             }
                             ws2.borrow_mut()
@@ -1608,8 +2204,7 @@ impl TuxFlowWindow {
                                     .find(|p| p.name == selected_project)
                                     && config.working_dir.is_none()
                                 {
-                                    config.working_dir =
-                                        Some(project.dir.to_string_lossy().to_string());
+                                    config.working_dir = Some(project.location.dir_str());
                                 }
                             }
                             ws2.borrow_mut()
@@ -1705,8 +2300,7 @@ impl TuxFlowWindow {
                                     .find(|p| p.name == selected_project)
                                     && config.working_dir.is_none()
                                 {
-                                    config.working_dir =
-                                        Some(project.dir.to_string_lossy().to_string());
+                                    config.working_dir = Some(project.location.dir_str());
                                 }
                             }
                             // Persist the custom command and clear any stale deletion marker
@@ -1798,6 +2392,7 @@ impl TuxFlowWindow {
                                 working_dir: None,
                                 start_with_project: true,
                                 auto_restart: false,
+                                open_in_browser: false,
                                 restart_when_changed: Vec::new(),
                                 env: std::collections::HashMap::new(),
                                 category: crate::config::schema::ProcessCategory::Terminal,
@@ -1812,8 +2407,7 @@ impl TuxFlowWindow {
                                     .iter()
                                     .find(|p| p.name == selected_project)
                                 {
-                                    config.working_dir =
-                                        Some(project.dir.to_string_lossy().to_string());
+                                    config.working_dir = Some(project.location.dir_str());
                                 }
                             }
                             ws2.borrow_mut()
@@ -1919,6 +2513,7 @@ impl TuxFlowWindow {
                                 working_dir: None,
                                 start_with_project: false,
                                 auto_restart: false,
+                                open_in_browser: false,
                                 restart_when_changed: Vec::new(),
                                 env: std::collections::HashMap::new(),
                                 category: crate::config::schema::ProcessCategory::Agent,
@@ -1933,8 +2528,7 @@ impl TuxFlowWindow {
                                     .iter()
                                     .find(|p| p.name == selected_project)
                                 {
-                                    config.working_dir =
-                                        Some(project.dir.to_string_lossy().to_string());
+                                    config.working_dir = Some(project.location.dir_str());
                                 }
                             }
                             ws2.borrow_mut()
@@ -2182,8 +2776,8 @@ impl TuxFlowWindow {
                     if cfg.working_dir.is_none() {
                         cfg.working_dir = ws_ref
                             .borrow()
-                            .get_project_dir(project_name)
-                            .map(|p| p.to_string_lossy().to_string());
+                            .get_project_location(project_name)
+                            .map(|l| l.dir_str());
                     }
 
                     ws_ref
@@ -2320,9 +2914,9 @@ impl TuxFlowWindow {
                 Self::resolve_active_project(&stack_git, &last_proj_git, &sidebar_git);
             if let Some(proj_name) = project_name {
                 let ws_borrow = ws_git.borrow();
-                if let Some(dir) = ws_borrow.get_project_dir(&proj_name) {
+                if let Some(location) = ws_borrow.get_project_location(&proj_name) {
                     // Refresh the badge as the dialog opens — cheap, no fetch.
-                    Self::refresh_status_bar_git(dir.clone(), status_bar_git.clone(), false);
+                    Self::refresh_status_bar_git(location.clone(), status_bar_git.clone(), false);
 
                     let cb = {
                         let ws = ws_git.clone();
@@ -2333,13 +2927,13 @@ impl TuxFlowWindow {
                         move || {
                             if let Some(proj) =
                                 Self::resolve_active_project(&stack, &last_proj, &sidebar)
-                                && let Some(dir) = ws.borrow().get_project_dir(&proj)
+                                && let Some(location) = ws.borrow().get_project_location(&proj)
                             {
-                                Self::refresh_status_bar_git(dir, sb.clone(), true);
+                                Self::refresh_status_bar_git(location, sb.clone(), true);
                             }
                         }
                     };
-                    GitChangesDialog::show(btn, &dir, cb);
+                    GitChangesDialog::show(btn, &location, cb);
                 }
             }
         });
@@ -2361,21 +2955,68 @@ impl TuxFlowWindow {
             if let Some(name) = stack.visible_child_name() {
                 if let Some((proj, _)) = name.split_once("::") {
                     title_ref.set_label(proj);
-                    let ws_borrow = ws_vis.borrow();
-                    let dir_opt = ws_borrow.get_project_dir(proj);
-                    let has_git = dir_opt.as_ref().is_some_and(|d| d.join(".git").exists());
-                    sb_vis.set_git_available(has_git);
-                    if has_git {
-                        if let Some(dir) = dir_opt {
-                            Self::refresh_status_bar_git(dir.clone(), sb_vis.clone(), true);
+                    let loc_opt = ws_vis.borrow().get_project_location(proj);
+                    match loc_opt {
+                        Some(location @ crate::remote::ProjectLocation::Local(_)) => {
+                            sb_vis.set_remote_hint(None);
+                            let has_git = has_git_repo(&location);
+                            sb_vis.set_git_available(has_git);
+                            if has_git {
+                                Self::refresh_status_bar_git(location, sb_vis.clone(), true);
+                            } else {
+                                sb_vis.set_git_pull_indicator(0);
+                                sb_vis.set_git_dirty(0);
+                            }
                         }
-                    } else {
-                        sb_vis.set_git_pull_indicator(0);
-                        sb_vis.set_git_dirty(0);
+                        Some(location @ crate::remote::ProjectLocation::Ssh { .. }) => {
+                            if let crate::remote::ProjectLocation::Ssh { host, dir } = &location {
+                                sb_vis.set_remote_hint(Some(&format!("{host}:{dir}")));
+                            }
+                            // Probing .git needs an ssh round trip — do it off
+                            // the main thread, hide the button until it answers.
+                            sb_vis.set_git_available(false);
+                            sb_vis.set_git_pull_indicator(0);
+                            sb_vis.set_git_dirty(0);
+                            let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+                            {
+                                let location = location.clone();
+                                std::thread::spawn(move || {
+                                    let _ = tx.send(has_git_repo(&location));
+                                });
+                            }
+                            let sb = sb_vis.clone();
+                            let stack = stack.clone();
+                            let proj = proj.to_string();
+                            glib::spawn_future_local(async move {
+                                if rx.await != Ok(true) {
+                                    return;
+                                }
+                                // Ignore if the user already switched tabs
+                                let still_current = stack
+                                    .visible_child_name()
+                                    .and_then(|n| n.split_once("::").map(|(p, _)| p.to_string()))
+                                    .is_some_and(|p| p == proj);
+                                if still_current {
+                                    sb.set_git_available(true);
+                                    TuxFlowWindow::refresh_status_bar_git(
+                                        location,
+                                        sb.clone(),
+                                        true,
+                                    );
+                                }
+                            });
+                        }
+                        None => {
+                            sb_vis.set_remote_hint(None);
+                            sb_vis.set_git_available(false);
+                            sb_vis.set_git_pull_indicator(0);
+                            sb_vis.set_git_dirty(0);
+                        }
                     }
                 }
             } else {
                 title_ref.set_label("TuxFlow");
+                sb_vis.set_remote_hint(None);
                 sb_vis.set_git_available(false);
                 sb_vis.set_git_pull_indicator(0);
                 sb_vis.set_git_dirty(0);
@@ -2389,20 +3030,36 @@ impl TuxFlowWindow {
             let stack_poll = terminal_stack.clone();
             let last_proj_poll = last_selected_project.clone();
             let sidebar_poll = sidebar.clone();
+            // One refresh in flight at a time: when a remote host is down,
+            // each git call blocks its worker thread for up to 10 s — without
+            // this, every tick would stack another blocked thread.
+            let in_flight = Rc::new(Cell::new(false));
             glib::timeout_add_seconds_local(60, move || {
+                if in_flight.get() {
+                    return glib::ControlFlow::Continue;
+                }
                 let project_name = TuxFlowWindow::resolve_active_project(
                     &stack_poll,
                     &last_proj_poll,
                     &sidebar_poll,
                 );
                 if let Some(proj_name) = project_name {
-                    let ws_borrow = ws_poll.borrow();
-                    if let Some(dir) = ws_borrow.get_project_dir(&proj_name) {
-                        if dir.join(".git").exists() {
-                            TuxFlowWindow::refresh_status_bar_git(
-                                dir.clone(),
+                    let loc_opt = ws_poll.borrow().get_project_location(&proj_name);
+                    if let Some(location) = loc_opt {
+                        // Local: skip non-repos via a cheap stat. Remote: refresh
+                        // unconditionally — the worker thread's git calls just
+                        // return zero counts when there's no repo.
+                        let do_refresh = match &location {
+                            crate::remote::ProjectLocation::Local(d) => d.join(".git").exists(),
+                            crate::remote::ProjectLocation::Ssh { .. } => true,
+                        };
+                        if do_refresh {
+                            in_flight.set(true);
+                            TuxFlowWindow::refresh_status_bar_git_guarded(
+                                location,
                                 sb_poll.clone(),
                                 true,
+                                Some(in_flight.clone()),
                             );
                         }
                     }
@@ -2570,7 +3227,16 @@ impl TuxFlowWindow {
                         if let Some(child) = stack_ref.visible_child()
                             && let Ok(terminal) = child.downcast::<vte4::Terminal>()
                         {
-                            terminal.paste_clipboard();
+                            // Remote terminal + image in the clipboard: the
+                            // image only exists on this machine — upload it
+                            // to the host's TuxFlow clipboard file first.
+                            let handled = Self::remote_paste_target(&ws_ref, &stack_ref)
+                                .is_some_and(|(host, is_agent)| {
+                                    Self::paste_image_to_remote(&terminal, &host, is_agent)
+                                });
+                            if !handled {
+                                terminal.paste_clipboard();
+                            }
                         }
                     }
                     ShortcutAction::TerminalSearch => {
@@ -2689,6 +3355,25 @@ impl TuxFlowWindow {
                             Some(icon_resolver_ref.clone()),
                         );
                     }
+                }
+                return gtk4::glib::Propagation::Stop;
+            }
+
+            // Hardcoded: plain Ctrl+V in a remote *agent* terminal. That's
+            // the agent's image-paste chord, but the clipboard lives on this
+            // machine — a raw ^V would only earn Claude's "No image found in
+            // clipboard". Bridge images (native attachment via the shim) and
+            // paste text normally instead. Non-agent terminals keep raw ^V
+            // (shell literal-insert).
+            if ctrl
+                && !state.contains(gdk::ModifierType::SHIFT_MASK)
+                && keyval == gdk::Key::v
+                && let Some((host, true)) = Self::remote_paste_target(&ws_ref, &stack_ref)
+                && let Some(child) = stack_ref.visible_child()
+                && let Ok(terminal) = child.downcast::<vte4::Terminal>()
+            {
+                if !Self::paste_image_to_remote(&terminal, &host, true) {
+                    terminal.paste_clipboard();
                 }
                 return gtk4::glib::Propagation::Stop;
             }
@@ -2999,10 +3684,17 @@ impl TuxFlowWindow {
         );
         let config = crate::config::schema::ProcessConfig {
             name: term_name.clone(),
-            command: std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string()),
-            working_dir: Some(project.dir.to_string_lossy().to_string()),
+            // Remote terminals must resolve the shell on the host — the
+            // local $SHELL path may not exist there.
+            command: if project.location.is_remote() {
+                "exec \"$SHELL\"".to_string()
+            } else {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+            },
+            working_dir: Some(project.location.dir_str()),
             start_with_project: true,
             auto_restart: false,
+            open_in_browser: false,
             restart_when_changed: Vec::new(),
             env: std::collections::HashMap::new(),
             category: crate::config::schema::ProcessCategory::Terminal,

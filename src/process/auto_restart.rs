@@ -13,9 +13,27 @@ use crate::workspace;
 
 const MAX_RESTART_ATTEMPTS: u32 = 5;
 const BASE_DELAY_MS: u32 = 1000;
+/// Backoff doubles up to this exponent (2^5 → 32 s), then stays flat.
+/// Matters for connection-loss reconnects, which retry indefinitely.
+const MAX_BACKOFF_EXPONENT: u32 = 5;
+/// A run at least this long before exiting counts as a new incident:
+/// the attempt counter resets instead of accumulating across hours.
+const STABLE_RUN_SECS: u64 = 60;
 
 /// Shared name cell that allows the auto-restart handler to track renames.
 pub type ProcessNameCell = Rc<RefCell<String>>;
+
+/// VTE's `child-exited` delivers the raw waitpid status (exit 127 arrives as
+/// 32512). Decode it to the conventional shell exit code: `exit N` for normal
+/// exits, `128 + signal` for signal deaths — everything downstream (crash vs
+/// connection-loss classification, "command not found" hints) expects that.
+fn decode_exit_status(raw: i32) -> i32 {
+    if raw & 0x7f == 0 {
+        (raw >> 8) & 0xff
+    } else {
+        128 + (raw & 0x7f)
+    }
+}
 
 /// Closure that returns true when a notification for the given qname should fire
 /// (i.e. the user isn't already looking at that terminal). Optional — None means
@@ -53,12 +71,13 @@ pub fn build_auto_restart_handler(
 
             terminal.connect_child_exited(move |_terminal, status| {
                 let name = name_cell.borrow().clone();
-                log::debug!("child_exited fired for {name} with status {status}");
+                let code = decode_exit_status(status);
+                log::debug!("child_exited fired for {name}: raw status {status}, exit code {code}");
                 handle_process_exit(
                     &manager_ref,
                     &project_name,
                     &name,
-                    Some(status),
+                    Some(code),
                     auto_restart,
                     focus_gate.as_ref(),
                     icon_resolver.as_ref(),
@@ -173,7 +192,61 @@ fn handle_process_exit(
     }
 
     let status = status.unwrap();
-    log::warn!("Process {name} crashed (exit status {status})");
+
+    // Exit 255 is ssh's own "connection failed/lost" exit code. For a process
+    // of a remote project that means the link dropped, not that the command
+    // crashed — surface it as a disconnect/reconnect instead of a crash.
+    // (SSH-category terminals are user-managed ssh sessions; leave those be.)
+    let is_connection_loss = status == 255 && {
+        let mgr = manager_ref.borrow();
+        mgr.location().is_remote()
+            && mgr
+                .get_process(name)
+                .is_some_and(|p| p.config.category != crate::config::schema::ProcessCategory::SSH)
+    };
+    if is_connection_loss {
+        log::warn!("Process {name} lost its ssh connection (exit 255)");
+    } else {
+        log::warn!("Process {name} crashed (exit status {status})");
+    }
+
+    // Explain the exit inside the terminal itself. Crucial for remote
+    // processes: an error printed inside the tmux pane (e.g. the shell's
+    // "command not found") vanishes with the session, leaving only tmux's
+    // bare "[exited]" behind.
+    {
+        let mgr = manager_ref.borrow();
+        if let Some(proc) = mgr.get_process(name)
+            && let Some(term) = proc.terminal.as_ref()
+        {
+            let msg = if is_connection_loss {
+                "\x1b[1;33m[tuxflow]\x1b[0m connection lost — reconnecting, the process keeps \
+                 running on the host"
+                    .to_string()
+            } else if status == 127 || status == 126 {
+                let what = if status == 127 {
+                    "command not found"
+                } else {
+                    "command not executable"
+                };
+                let mut cmd = proc.config.command.clone();
+                if cmd.len() > 60 {
+                    cmd.truncate(60);
+                    cmd.push_str("…");
+                }
+                match mgr.location().host() {
+                    Some(host) => format!(
+                        "\x1b[1;31m[tuxflow]\x1b[0m exit {status} — {what} on {host}: \
+                         \x1b[1m{cmd}\x1b[0m (is it installed there?)"
+                    ),
+                    None => format!("\x1b[1;31m[tuxflow]\x1b[0m exit {status} — {what}: {cmd}"),
+                }
+            } else {
+                format!("\x1b[1;31m[tuxflow]\x1b[0m process exited with status {status}")
+            };
+            term.feed(format!("\r\n{msg}\r\n").as_bytes());
+        }
+    }
 
     if !auto_restart {
         {
@@ -191,7 +264,11 @@ fn handle_process_exit(
         if settings.notifications.on_crash
             && should_notify(&settings, project_name, name, focus_gate)
         {
-            notifications::notify_crash(project_name, name, resolve_icon().as_deref());
+            if is_connection_loss {
+                notifications::notify_disconnect(project_name, name, resolve_icon().as_deref());
+            } else {
+                notifications::notify_crash(project_name, name, resolve_icon().as_deref());
+            }
         }
         return;
     }
@@ -203,10 +280,21 @@ fn handle_process_exit(
             return;
         };
 
+        // A stable run before this exit starts a new incident — don't let
+        // attempts from failures hours apart accumulate into a give-up.
+        if proc
+            .started_at
+            .is_some_and(|t| t.elapsed().as_secs() >= STABLE_RUN_SECS)
+        {
+            proc.restart_count = 0;
+        }
         proc.restart_count += 1;
         restart_count = proc.restart_count;
 
-        if restart_count > MAX_RESTART_ATTEMPTS {
+        // Connection loss never gives up: the process (tmux-wrapped) is
+        // still running detached on the host — keep trying to reattach
+        // until the link comes back or the user stops it.
+        if !is_connection_loss && restart_count > MAX_RESTART_ATTEMPTS {
             log::error!(
                 "Process {name} exceeded max restart attempts ({MAX_RESTART_ATTEMPTS}), giving up"
             );
@@ -214,7 +302,7 @@ fn handle_process_exit(
         }
     }
 
-    if restart_count > MAX_RESTART_ATTEMPTS {
+    if !is_connection_loss && restart_count > MAX_RESTART_ATTEMPTS {
         manager_ref
             .borrow()
             .notify_status_change(name, ProcessStatus::Crashed);
@@ -240,11 +328,35 @@ fn handle_process_exit(
     if settings.notifications.on_auto_restart
         && should_notify(&settings, project_name, name, focus_gate)
     {
-        notifications::notify_restart(project_name, name, restart_count, resolve_icon().as_deref());
+        if is_connection_loss {
+            // One notification per outage — reconnect attempts are unlimited
+            // and a long outage would otherwise fire one every backoff tick.
+            if restart_count == 1 {
+                notifications::notify_reconnect(
+                    project_name,
+                    name,
+                    restart_count,
+                    resolve_icon().as_deref(),
+                );
+            }
+        } else {
+            notifications::notify_restart(
+                project_name,
+                name,
+                restart_count,
+                resolve_icon().as_deref(),
+            );
+        }
     }
 
-    let delay = BASE_DELAY_MS * 2u32.pow(restart_count - 1);
-    log::info!("Restarting {name} in {delay}ms (attempt {restart_count}/{MAX_RESTART_ATTEMPTS})");
+    let delay = BASE_DELAY_MS * 2u32.pow((restart_count - 1).min(MAX_BACKOFF_EXPONENT));
+    if is_connection_loss {
+        log::info!("Reconnecting {name} in {delay}ms (attempt {restart_count})");
+    } else {
+        log::info!(
+            "Restarting {name} in {delay}ms (attempt {restart_count}/{MAX_RESTART_ATTEMPTS})"
+        );
+    }
 
     let manager_ref2 = manager_ref.clone();
     let name2 = name.to_string();
@@ -343,4 +455,19 @@ pub fn check_agent_silence(
     let icon = icon_resolver.and_then(|r| r(project_name));
     notifications::notify_agent_idle(project_name, process_name, icon.as_deref(), kind);
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_exit_status;
+
+    #[test]
+    fn decodes_raw_waitpid_statuses() {
+        assert_eq!(decode_exit_status(0), 0); // clean exit
+        assert_eq!(decode_exit_status(32512), 127); // command not found
+        assert_eq!(decode_exit_status(32256), 126); // not executable
+        assert_eq!(decode_exit_status(65280), 255); // ssh connection loss
+        assert_eq!(decode_exit_status(256), 1); // plain crash, exit 1
+        assert_eq!(decode_exit_status(15), 128 + 15); // SIGTERM death
+    }
 }

@@ -9,6 +9,7 @@ use vte4::prelude::*;
 
 use crate::config::schema::{ProcessCategory, ProcessConfig};
 use crate::config::settings::AppSettings;
+use crate::remote::ProjectLocation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStatus {
@@ -43,6 +44,23 @@ pub struct ManagedProcess {
     /// notification has fired for the current quiet period, reset on next
     /// `contents-changed`.
     pub is_idle: Option<Rc<Cell<bool>>>,
+    /// Remote projects only: pidfile on the ssh host holding this spawn's
+    /// remote login-session PID, used for an explicit remote kill on Stop
+    /// (covers hosts without tmux).
+    pub remote_pidfile: Option<String>,
+    /// Remote projects only: tmux session name on the ssh host. Kept across
+    /// respawns so a reconnect reattaches to the still-running session;
+    /// cleared by kill(), which also tears the session down.
+    pub remote_session: Option<String>,
+    /// Set by kill() for remote processes: the next spawn must kill any
+    /// surviving tmux session before creating one, because the explicit
+    /// remote kill is fire-and-forget and a quick restart could race it.
+    pub remote_fresh_next: bool,
+    /// One-shot: open the detected URL in the browser when it appears.
+    /// Armed by user-initiated spawns of processes with
+    /// `config.open_in_browser`; never by auto-restarts or reattaches.
+    /// Consumed by the URL-detection handler in window.rs.
+    pub auto_open_armed: bool,
 }
 
 impl ManagedProcess {
@@ -62,6 +80,10 @@ impl ManagedProcess {
             qname_cell: None,
             last_activity: None,
             is_idle: None,
+            remote_pidfile: None,
+            remote_session: None,
+            remote_fresh_next: false,
+            auto_open_armed: false,
         }
     }
 
@@ -183,10 +205,12 @@ pub struct ProcessManager {
     on_pid_change: Option<Rc<dyn Fn(i32, bool)>>,
     on_file_watch_restart: Option<Rc<dyn Fn(&str)>>,
     settings: AppSettings,
+    /// Where this project's files live; remote managers wrap commands in ssh.
+    location: ProjectLocation,
 }
 
 impl ProcessManager {
-    pub fn new() -> ProcessManagerRef {
+    pub fn new(location: ProjectLocation) -> ProcessManagerRef {
         Rc::new(RefCell::new(Self {
             processes: HashMap::new(),
             order: Vec::new(),
@@ -194,7 +218,12 @@ impl ProcessManager {
             on_pid_change: None,
             on_file_watch_restart: None,
             settings: AppSettings::load(),
+            location,
         }))
+    }
+
+    pub fn location(&self) -> &ProjectLocation {
+        &self.location
     }
 
     pub fn settings(&self) -> &AppSettings {
@@ -238,17 +267,24 @@ impl ProcessManager {
     }
 
     pub fn spawn(&mut self, name: &str) {
-        self.spawn_inner(name, None);
+        self.spawn_inner(name, None, true);
+    }
+
+    /// Spawn without arming the open-in-browser one-shot. For spawns the
+    /// user didn't ask for right now: reattaching to live remote sessions
+    /// at project load.
+    pub fn spawn_quiet(&mut self, name: &str) {
+        self.spawn_inner(name, None, false);
     }
 
     /// Like `spawn`, but uses `command_override` as the shell command instead
     /// of the persisted `proc.config.command`. The saved config is not
     /// modified — a subsequent plain `spawn` reverts to the original command.
     pub fn spawn_with_command_override(&mut self, name: &str, command_override: &str) {
-        self.spawn_inner(name, Some(command_override));
+        self.spawn_inner(name, Some(command_override), true);
     }
 
-    fn spawn_inner(&mut self, name: &str, command_override: Option<&str>) {
+    fn spawn_inner(&mut self, name: &str, command_override: Option<&str>, user_initiated: bool) {
         // Ensure terminal exists before spawning
         {
             let settings = self.settings.clone();
@@ -266,6 +302,7 @@ impl ProcessManager {
             log::info!("Process {name} already running");
             return;
         }
+        let was_restarting = proc.status == ProcessStatus::Restarting;
 
         let terminal = proc.terminal.as_ref().unwrap();
 
@@ -274,6 +311,48 @@ impl ProcessManager {
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
         let command: &str = command_override.unwrap_or(&proc.config.command);
+
+        // Remote projects: run the command on the ssh host, in its remote
+        // working_dir, via `exec ssh -t` — the VTE child *is* ssh, so PID
+        // capture, exit codes, and auto-restart keep working unchanged. The
+        // command itself lives in a tmux session on the host, so connection
+        // loss and app quit merely detach it; respawning reattaches.
+        // SSH-category processes are already ssh invocations; leave them be.
+        // The remote path also can't be VTE's cwd, so it goes into the wrap.
+        let remote_command: String;
+        let (command, working_dir): (&str, Option<String>) = match &self.location {
+            ProjectLocation::Ssh { host, .. } if proc.config.category != ProcessCategory::SSH => {
+                let remote_dir = proc
+                    .config
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| self.location.dir_str());
+                // Fresh pidfile per spawn so kill() can end the remote session
+                // explicitly (SIGHUP-trapping processes survive PTY teardown).
+                let pidfile = crate::remote::new_remote_pidfile();
+                // Reuse the previous spawn's tmux session so reconnects
+                // reattach; kill() clears it, and the deterministic name
+                // also lets a fresh app launch adopt sessions still running
+                // from the previous one.
+                let fresh = std::mem::take(&mut proc.remote_fresh_next);
+                let session = proc.remote_session.clone().unwrap_or_else(|| {
+                    crate::remote::remote_session_name(&self.location.key(), name)
+                });
+                remote_command = crate::remote::wrap_remote_command(
+                    host,
+                    &remote_dir,
+                    &proc.config.env,
+                    command,
+                    Some(&pidfile),
+                    &session,
+                    fresh,
+                );
+                proc.remote_pidfile = Some(pidfile);
+                proc.remote_session = Some(session);
+                (remote_command.as_str(), None)
+            }
+            _ => (command, proc.config.working_dir.clone()),
+        };
 
         // Build argv: shell -li -c "command"
         // Use login (-l) + interactive (-i) shell so all profile scripts are
@@ -305,8 +384,6 @@ impl ProcessManager {
             merged.iter().map(|(k, v)| format!("{k}={v}")).collect()
         };
         let env_refs: Vec<&str> = env_strings.iter().map(|s| s.as_str()).collect();
-
-        let working_dir = proc.config.working_dir.clone();
 
         let name_clone = name.to_string();
 
@@ -342,7 +419,14 @@ impl ProcessManager {
         proc.pid_cell = Some(pid_cell);
         proc.status = ProcessStatus::Running;
         proc.started_at = Some(Instant::now());
-        proc.restart_count = 0;
+        // Manual starts begin a fresh incident; auto-restart respawns keep
+        // the attempt counter so crash loops can give up and backoff grows.
+        if !was_restarting {
+            proc.restart_count = 0;
+        }
+        // Arm the browser one-shot only for starts the user asked for —
+        // an auto-restart or reconnect popping a tab would be noise.
+        proc.auto_open_armed = user_initiated && !was_restarting && proc.config.open_in_browser;
 
         let name_owned = name.to_string();
         if let Some(ref cb) = self.on_status_change {
@@ -351,12 +435,34 @@ impl ProcessManager {
     }
 
     pub fn kill(&mut self, name: &str) {
+        self.kill_inner(name, true);
+    }
+
+    /// `kill_remote`: whether to tear down the remote tmux session / login
+    /// session too. `false` kills only the local side (the ssh client),
+    /// which merely detaches the remote session — it keeps running on the
+    /// host and the next spawn reattaches.
+    fn kill_inner(&mut self, name: &str, kill_remote: bool) {
+        let remote_host = self.location.host().map(str::to_string);
         let Some(proc) = self.processes.get_mut(name) else {
             return;
         };
 
         if proc.status != ProcessStatus::Running {
             return;
+        }
+
+        // Remote processes: also kill the remote session explicitly. The PTY
+        // teardown below only detaches the tmux session (and on tmux-less
+        // hosts, SIGHUP-trapping processes would survive it).
+        if kill_remote && let Some(host) = &remote_host {
+            let session = proc.remote_session.take();
+            if let Some(pidfile) = proc.remote_pidfile.take() {
+                crate::remote::remote_kill(host, &pidfile, session.as_deref());
+            }
+            // The remote kill above is fire-and-forget — make the next spawn
+            // clear any surviving session inline instead of reattaching to it.
+            proc.remote_fresh_next = true;
         }
 
         // Kill the entire process tree rooted at the spawned PID.
@@ -519,6 +625,22 @@ impl ProcessManager {
             .collect();
         for name in names {
             self.kill(&name);
+        }
+    }
+
+    /// Stop only the local side of every running process. For remote
+    /// projects that kills the ssh clients, *detaching* the tmux sessions —
+    /// the processes keep running on the host and the next launch
+    /// reattaches. Used at app shutdown.
+    pub fn detach_all(&mut self) {
+        let names: Vec<String> = self
+            .processes
+            .values()
+            .filter(|p| p.status == ProcessStatus::Running)
+            .map(|p| p.config.name.clone())
+            .collect();
+        for name in names {
+            self.kill_inner(&name, false);
         }
     }
 

@@ -117,6 +117,15 @@ impl EditProjectDialog {
         dir_row.add_suffix(&editor_btn);
         project_group.add(&dir_row);
 
+        // Remote project: the directory isn't on this machine, so the local
+        // file-manager/terminal quick actions can't operate on it. The editor
+        // button stays — code-family editors open it via SSH Remote.
+        if project_dir.starts_with("ssh://") {
+            reveal_btn.set_visible(false);
+            terminal_btn.set_visible(false);
+            editor_btn.set_tooltip_text(Some("Open in Editor (SSH Remote)"));
+        }
+
         page.add(&project_group);
 
         // --- Icon section: single ActionRow with prefix preview + suffix menu ---
@@ -332,34 +341,9 @@ impl EditProjectDialog {
 
         let dir_for_editor = project_dir.to_string();
         editor_btn.connect_clicked(move |_| {
-            let settings = AppSettings::load();
-            let editor = &settings.tools.default_editor;
-            if editor == "xdg-open" {
-                for candidate in [
-                    "code",
-                    "codium",
-                    "zed",
-                    "gnome-text-editor",
-                    "gedit",
-                    "kate",
-                ] {
-                    if std::process::Command::new("which")
-                        .arg(candidate)
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false)
-                    {
-                        let _ = std::process::Command::new(candidate)
-                            .arg(&dir_for_editor)
-                            .spawn();
-                        return;
-                    }
-                }
-            } else {
-                let _ = std::process::Command::new(editor)
-                    .arg(&dir_for_editor)
-                    .spawn();
-            }
+            crate::util::editor::open_in_editor(&crate::remote::ProjectLocation::parse(
+                &dir_for_editor,
+            ));
         });
 
         // --- Wire icon actions ---

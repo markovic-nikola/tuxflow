@@ -312,6 +312,12 @@ impl CommandPalette {
                 action: "add_project".to_string(),
             },
             PaletteItem {
+                category: "PROJECT".to_string(),
+                label: "New remote project (over SSH)".to_string(),
+                icon: "folder-remote-symbolic".to_string(),
+                action: "add_remote_project".to_string(),
+            },
+            PaletteItem {
                 category: "ACTIONS".to_string(),
                 label: "Stop all processes".to_string(),
                 icon: "media-playback-stop-symbolic".to_string(),

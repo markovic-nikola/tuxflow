@@ -280,6 +280,12 @@ impl ProjectRow {
         Self::update_icon_widget(&self.icon_area, &name, icon_path);
     }
 
+    /// Mark this project as remote: tooltip with the host:dir it lives on.
+    /// (The visual indicator lives in the status bar for the active project.)
+    pub fn set_remote_hint(&self, hint: &str) {
+        self.header_row.set_tooltip_text(Some(hint));
+    }
+
     pub fn set_name(&self, name: &str) {
         self.name_label.set_label(name);
         *self.name_cell.borrow_mut() = name.to_string();

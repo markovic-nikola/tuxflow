@@ -27,6 +27,11 @@ pub fn load_config(path: &Path) -> Result<TuxFlowConfig, ConfigError> {
         return Err(ConfigError::NotFound(path.to_path_buf()));
     }
     let content = std::fs::read_to_string(path)?;
-    let config: TuxFlowConfig = toml::from_str(&content)?;
+    load_config_str(&content)
+}
+
+/// Parse a tuxflow.toml already read into memory (e.g. fetched over ssh).
+pub fn load_config_str(content: &str) -> Result<TuxFlowConfig, ConfigError> {
+    let config: TuxFlowConfig = toml::from_str(content)?;
     Ok(config)
 }

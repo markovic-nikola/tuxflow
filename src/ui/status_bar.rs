@@ -5,6 +5,7 @@ use gtk4::prelude::*;
 
 pub struct StatusBar {
     container: gtk4::Box,
+    remote_icon: gtk4::Image,
     update_btn: gtk4::Button,
     process_label: gtk4::Label,
     separator_label: gtk4::Label,
@@ -38,6 +39,14 @@ impl StatusBar {
 
         // Left side: resource info + process info
         let info_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+
+        // Remote-project indicator: shown when the active project lives on
+        // an ssh host; tooltip carries host:dir.
+        let remote_icon = gtk4::Image::from_icon_name("folder-remote-symbolic");
+        remote_icon.set_pixel_size(14);
+        remote_icon.add_css_class("dim-label");
+        remote_icon.set_visible(false);
+        info_box.append(&remote_icon);
 
         let cpu_label = gtk4::Label::builder()
             .label("")
@@ -175,6 +184,7 @@ impl StatusBar {
 
         Self {
             container,
+            remote_icon,
             update_btn,
             process_label,
             separator_label,
@@ -203,6 +213,13 @@ impl StatusBar {
             .tooltip_text(label)
             .css_classes(["flat", "circular"])
             .build()
+    }
+
+    /// Show/hide the remote-project indicator. `Some(hint)` = remote,
+    /// with `host:dir` as tooltip; `None` = local project or nothing open.
+    pub fn set_remote_hint(&self, hint: Option<&str>) {
+        self.remote_icon.set_visible(hint.is_some());
+        self.remote_icon.set_tooltip_text(hint);
     }
 
     pub fn set_project_info(&self, project_name: Option<&str>, running: usize, total: usize) {

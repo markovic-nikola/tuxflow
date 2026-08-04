@@ -25,6 +25,11 @@ pub struct ProcessConfig {
     pub start_with_project: bool,
     #[serde(default)]
     pub auto_restart: bool,
+    /// Open the process's detected URL in the local browser once it appears —
+    /// only after user-initiated starts (never auto-restarts or reattaches).
+    /// For remote projects the tunnelled (possibly remapped) URL is opened.
+    #[serde(default)]
+    pub open_in_browser: bool,
     #[serde(default)]
     pub restart_when_changed: Vec<String>,
     #[serde(default)]

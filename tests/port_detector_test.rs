@@ -121,6 +121,10 @@ fn concurrently_vite_plus_shopify_picks_local_app_port() {
     pd.scan_output("serve", output);
     assert_eq!(pd.get_port("serve"), Some(9292));
     assert!(pd.get_url("serve").unwrap().contains("127.0.0.1:9292"));
+    // The vite asset-server port doesn't win the badge, but a remote project
+    // must tunnel it too — the theme proxy loads CSS/JS from it.
+    let all = pd.all_local_ports("serve");
+    assert!(all.contains(&5175) && all.contains(&9292), "{all:?}");
 }
 
 #[test]
@@ -209,4 +213,68 @@ fn sticky_does_not_overwrite() {
     // Even if a later scan finds a different port, the locked one wins.
     pd.scan_output("dev", "Server at http://localhost:9999");
     assert_eq!(pd.get_port("dev"), Some(3000));
+}
+
+#[test]
+fn remap_url_port_replaces_exact_port_only() {
+    use tuxflow::util::port_detector::remap_url_port;
+    assert_eq!(
+        remap_url_port("http://localhost:3000/", 3000, 4123),
+        "http://localhost:4123/"
+    );
+    // Port 80 must not touch the ":8080" substring
+    assert_eq!(
+        remap_url_port("http://localhost:8080", 80, 9999),
+        "http://localhost:8080"
+    );
+    assert_eq!(
+        remap_url_port("http://localhost:80", 80, 9999),
+        "http://localhost:9999"
+    );
+    // Port at end of URL with a path
+    assert_eq!(
+        remap_url_port("http://127.0.0.1:5173/app", 5173, 5174),
+        "http://127.0.0.1:5174/app"
+    );
+    // No occurrence — unchanged
+    assert_eq!(
+        remap_url_port("http://localhost:3000", 4000, 5000),
+        "http://localhost:3000"
+    );
+}
+
+#[test]
+fn oauth_link_does_not_lock_out_later_local_url() {
+    // Regression: `shopify theme dev` prints its login URL before the dev
+    // server URL. The public auth link must stay provisional so the real
+    // local port can still lock in when it appears seconds later.
+    let mut pd = PortDetector::new();
+    pd.scan_output(
+        "shopify",
+        "[shopify] Opened link to start the auth process: \
+         https://accounts.shopify.com/activate-with-code?device_code%5Buser_code%5D=CMQH-TSJS",
+    );
+    // Provisional remote fallback (port 443) — better than nothing…
+    assert_eq!(pd.get_port("shopify"), Some(443));
+    // …but a later local URL replaces it and locks.
+    pd.scan_output("shopify", "[shopify] [1] http://127.0.0.1:9292");
+    assert_eq!(pd.get_port("shopify"), Some(9292));
+    // Locked: further remote URLs can no longer change it.
+    pd.scan_output("shopify", "See https://something.example.com/");
+    assert_eq!(pd.get_port("shopify"), Some(9292));
+}
+
+#[test]
+fn late_scan_still_collects_secondary_ports_after_badge_lock() {
+    // Regression: at tmux reattach, a partial-redraw screen scan can lock
+    // the badge before the pane-history seed arrives. The seed must still
+    // harvest secondary ports (vite asset server) or their tunnels never
+    // come up — styling breaks with hardcoded :5173 asset URLs.
+    let mut pd = PortDetector::new();
+    pd.scan_output("dev", "[shopify] [1] http://127.0.0.1:9292");
+    assert_eq!(pd.get_port("dev"), Some(9292));
+    pd.scan_output("dev", "[vite]  \u{279c}  Local:   https://localhost:5173/");
+    assert!(pd.all_local_ports("dev").contains(&5173));
+    // Badge stays locked
+    assert_eq!(pd.get_port("dev"), Some(9292));
 }

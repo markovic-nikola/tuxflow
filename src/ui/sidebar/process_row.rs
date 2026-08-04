@@ -15,6 +15,9 @@ pub struct ProcessRow {
     status_dot: gtk4::Label,
     status_spinner: gtk4::Image,
     is_terminal: bool,
+    /// Agent rows use the output-driven working/waiting dot exclusively —
+    /// the CPU-based spinner flip in `set_resources` would cover it.
+    is_agent: bool,
     is_running: Cell<bool>,
     name_label: gtk4::Label,
     /// Shared name used by button callbacks so they track renames.
@@ -262,6 +265,7 @@ impl ProcessRow {
             status_dot,
             status_spinner,
             is_terminal,
+            is_agent: category == ProcessCategory::Agent,
             is_running: Cell::new(false),
             name_label,
             action_name,
@@ -393,12 +397,29 @@ impl ProcessRow {
         popover
     }
 
+    /// Agent-only: amber/pulsing dot while the agent is actively producing
+    /// output, steady green when it's waiting for input. No-op unless running.
+    pub fn set_working(&self, working: bool) {
+        let want = working && self.is_running.get();
+        let has = self.status_dot.has_css_class("status-working");
+        if want == has {
+            return;
+        }
+        log::debug!("agent status dot: working={want}");
+        if want {
+            self.status_dot.add_css_class("status-working");
+        } else {
+            self.status_dot.remove_css_class("status-working");
+        }
+    }
+
     pub fn set_status(&self, status: ProcessStatus) {
         // Remove old CSS classes from dot
         self.status_dot.remove_css_class("status-running");
         self.status_dot.remove_css_class("status-stopped");
         self.status_dot.remove_css_class("status-crashed");
         self.status_dot.remove_css_class("status-restarting");
+        self.status_dot.remove_css_class("status-working");
 
         let is_running = matches!(status, ProcessStatus::Running | ProcessStatus::Restarting);
         self.play_button.set_visible(!is_running);
@@ -453,8 +474,10 @@ impl ProcessRow {
         self.memory_label
             .set_visible(mem_threshold >= 0.0 && memory_mb > mem_threshold);
 
-        // Toggle spinner based on CPU activity (not for terminals)
-        if self.is_running.get() {
+        // Toggle spinner based on CPU activity (not for terminals). Agent
+        // rows opt out entirely: their indicator is the output-driven
+        // working/waiting dot, which the spinner would cover.
+        if self.is_running.get() && !self.is_agent {
             if cpu_percent > 1.0 {
                 self.status_spinner.add_css_class("spinning");
                 self.status_stack.set_visible_child_name("spinner");

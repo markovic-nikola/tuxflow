@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::config::schema::{ProcessCategory, ProcessConfig};
+use crate::remote::fs::{LocalFs, ProjectFs};
 
 #[derive(Clone)]
 pub struct DetectedStack {
@@ -11,7 +12,7 @@ pub struct DetectedStack {
 struct StackRule {
     marker_file: &'static str,
     name: &'static str,
-    detect: fn(&Path, &str) -> Vec<ProcessConfig>,
+    detect: fn(&dyn ProjectFs, &str) -> Vec<ProcessConfig>,
 }
 
 const RULES: &[StackRule] = &[
@@ -63,14 +64,21 @@ const RULES: &[StackRule] = &[
 ];
 
 pub fn detect_stacks(project_dir: &Path) -> Vec<DetectedStack> {
+    detect_stacks_fs(&LocalFs::new(project_dir))
+}
+
+pub fn detect_stacks_fs(fs: &dyn ProjectFs) -> Vec<DetectedStack> {
     let mut stacks = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for rule in RULES {
-        if project_dir.join(rule.marker_file).exists() && seen.insert(rule.name) {
-            let content =
-                std::fs::read_to_string(project_dir.join(rule.marker_file)).unwrap_or_default();
-            let processes = (rule.detect)(project_dir, &content);
+    // Single batched existence check — one ssh round trip for remote projects
+    let markers: Vec<&str> = RULES.iter().map(|r| r.marker_file).collect();
+    let present = fs.exists_many(&markers);
+
+    for (rule, present) in RULES.iter().zip(present) {
+        if present && seen.insert(rule.name) {
+            let content = fs.read_to_string(rule.marker_file).unwrap_or_default();
+            let processes = (rule.detect)(fs, &content);
             if !processes.is_empty() {
                 stacks.push(DetectedStack {
                     name: rule.name.to_string(),
@@ -88,7 +96,11 @@ pub fn detect_stacks(project_dir: &Path) -> Vec<DetectedStack> {
 /// avoids silently introducing commands the user has never seen for existing projects.
 /// The full `detect_stacks` path remains in use for the "add new project" dialog.
 pub fn detect_stacks_conservative(project_dir: &Path) -> Vec<DetectedStack> {
-    let mut stacks = detect_stacks(project_dir);
+    detect_stacks_conservative_fs(&LocalFs::new(project_dir))
+}
+
+pub fn detect_stacks_conservative_fs(fs: &dyn ProjectFs) -> Vec<DetectedStack> {
+    let mut stacks = detect_stacks_fs(fs);
     for stack in &mut stacks {
         if stack.name == "Node.js" {
             let has_dev = stack.suggested_processes.iter().any(|p| p.name == "dev");
@@ -109,6 +121,7 @@ fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
         working_dir: None,
         start_with_project: false,
         auto_restart: false,
+        open_in_browser: false,
         restart_when_changed: Vec::new(),
         env: std::collections::HashMap::new(),
         category: ProcessCategory::Command,
@@ -125,12 +138,13 @@ enum PackageManager {
 }
 
 impl PackageManager {
-    fn detect(dir: &Path) -> Self {
-        if dir.join("yarn.lock").exists() {
+    fn detect(fs: &dyn ProjectFs) -> Self {
+        let present = fs.exists_many(&["yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock"]);
+        if present[0] {
             Self::Yarn
-        } else if dir.join("pnpm-lock.yaml").exists() {
+        } else if present[1] {
             Self::Pnpm
-        } else if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+        } else if present[2] || present[3] {
             Self::Bun
         } else {
             Self::Npm
@@ -153,7 +167,7 @@ impl PackageManager {
     }
 }
 
-fn detect_nodejs(dir: &Path, content: &str) -> Vec<ProcessConfig> {
+fn detect_nodejs(fs: &dyn ProjectFs, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     let Ok(pkg) = serde_json::from_str::<serde_json::Value>(content) else {
@@ -163,7 +177,7 @@ fn detect_nodejs(dir: &Path, content: &str) -> Vec<ProcessConfig> {
         return procs;
     };
 
-    let pm = PackageManager::detect(dir);
+    let pm = PackageManager::detect(fs);
 
     for key in scripts.keys() {
         procs.push(make_process(key, &pm.run_command(key), false));
@@ -172,7 +186,7 @@ fn detect_nodejs(dir: &Path, content: &str) -> Vec<ProcessConfig> {
     procs
 }
 
-fn detect_rust(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
+fn detect_rust(_fs: &dyn ProjectFs, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     // Skip "cargo run" if this project would re-launch TuxFlow itself
@@ -185,14 +199,14 @@ fn detect_rust(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
     procs
 }
 
-fn detect_django(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {
+fn detect_django(_fs: &dyn ProjectFs, _content: &str) -> Vec<ProcessConfig> {
     vec![
         make_process("Django server", "python manage.py runserver", true),
         make_process("Django migrate", "python manage.py migrate", false),
     ]
 }
 
-fn detect_go(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {
+fn detect_go(_fs: &dyn ProjectFs, _content: &str) -> Vec<ProcessConfig> {
     vec![
         make_process("go run", "go run .", true),
         make_process("go test", "go test ./...", false),
@@ -206,7 +220,7 @@ fn is_composer_lifecycle_hook(name: &str) -> bool {
         || name.starts_with("post_")
 }
 
-fn detect_php(dir: &Path, content: &str) -> Vec<ProcessConfig> {
+fn detect_php(fs: &dyn ProjectFs, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     if let Ok(composer) = serde_json::from_str::<serde_json::Value>(content) {
@@ -217,7 +231,8 @@ fn detect_php(dir: &Path, content: &str) -> Vec<ProcessConfig> {
 
         if is_laravel {
             procs.push(make_process("artisan serve", "php artisan serve", true));
-            if dir.join("vite.config.js").exists() || dir.join("vite.config.ts").exists() {
+            let vite = fs.exists_many(&["vite.config.js", "vite.config.ts"]);
+            if vite[0] || vite[1] {
                 procs.push(make_process("npm:dev", "npm run dev", true));
             }
             procs.push(make_process("queue", "php artisan queue:work", false));
@@ -240,8 +255,8 @@ fn detect_php(dir: &Path, content: &str) -> Vec<ProcessConfig> {
     procs
 }
 
-fn detect_ruby(dir: &Path, _content: &str) -> Vec<ProcessConfig> {
-    if dir.join("bin/rails").exists() {
+fn detect_ruby(fs: &dyn ProjectFs, _content: &str) -> Vec<ProcessConfig> {
+    if fs.exists("bin/rails") {
         vec![
             make_process("Rails server", "bin/rails server", true),
             make_process("Rails console", "bin/rails console", false),
@@ -251,7 +266,7 @@ fn detect_ruby(dir: &Path, _content: &str) -> Vec<ProcessConfig> {
     }
 }
 
-fn detect_makefile(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
+fn detect_makefile(_fs: &dyn ProjectFs, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     for line in content.lines() {
@@ -296,7 +311,7 @@ fn detect_makefile(_dir: &Path, content: &str) -> Vec<ProcessConfig> {
     procs
 }
 
-fn detect_docker(_dir: &Path, _content: &str) -> Vec<ProcessConfig> {
+fn detect_docker(_fs: &dyn ProjectFs, _content: &str) -> Vec<ProcessConfig> {
     vec![
         make_process("docker compose up", "docker compose up", true),
         make_process("docker compose logs", "docker compose logs -f", false),

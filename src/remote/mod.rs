@@ -210,15 +210,26 @@ pub fn wrap_remote_command(
     );
     let dir_q = sh_quote(remote_dir);
     let session_q = sh_quote(session);
-    // Exit-code file, namespaced by remote uid at runtime: session names are
-    // deterministic, so two users of the same host would otherwise fight over
-    // one /tmp path — sticky /tmp makes the loser's writes fail silently and
-    // exit codes vanish. `$ef` is expanded by the outer shell, so the inner
-    // command (built by string concatenation below) bakes in the same path.
-    let ef_assign = format!("ef=\"/tmp/.{session}-$(id -u).exit\"");
-    // Pane side: run the command, then record its exit code for the wrapper.
-    // tmux runs shell-commands via /bin/sh, so this is POSIX-safe.
-    let inner = format!("{}\"$ef\"", sh_quote(&format!("{login_shell}; echo $? > ")));
+    // Exit-code + captured-output files, namespaced by remote uid at runtime:
+    // session names are deterministic, so two users of the same host would
+    // otherwise fight over one /tmp path — sticky /tmp makes the loser's
+    // writes fail silently and exit codes vanish. `$ef`/`$of` are expanded by
+    // the outer shell, so the inner command (built by string concatenation
+    // below) bakes in the same paths.
+    let ef_assign =
+        format!("ef=\"/tmp/.{session}-$(id -u).exit\"; of=\"/tmp/.{session}-$(id -u).out\"");
+    // Pane side: run the command, record its exit code for the wrapper, then
+    // capture the pane's scrollback (with colors). tmux attaches on the
+    // alternate screen, so everything shown during the run vanishes when the
+    // client exits — the wrapper replays this capture onto the primary screen
+    // afterwards so finished output stays visible in the terminal. tmux runs
+    // shell-commands via /bin/sh, so this is POSIX-safe; inside the pane,
+    // $TMUX makes a bare `tmux` target the right server and pane.
+    let inner = format!(
+        "{}\"$ef\"{}\"$of\"",
+        sh_quote(&format!("{login_shell}; echo $? > ")),
+        sh_quote("; tmux capture-pane -peJ -S -2000 > ")
+    );
     let kill_stale = if fresh_session {
         format!("tmux -L {TMUX_SOCKET} kill-session -t {session_q} 2>/dev/null; ")
     } else {
@@ -227,18 +238,25 @@ pub fn wrap_remote_command(
     // After the client exits: the exit-file means the command finished — that
     // code wins. No exit-file means the session is still alive (detach) or
     // the attach itself failed — pass the tmux client's status through so
-    // real failures aren't masked as clean exits.
+    // real failures aren't masked as clean exits. A captured-output file is
+    // replayed first (awk drops the blank tail rows the pane capture pads
+    // with), putting the finished command's output back on screen.
     let remote = format!(
         "cd {dir_q} && {pid_capture}\
          if command -v tmux >/dev/null 2>&1; then \
-         {ef_assign}; rm -f \"$ef\"; {kill_stale}\
+         {ef_assign}; rm -f \"$ef\" \"$of\"; {kill_stale}\
          tmux -L {TMUX_SOCKET} -f /dev/null start-server \\; {TMUX_OPTIONS}; \
          tmux -L {TMUX_SOCKET} new-session -A -s {session_q} -c {dir_q} {inner}; tst=$?; \
+         if [ -f \"$of\" ]; then \
+         awk 'NF{{n=NR}} {{l[NR]=$0}} END{{for(i=1;i<=n;i++) print l[i]}}' \"$of\"; \
+         rm -f \"$of\"; fi; \
          if [ -f \"$ef\" ]; then exit \"$(cat \"$ef\")\"; else exit \"$tst\"; fi; \
          else exec {login_shell}; fi"
     );
+    // LogLevel=ERROR mutes the mux client's "Shared connection … closed"
+    // noise after the replayed output; real errors still print.
     format!(
-        "exec ssh -t {} {} {}",
+        "exec ssh -t -o LogLevel=ERROR {} {} {}",
         ssh_mux_options_str(),
         sh_quote(host),
         sh_quote(&remote)

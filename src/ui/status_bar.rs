@@ -385,11 +385,29 @@ impl StatusBar {
     /// Working-tree stats on the changes chip: "+N −M" line counts, amber
     /// icon tint while dirty. Untracked files don't show in line counts
     /// (git diff can't see them) — they go in the tooltip.
+    /// Compact count for the chip labels: 931, 1.2K, 45K. Exact numbers
+    /// stay in the tooltip.
+    fn compact_count(n: usize) -> String {
+        match n {
+            0..=999 => n.to_string(),
+            1_000..=9_999 => {
+                let k = (n as f64 / 100.0).round() / 10.0;
+                if k.fract() == 0.0 {
+                    format!("{}K", k as usize)
+                } else {
+                    format!("{k:.1}K")
+                }
+            }
+            _ => format!("{}K", (n as f64 / 1000.0).round() as usize),
+        }
+    }
+
     pub fn set_git_diffstat(&self, files: usize, added: usize, removed: usize, untracked: usize) {
-        self.diff_added_label.set_label(&format!("+{added}"));
+        self.diff_added_label
+            .set_label(&format!("+{}", Self::compact_count(added)));
         self.diff_added_label.set_visible(added > 0);
         self.diff_removed_label
-            .set_label(&format!("\u{2212}{removed}"));
+            .set_label(&format!("\u{2212}{}", Self::compact_count(removed)));
         self.diff_removed_label.set_visible(removed > 0);
         if files > 0 || untracked > 0 {
             self.git_btn.add_css_class("git-dirty");

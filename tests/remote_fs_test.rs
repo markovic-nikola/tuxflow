@@ -105,6 +105,37 @@ fn run_wrapped(wrapped: &str, dir: &Path) -> std::process::ExitStatus {
         .unwrap()
 }
 
+/// Like `run_wrapped`, but records the terminal transcript (what a user
+/// would see in the VTE) and returns it alongside the exit status.
+fn run_wrapped_capture(wrapped: &str, dir: &Path) -> (std::process::ExitStatus, String) {
+    let sh = dir.join(format!(
+        "wrapped-cap-{}.sh",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&sh, format!("#!/bin/bash\n{wrapped}\n")).unwrap();
+    let typescript = dir.join("typescript.out");
+    let status = std::process::Command::new("script")
+        .args([
+            "-qec",
+            &format!("bash {}", sh.display()),
+            &typescript.to_string_lossy(),
+        ])
+        .env("TERM", "xterm")
+        .env("TMUX_TMPDIR", dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    let transcript = fs::read(&typescript)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    (status, transcript)
+}
+
 /// Kill the per-test tmux server, if any — the production wrap keeps it
 /// alive between spawns (`exit-empty off`), which in tests would leak one
 /// server process per run.
@@ -228,6 +259,41 @@ fn wrapped_remote_command_propagates_exit_code() {
     let wrapped = wrap_remote_command("testhost", &root, &env, "exit 7", None, &session, false);
     let status = run_wrapped(&wrapped, project.path());
     assert_eq!(status.code(), Some(7), "wrapped: {wrapped}");
+    kill_test_tmux(project.path());
+}
+
+#[test]
+fn wrapped_remote_command_replays_output_after_exit() {
+    install_fake_ssh();
+    if !has_tmux() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let project = TempDir::new().unwrap();
+    let root = project.path().to_string_lossy().to_string();
+    let session = format!("tf-test-replay-{}", std::process::id());
+    let env = std::collections::HashMap::new();
+
+    // tmux attaches on the alternate screen, so the live output vanishes
+    // when the session ends — the wrap must replay the captured pane onto
+    // the primary screen. Transcript then holds the marker at least twice:
+    // once live (alt screen) and once replayed.
+    let wrapped = wrap_remote_command(
+        "testhost",
+        &root,
+        &env,
+        "echo REPLAY_MARKER_XYZ",
+        None,
+        &session,
+        false,
+    );
+    let (status, transcript) = run_wrapped_capture(&wrapped, project.path());
+    assert!(status.success(), "wrapped: {wrapped}");
+    let count = transcript.matches("REPLAY_MARKER_XYZ").count();
+    assert!(
+        count >= 2,
+        "expected live + replayed output, marker seen {count}x"
+    );
     kill_test_tmux(project.path());
 }
 

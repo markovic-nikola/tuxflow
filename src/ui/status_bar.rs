@@ -11,8 +11,6 @@ pub struct StatusBar {
     separator_label: gtk4::Label,
     global_label: gtk4::Label,
     status_label: gtk4::Label,
-    cpu_label: gtk4::Label,
-    memory_label: gtk4::Label,
     follow_btn: gtk4::Button,
     focus_btn: gtk4::Button,
     git_btn: gtk4::Button,
@@ -47,20 +45,6 @@ impl StatusBar {
         remote_icon.add_css_class("dim-label");
         remote_icon.set_visible(false);
         info_box.append(&remote_icon);
-
-        let cpu_label = gtk4::Label::builder()
-            .label("")
-            .css_classes(["caption", "dim-label"])
-            .visible(false)
-            .build();
-        info_box.append(&cpu_label);
-
-        let memory_label = gtk4::Label::builder()
-            .label("")
-            .css_classes(["caption", "dim-label"])
-            .visible(false)
-            .build();
-        info_box.append(&memory_label);
 
         let process_label = gtk4::Label::builder()
             .label("")
@@ -190,8 +174,6 @@ impl StatusBar {
             separator_label,
             global_label,
             status_label,
-            cpu_label,
-            memory_label,
             follow_btn,
             focus_btn,
             git_btn,
@@ -270,24 +252,6 @@ impl StatusBar {
             self.global_label.set_visible(false);
             self.separator_label.set_visible(false);
         }
-    }
-
-    pub fn set_resource_info(&self, cpu_percent: f64, memory_mb: f64) {
-        self.cpu_label.set_label(&format!("CPU {cpu_percent:.1}%"));
-        self.cpu_label.set_visible(true);
-
-        let mem_str = if memory_mb >= 1024.0 {
-            format!("MEM {:.1}GB", memory_mb / 1024.0)
-        } else {
-            format!("MEM {:.0}MB", memory_mb)
-        };
-        self.memory_label.set_label(&mem_str);
-        self.memory_label.set_visible(true);
-    }
-
-    pub fn clear_resource_info(&self) {
-        self.cpu_label.set_visible(false);
-        self.memory_label.set_visible(false);
     }
 
     pub fn is_following(&self) -> bool {

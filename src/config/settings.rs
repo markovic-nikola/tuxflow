@@ -72,10 +72,6 @@ pub struct SidebarSettings {
     pub single_project_expand: bool,
     pub auto_hide_sidebar: bool,
     pub show_keybind_hints: bool,
-    pub project_cpu_threshold: u32,
-    pub project_mem_threshold: u32,
-    pub process_cpu_threshold: u32,
-    pub process_mem_threshold: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,10 +131,6 @@ impl Default for SidebarSettings {
             single_project_expand: true,
             auto_hide_sidebar: false,
             show_keybind_hints: false,
-            project_cpu_threshold: 0,
-            project_mem_threshold: 0,
-            process_cpu_threshold: 0,
-            process_mem_threshold: 0,
         }
     }
 }

@@ -25,7 +25,6 @@ use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
 use crate::ui::terminal_search::TerminalSearch;
 use crate::util::port_detector::PortDetector;
-use crate::util::resource_monitor;
 use crate::workspace::{self, Workspace, WorkspaceRef};
 
 /// Maps current project name → shared cell holding the same name.
@@ -383,15 +382,6 @@ impl TuxFlowWindow {
             }
         });
 
-        // Refresh the sidebar's cached resource thresholds when the user
-        // changes them in the settings dialog. Avoids reloading settings.toml
-        // on every resource-monitor tick.
-        let sidebar_for_thresh = sidebar.clone();
-        let on_resource_thresholds_changed: Rc<dyn Fn(u32, u32)> =
-            Rc::new(move |cpu_idx, mem_idx| {
-                sidebar_for_thresh.set_resource_thresholds(cpu_idx, mem_idx);
-            });
-
         // Build UI
         let content = Self::build_content(
             &window,
@@ -406,7 +396,6 @@ impl TuxFlowWindow {
             &on_keybind_hints_changed,
             &on_terminal_theme_changed,
             &on_font_changed,
-            &on_resource_thresholds_changed,
             &pid_file,
             &status_bar,
             &keybinding_map,
@@ -424,38 +413,6 @@ impl TuxFlowWindow {
         // workspace yet at this point — startup is now driven from
         // `load_project` itself.
         crate::mcp::bridge::set_mcp_enabled(settings.borrow().integrations.mcp_enabled);
-
-        // Start resource monitoring
-        {
-            let ws_ref = ws.clone();
-            let sidebar_ref = sidebar.clone();
-            resource_monitor::start_monitoring(
-                move || {
-                    let ws_borrow = ws_ref.borrow();
-                    let mut pids = Vec::new();
-                    for project in ws_borrow.projects() {
-                        // Remote processes: the local PID is just the ssh
-                        // client — its /proc stats are meaningless here.
-                        if project.location.is_remote() {
-                            continue;
-                        }
-                        let mgr = project.manager.borrow();
-                        for (name, pid) in mgr.running_pids() {
-                            let qname = workspace::qualified_name(&project.name, &name);
-                            pids.push((qname, pid));
-                        }
-                    }
-                    pids
-                },
-                move |qname, resources| {
-                    sidebar_ref.set_process_resources(
-                        qname,
-                        resources.cpu_percent,
-                        resources.memory_mb,
-                    );
-                },
-            );
-        }
 
         // Kill all child processes and save window state when the window closes
         let ws_shutdown = ws.clone();
@@ -1953,7 +1910,6 @@ impl TuxFlowWindow {
         on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
-        on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
@@ -2675,7 +2631,6 @@ impl TuxFlowWindow {
             on_keybind_hints_changed,
             on_terminal_theme_changed,
             on_font_changed,
-            on_resource_thresholds_changed,
             keybinding_map,
         );
 
@@ -3124,7 +3079,6 @@ impl TuxFlowWindow {
             on_keybind_hints_changed,
             on_terminal_theme_changed,
             on_font_changed,
-            on_resource_thresholds_changed,
             keybinding_map,
             last_selected_project,
             status_bar,
@@ -3150,7 +3104,6 @@ impl TuxFlowWindow {
         on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
-        on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
         status_bar: &Rc<StatusBar>,
@@ -3174,7 +3127,6 @@ impl TuxFlowWindow {
         let keybind_hints_cb = on_keybind_hints_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
-        let thresh_cb = on_resource_thresholds_changed.clone();
         let kb_map = keybinding_map.clone();
         let last_proj_ref = last_selected_project.clone();
         let sb_ref = status_bar.clone();
@@ -3259,7 +3211,6 @@ impl TuxFlowWindow {
                             Some(keybind_hints_cb.clone()),
                             Some(theme_cb.clone()),
                             Some(font_cb.clone()),
-                            Some(thresh_cb.clone()),
                             Some(kb_map.clone()),
                         );
                     }
@@ -3468,7 +3419,6 @@ impl TuxFlowWindow {
         on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
-        on_resource_thresholds_changed: &Rc<dyn Fn(u32, u32)>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
     ) -> (adw::HeaderBar, gtk4::Label) {
         let headerbar = adw::HeaderBar::new();
@@ -3510,7 +3460,6 @@ impl TuxFlowWindow {
         let keybind_hints_cb = on_keybind_hints_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
-        let thresh_cb = on_resource_thresholds_changed.clone();
         let kb_map = keybinding_map.clone();
         settings_btn.connect_clicked(move |_| {
             crate::ui::settings::settings_window::SettingsWindow::show(
@@ -3520,7 +3469,6 @@ impl TuxFlowWindow {
                 Some(keybind_hints_cb.clone()),
                 Some(theme_cb.clone()),
                 Some(font_cb.clone()),
-                Some(thresh_cb.clone()),
                 Some(kb_map.clone()),
             );
         });

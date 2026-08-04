@@ -39,20 +39,6 @@
     }
 }
 
-.status-spinner {
-    color: #73c991;
-    -gtk-icon-size: 10px;
-}
-
-.status-spinner.spinning {
-    animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
 /* Sidebar */
 .sidebar {
     background: alpha(@window_bg_color, 0.97);
@@ -270,15 +256,6 @@
 
 .palette-hint {
     font-size: 14px;
-}
-
-/* Resource labels */
-.resource-label {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: alpha(@borders, 0.15);
 }
 
 /* Sidebar filter */

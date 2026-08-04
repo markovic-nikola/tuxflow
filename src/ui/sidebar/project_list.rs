@@ -49,11 +49,7 @@ pub struct ProjectList {
     window: Rc<RefCell<Option<libadwaita::ApplicationWindow>>>,
     single_expand: Rc<Cell<bool>>,
     selected_qname: Rc<RefCell<Option<String>>>,
-    // Cached threshold combo indices, refreshed by `set_resource_thresholds`
     // when the settings dialog saves. Avoids re-reading settings.toml from
-    // disk on every resource-monitor tick.
-    cpu_threshold_idx: Cell<u32>,
-    mem_threshold_idx: Cell<u32>,
     // Whether to show the "Ctrl+N" keybind hints on running process rows.
     // Refreshed by `set_show_keybind_hints` when the settings dialog saves.
     show_keybind_hints: Cell<bool>,
@@ -148,17 +144,8 @@ impl ProjectList {
             window: Rc::new(RefCell::new(None)),
             single_expand,
             selected_qname: Rc::new(RefCell::new(None)),
-            cpu_threshold_idx: Cell::new(settings.sidebar.process_cpu_threshold),
-            mem_threshold_idx: Cell::new(settings.sidebar.process_mem_threshold),
             show_keybind_hints: Cell::new(settings.sidebar.show_keybind_hints),
         }
-    }
-
-    /// Update the cached resource thresholds. Call from the settings dialog's
-    /// save callback so subsequent resource-monitor ticks pick up the change.
-    pub fn set_resource_thresholds(&self, cpu_idx: u32, mem_idx: u32) {
-        self.cpu_threshold_idx.set(cpu_idx);
-        self.mem_threshold_idx.set(mem_idx);
     }
 
     /// Toggle the "Ctrl+N" keybind hints. Call from the settings dialog's save
@@ -1690,40 +1677,6 @@ impl ProjectList {
                 })
                 .count();
             section_info.header.set_count(running, total);
-        }
-    }
-
-    pub fn set_process_resources(&self, qualified_name: &str, cpu_percent: f64, memory_mb: f64) {
-        if let Some(row) = self.process_rows.borrow().get(qualified_name) {
-            let cpu_threshold = Self::process_cpu_threshold_value(self.cpu_threshold_idx.get());
-            let mem_threshold = Self::process_mem_threshold_value(self.mem_threshold_idx.get());
-            row.set_resources(cpu_percent, memory_mb, cpu_threshold, mem_threshold);
-        }
-    }
-
-    /// Maps process CPU threshold combo index to a percentage value.
-    /// Returns -1.0 for "Never" (hide always).
-    fn process_cpu_threshold_value(index: u32) -> f64 {
-        match index {
-            0 => 0.0,  // Always
-            1 => 10.0, // 10%
-            2 => 30.0, // 30%
-            3 => 60.0, // 60%
-            4 => 90.0, // 90%
-            _ => -1.0, // Never
-        }
-    }
-
-    /// Maps process memory threshold combo index to MB value.
-    /// Returns -1.0 for "Never" (hide always).
-    fn process_mem_threshold_value(index: u32) -> f64 {
-        match index {
-            0 => 0.0,    // Always
-            1 => 100.0,  // 100MB
-            2 => 500.0,  // 500MB
-            3 => 1024.0, // 1GB
-            4 => 2048.0, // 2GB
-            _ => -1.0,   // Never
         }
     }
 

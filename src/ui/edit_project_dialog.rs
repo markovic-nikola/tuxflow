@@ -34,6 +34,7 @@ impl EditProjectDialog {
             .content_width(520)
             .content_height(640)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();

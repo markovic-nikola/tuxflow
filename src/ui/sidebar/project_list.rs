@@ -63,7 +63,7 @@ impl ProjectList {
 
         // Filter entry (hidden by default, toggled from headerbar button)
         let filter_entry = gtk4::SearchEntry::builder()
-            .placeholder_text("Filter processes...")
+            .placeholder_text("Filter projects & processes...")
             .margin_start(8)
             .margin_end(8)
             .margin_top(8)
@@ -76,7 +76,7 @@ impl ProjectList {
         // Stored so headerbar can wire the toggle
         let search_btn = gtk4::ToggleButton::builder()
             .icon_name("edit-find-symbolic")
-            .tooltip_text("Filter Processes (Ctrl+F)")
+            .tooltip_text("Filter Sidebar (Ctrl+F)")
             .build();
 
         // Toggle filter visibility
@@ -108,17 +108,40 @@ impl ProjectList {
 
         let process_rows: Rc<RefCell<HashMap<String, ProcessRow>>> =
             Rc::new(RefCell::new(HashMap::new()));
+        let project_rows: Rc<RefCell<HashMap<String, ProjectRow>>> =
+            Rc::new(RefCell::new(HashMap::new()));
 
-        // Wire filter
+        // Wire filter: a project matches by name (all its rows stay); otherwise
+        // it stays visible only while some process row under it matches.
+        // Non-matching projects hide entirely — the filter narrows the whole
+        // sidebar, not just rows inside expanded projects.
         let rows_ref = process_rows.clone();
+        let prows_ref = project_rows.clone();
         filter_entry.connect_search_changed(move |entry| {
             let query = entry.text().to_string().to_lowercase();
+            let prows = prows_ref.borrow();
             let rows = rows_ref.borrow();
-            for (qname, row) in rows.iter() {
-                let visible = query.is_empty()
-                    || qname.to_lowercase().contains(&query)
-                    || row.name().to_lowercase().contains(&query);
-                row.widget().set_visible(visible);
+            if query.is_empty() {
+                for row in rows.values() {
+                    row.widget().set_visible(true);
+                }
+                for prow in prows.values() {
+                    prow.widget().set_visible(true);
+                }
+                return;
+            }
+            for (pname, prow) in prows.iter() {
+                let project_match = pname.to_lowercase().contains(&query);
+                let prefix = format!("{pname}::");
+                let mut any_process_match = false;
+                for (qname, row) in rows.iter().filter(|(q, _)| q.starts_with(&prefix)) {
+                    let process_match = qname.to_lowercase().contains(&query)
+                        || row.name().to_lowercase().contains(&query);
+                    row.widget().set_visible(project_match || process_match);
+                    any_process_match |= process_match;
+                }
+                prow.widget()
+                    .set_visible(project_match || any_process_match);
             }
         });
 
@@ -130,7 +153,7 @@ impl ProjectList {
             filter_entry,
             search_btn,
             process_rows,
-            project_rows: Rc::new(RefCell::new(HashMap::new())),
+            project_rows,
             project_managers: Rc::new(RefCell::new(HashMap::new())),
             sections: Rc::new(RefCell::new(Vec::new())),
             process_statuses: Rc::new(RefCell::new(HashMap::new())),
@@ -1820,6 +1843,39 @@ impl ProjectList {
                 }
             }
         }
+    }
+
+    /// Scroll the sidebar so the project's header row is visible. Deferred to
+    /// idle so a just-triggered expand/collapse has settled into the layout.
+    pub fn scroll_to_project(&self, project_name: &str) {
+        let Some(widget) = self
+            .project_rows
+            .borrow()
+            .get(project_name)
+            .map(|r| r.widget().clone())
+        else {
+            return;
+        };
+        glib::idle_add_local_once(move || {
+            let Some(scroll) = widget
+                .ancestor(gtk4::ScrolledWindow::static_type())
+                .and_downcast::<gtk4::ScrolledWindow>()
+            else {
+                return;
+            };
+            let Some(bounds) = widget.compute_bounds(&scroll) else {
+                return;
+            };
+            let adj = scroll.vadjustment();
+            let row_top = adj.value() + bounds.y() as f64;
+            // Show the header plus a peek of the rows under it
+            let row_bottom = row_top + (bounds.height() as f64).min(adj.page_size());
+            if row_top < adj.value() {
+                adj.set_value(row_top);
+            } else if row_bottom > adj.value() + adj.page_size() {
+                adj.set_value(row_bottom - adj.page_size());
+            }
+        });
     }
 
     /// Returns the name of the last expanded project in the sidebar, if any.

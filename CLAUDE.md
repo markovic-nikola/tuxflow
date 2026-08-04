@@ -61,7 +61,7 @@ src/
     terminal_theme.rs      # Terminal color schemes
     terminal_view.rs       # VTE terminal wrapper
     terminal_search.rs     # Ctrl+F search overlay
-    command_palette.rs     # Ctrl+K command palette
+    command_palette.rs     # Command palette (Ctrl+Shift+P)
     add_command_dialog.rs  # Add command/agent dialog
     add_remote_project_dialog.rs # Add remote (SSH) project dialog with BatchMode verification
     add_ssh_dialog.rs      # Add SSH connection dialog

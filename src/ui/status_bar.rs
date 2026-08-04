@@ -11,17 +11,17 @@ pub struct StatusBar {
     separator_label: gtk4::Label,
     global_label: gtk4::Label,
     status_label: gtk4::Label,
-    follow_btn: gtk4::Button,
     focus_btn: gtk4::Button,
     git_btn: gtk4::Button,
-    git_pull_dot: gtk4::DrawingArea,
+    git_branch_label: gtk4::Label,
+    git_sync_label: gtk4::Label,
+    git_ahead: Cell<usize>,
     git_behind: Cell<usize>,
     git_dirty: Cell<usize>,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
     restart_btn: gtk4::Button,
-    following: Rc<RefCell<bool>>,
     url: Rc<RefCell<Option<String>>>,
 }
 
@@ -92,34 +92,34 @@ impl StatusBar {
         let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
 
         let focus_btn = Self::make_button("Focus", "focus-windows-symbolic");
-        let follow_btn = Self::make_button("Follow Output", "go-bottom-symbolic");
-        let git_btn = Self::make_button("Git Changes", "send-to-symbolic");
 
-        let git_pull_dot = gtk4::DrawingArea::builder()
+        // Git button: icon + current branch + ahead/behind counters, all one
+        // clickable chip. Filled by the periodic git poll (set_git_branch /
+        // set_git_sync); the counters hide when the branch is in sync.
+        let git_icon = gtk4::Image::from_icon_name("send-to-symbolic");
+        let git_branch_label = gtk4::Label::builder()
+            .label("")
             .visible(false)
-            .content_width(8)
-            .content_height(8)
-            .halign(gtk4::Align::End)
-            .valign(gtk4::Align::Start)
-            .margin_top(5)
-            .can_target(false)
+            .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+            .max_width_chars(20)
+            .css_classes(["caption"])
             .build();
-        git_pull_dot.set_draw_func(|_, cr, w, h| {
-            cr.set_source_rgb(0.824, 0.600, 0.133); // #d29922
-            cr.arc(
-                w as f64 / 2.0,
-                h as f64 / 2.0,
-                4.0,
-                0.0,
-                2.0 * std::f64::consts::PI,
-            );
-            let _ = cr.fill();
-        });
-
-        let git_box = gtk4::Overlay::new();
-        git_box.set_child(Some(&git_btn));
-        git_box.add_overlay(&git_pull_dot);
-        git_box.set_visible(false);
+        let git_sync_label = gtk4::Label::builder()
+            .label("")
+            .visible(false)
+            .use_markup(true)
+            .css_classes(["caption"])
+            .build();
+        let git_btn_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
+        git_btn_content.append(&git_icon);
+        git_btn_content.append(&git_branch_label);
+        git_btn_content.append(&git_sync_label);
+        let git_btn = gtk4::Button::builder()
+            .child(&git_btn_content)
+            .tooltip_text("Git Changes")
+            .css_classes(["flat", "circular"])
+            .visible(false)
+            .build();
 
         let browser_btn = Self::make_button("Open in Browser", "external-link-symbolic");
         browser_btn.set_visible(false);
@@ -128,9 +128,8 @@ impl StatusBar {
         stop_btn.add_css_class("btn-stop");
         let restart_btn = Self::make_button("Restart", "view-refresh-symbolic");
 
-        actions.append(&git_box);
+        actions.append(&git_btn);
         actions.append(&focus_btn);
-        actions.append(&follow_btn);
         actions.append(&browser_btn);
         actions.append(&clear_btn);
         actions.append(&stop_btn);
@@ -138,23 +137,7 @@ impl StatusBar {
 
         container.append(&actions);
 
-        let following = Rc::new(RefCell::new(true));
         let url: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-
-        // Follow button toggle
-        let following_ref = following.clone();
-        let follow_btn_ref = follow_btn.clone();
-        follow_btn.connect_clicked(move |_| {
-            let mut f = following_ref.borrow_mut();
-            *f = !*f;
-            if *f {
-                follow_btn_ref.set_icon_name("go-bottom-symbolic");
-                follow_btn_ref.set_tooltip_text(Some("Follow Output"));
-            } else {
-                follow_btn_ref.set_icon_name("media-playback-pause-symbolic");
-                follow_btn_ref.set_tooltip_text(Some("Paused — Click to Follow"));
-            }
-        });
 
         // Browser button opens the stored URL
         let url_ref = url.clone();
@@ -174,17 +157,17 @@ impl StatusBar {
             separator_label,
             global_label,
             status_label,
-            follow_btn,
             focus_btn,
             git_btn,
-            git_pull_dot,
+            git_branch_label,
+            git_sync_label,
+            git_ahead: Cell::new(0),
             git_behind: Cell::new(0),
             git_dirty: Cell::new(0),
             browser_btn,
             clear_btn,
             stop_btn,
             restart_btn,
-            following,
             url,
         }
     }
@@ -254,10 +237,6 @@ impl StatusBar {
         }
     }
 
-    pub fn is_following(&self) -> bool {
-        *self.following.borrow()
-    }
-
     pub fn connect_stop(&self, cb: impl Fn() + 'static) {
         self.stop_btn.connect_clicked(move |_| cb());
     }
@@ -312,15 +291,42 @@ impl StatusBar {
     }
 
     pub fn set_git_available(&self, available: bool) {
-        if let Some(parent) = self.git_btn.parent() {
-            parent.set_visible(available);
-        }
+        self.git_btn.set_visible(available);
     }
 
-    pub fn set_git_pull_indicator(&self, behind: usize) {
+    /// Show commits to push (↑, green) / pull (↓, amber) inside the git
+    /// chip. Both 0 = in sync, counters hidden.
+    pub fn set_git_sync(&self, ahead: usize, behind: usize) {
+        self.git_ahead.set(ahead);
         self.git_behind.set(behind);
-        self.git_pull_dot.set_visible(behind > 0);
+        if ahead == 0 && behind == 0 {
+            self.git_sync_label.set_visible(false);
+        } else {
+            let mut parts = Vec::new();
+            if behind > 0 {
+                parts.push(format!(
+                    "<span foreground='#d29922'>\u{2193}{behind}</span>"
+                ));
+            }
+            if ahead > 0 {
+                parts.push(format!("<span foreground='#73c991'>\u{2191}{ahead}</span>"));
+            }
+            self.git_sync_label.set_markup(&parts.join(" "));
+            self.git_sync_label.set_visible(true);
+        }
         self.update_git_tooltip();
+    }
+
+    /// Show the current branch inside the git chip. `None` (detached HEAD,
+    /// or branch not yet known) hides the label, leaving just the icon.
+    pub fn set_git_branch(&self, branch: Option<&str>) {
+        match branch {
+            Some(b) => {
+                self.git_branch_label.set_label(b);
+                self.git_branch_label.set_visible(true);
+            }
+            None => self.git_branch_label.set_visible(false),
+        }
     }
 
     pub fn set_git_dirty(&self, dirty: usize) {
@@ -334,13 +340,23 @@ impl StatusBar {
     }
 
     fn update_git_tooltip(&self) {
-        let behind = self.git_behind.get();
+        let mut parts = Vec::new();
         let dirty = self.git_dirty.get();
-        let tip = match (dirty, behind) {
-            (0, 0) => "Git Changes".to_string(),
-            (d, 0) => format!("Git Changes ({d} uncommitted)"),
-            (0, b) => format!("Git Changes ({b} to pull)"),
-            (d, b) => format!("Git Changes ({d} uncommitted, {b} to pull)"),
+        let ahead = self.git_ahead.get();
+        let behind = self.git_behind.get();
+        if dirty > 0 {
+            parts.push(format!("{dirty} uncommitted"));
+        }
+        if ahead > 0 {
+            parts.push(format!("{ahead} to push"));
+        }
+        if behind > 0 {
+            parts.push(format!("{behind} to pull"));
+        }
+        let tip = if parts.is_empty() {
+            "Git Changes".to_string()
+        } else {
+            format!("Git Changes ({})", parts.join(", "))
         };
         self.git_btn.set_tooltip_text(Some(&tip));
     }

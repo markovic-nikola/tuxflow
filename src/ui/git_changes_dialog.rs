@@ -141,7 +141,7 @@ fn git_status_hash(location: &ProjectLocation) -> u64 {
     }
 }
 
-fn commits_ahead(location: &ProjectLocation) -> usize {
+pub fn commits_ahead(location: &ProjectLocation) -> usize {
     let output = git_command(location, &["rev-list", "--count", "@{u}..HEAD"]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
@@ -221,7 +221,7 @@ fn run_git_command(location: &ProjectLocation, args: &[&str]) -> Result<String, 
     }
 }
 
-fn current_branch(location: &ProjectLocation) -> Option<String> {
+pub fn current_branch(location: &ProjectLocation) -> Option<String> {
     let name = run_git_command(location, &["branch", "--show-current"])
         .ok()?
         .trim()

@@ -19,7 +19,8 @@ use crate::ui::add_command_dialog::AddCommandDialog;
 use crate::ui::add_ssh_dialog::AddSshDialog;
 use crate::ui::command_palette::CommandPalette;
 use crate::ui::git_changes_dialog::{
-    GitChangesDialog, commits_behind, dirty_file_count, git_fetch, has_git_repo,
+    GitChangesDialog, commits_ahead, commits_behind, current_branch, dirty_file_count, git_fetch,
+    has_git_repo,
 };
 use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
@@ -727,21 +728,27 @@ impl TuxFlowWindow {
         do_fetch: bool,
         in_flight: Option<Rc<Cell<bool>>>,
     ) {
-        let (tx, rx) = tokio::sync::oneshot::channel::<(usize, usize)>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<(usize, usize, usize, Option<String>)>();
         std::thread::spawn(move || {
             if do_fetch {
                 git_fetch(&location);
             }
-            let _ = tx.send((commits_behind(&location), dirty_file_count(&location)));
+            let _ = tx.send((
+                commits_ahead(&location),
+                commits_behind(&location),
+                dirty_file_count(&location),
+                current_branch(&location),
+            ));
         });
         glib::spawn_future_local(async move {
             let result = rx.await;
             if let Some(flag) = in_flight {
                 flag.set(false);
             }
-            if let Ok((behind, dirty)) = result {
-                status_bar.set_git_pull_indicator(behind);
+            if let Ok((ahead, behind, dirty, branch)) = result {
+                status_bar.set_git_sync(ahead, behind);
                 status_bar.set_git_dirty(dirty);
+                status_bar.set_git_branch(branch.as_deref());
             }
         });
     }
@@ -2919,8 +2926,9 @@ impl TuxFlowWindow {
                             if has_git {
                                 Self::refresh_status_bar_git(location, sb_vis.clone(), true);
                             } else {
-                                sb_vis.set_git_pull_indicator(0);
+                                sb_vis.set_git_sync(0, 0);
                                 sb_vis.set_git_dirty(0);
+                                sb_vis.set_git_branch(None);
                             }
                         }
                         Some(location @ crate::remote::ProjectLocation::Ssh { .. }) => {
@@ -2930,8 +2938,9 @@ impl TuxFlowWindow {
                             // Probing .git needs an ssh round trip — do it off
                             // the main thread, hide the button until it answers.
                             sb_vis.set_git_available(false);
-                            sb_vis.set_git_pull_indicator(0);
+                            sb_vis.set_git_sync(0, 0);
                             sb_vis.set_git_dirty(0);
+                            sb_vis.set_git_branch(None);
                             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
                             {
                                 let location = location.clone();
@@ -2964,8 +2973,9 @@ impl TuxFlowWindow {
                         None => {
                             sb_vis.set_remote_hint(None);
                             sb_vis.set_git_available(false);
-                            sb_vis.set_git_pull_indicator(0);
+                            sb_vis.set_git_sync(0, 0);
                             sb_vis.set_git_dirty(0);
+                            sb_vis.set_git_branch(None);
                         }
                     }
                 }
@@ -2973,8 +2983,9 @@ impl TuxFlowWindow {
                 title_ref.set_label("TuxFlow");
                 sb_vis.set_remote_hint(None);
                 sb_vis.set_git_available(false);
-                sb_vis.set_git_pull_indicator(0);
+                sb_vis.set_git_sync(0, 0);
                 sb_vis.set_git_dirty(0);
+                sb_vis.set_git_branch(None);
             }
         });
 

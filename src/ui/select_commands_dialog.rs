@@ -24,6 +24,7 @@ impl SelectCommandsDialog {
             .content_width(500)
             .content_height(550)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();

@@ -21,6 +21,7 @@ impl AddSshDialog {
             .content_width(450)
             .content_height(480)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();

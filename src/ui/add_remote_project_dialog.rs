@@ -34,6 +34,7 @@ impl AddRemoteProjectDialog {
             .content_width(450)
             .content_height(COMPACT_HEIGHT)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();

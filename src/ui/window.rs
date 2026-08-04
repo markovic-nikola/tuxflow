@@ -774,6 +774,7 @@ impl TuxFlowWindow {
             .content_width(350)
             .content_height(200)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
@@ -1285,6 +1286,7 @@ impl TuxFlowWindow {
             .content_width(350)
             .content_height(150)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
@@ -1933,6 +1935,12 @@ impl TuxFlowWindow {
         let ws_refresh = ws.clone();
         palette.set_on_refresh(move |p| {
             let ws_borrow = ws_refresh.borrow();
+            let project_names: Vec<String> = ws_borrow
+                .projects()
+                .iter()
+                .map(|proj| proj.name.clone())
+                .collect();
+            p.add_project_items(&project_names);
             for project in ws_borrow.projects() {
                 let mgr = project.manager.borrow();
                 for name in mgr.process_names() {
@@ -2554,6 +2562,24 @@ impl TuxFlowWindow {
                             }
                         },
                     );
+                }
+                _ if action.starts_with("project:") => {
+                    let pname = &action[8..];
+                    let idx = ws_ref
+                        .borrow()
+                        .projects()
+                        .iter()
+                        .position(|p| p.name == pname);
+                    if let Some(idx) = idx {
+                        Self::switch_to_project(
+                            &ws_ref,
+                            &stack_ref,
+                            &sidebar_ref,
+                            &sb_ref,
+                            &last_proj_ref,
+                            idx,
+                        );
+                    }
                 }
                 _ if action.starts_with("switch:") => {
                     let qname = &action[7..];
@@ -3851,6 +3877,7 @@ impl TuxFlowWindow {
         }
         sidebar.expand_project(&target_name);
         sidebar.set_active_project(&target_name);
+        sidebar.scroll_to_project(&target_name);
         Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &target_name);
         if let Some(child) = stack.visible_child() {
             child.grab_focus();
@@ -3881,6 +3908,7 @@ impl TuxFlowWindow {
         if let Some(name) = project_name {
             sidebar.expand_project(&name);
             sidebar.set_active_project(&name);
+            sidebar.scroll_to_project(&name);
             Self::refresh_status_bar_for_project(ws, status_bar, last_selected_project, &name);
         }
         if let Some(child) = stack.visible_child() {

@@ -475,6 +475,7 @@ impl GitChangesDialog {
             .content_width(w)
             .content_height(h)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();

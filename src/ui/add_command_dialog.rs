@@ -97,6 +97,7 @@ impl AddCommandDialog {
             .content_width(450)
             .content_height(400)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
@@ -194,6 +195,7 @@ impl AddCommandDialog {
             .content_width(450)
             .content_height(400)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();
@@ -315,6 +317,7 @@ impl AddCommandDialog {
             .content_width(450)
             .content_height(300)
             .build();
+        crate::ui::guard_dialog_maximize(&dialog);
 
         let toolbar_view = adw::ToolbarView::new();
         let headerbar = adw::HeaderBar::new();

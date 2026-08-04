@@ -344,6 +344,20 @@ impl CommandPalette {
         }
     }
 
+    /// Dynamic "jump to project" entries, one per open project. Rebuilt on
+    /// every palette open (see `refresh`), like the process navigation items.
+    pub fn add_project_items(&self, project_names: &[String]) {
+        let mut items = self.items.borrow_mut();
+        for name in project_names {
+            items.push(PaletteItem {
+                category: "GO TO".to_string(),
+                label: name.clone(),
+                icon: "folder-symbolic".to_string(),
+                action: format!("project:{name}"),
+            });
+        }
+    }
+
     pub fn set_items(&self, new_items: Vec<PaletteItem>) {
         *self.items.borrow_mut() = new_items;
         Self::populate_results(&self.results_box, &self.items.borrow(), "", &self.on_action);
@@ -358,10 +372,10 @@ impl CommandPalette {
     }
 
     fn refresh(&self) {
-        // Remove existing navigation items
+        // Remove existing dynamic items (process + project navigation)
         self.items
             .borrow_mut()
-            .retain(|item| item.category != "NAVIGATION");
+            .retain(|item| item.category != "NAVIGATION" && item.category != "GO TO");
         // Let the callback re-add current ones
         if let Some(ref cb) = *self.on_refresh.borrow() {
             cb(self);

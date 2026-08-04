@@ -88,7 +88,7 @@ impl ProcessRow {
         let browser_button = gtk4::Button::builder()
             .icon_name("external-link-symbolic")
             .tooltip_text("Open in Browser")
-            .css_classes(["flat", "circular", "browser-btn"])
+            .css_classes(["flat", "status-chip", "browser-btn"])
             .visible(false)
             .build();
         container.append(&browser_button);
@@ -117,21 +117,21 @@ impl ProcessRow {
         let play_button = gtk4::Button::builder()
             .icon_name("media-playback-start-symbolic")
             .tooltip_text(command)
-            .css_classes(["flat", "circular", "process-play-btn", "btn-play"])
+            .css_classes(["flat", "status-chip", "process-play-btn", "btn-play"])
             .build();
         actions_box.append(&play_button);
 
         let restart_button = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
             .tooltip_text("Restart")
-            .css_classes(["flat", "circular", "process-play-btn"])
+            .css_classes(["flat", "status-chip", "process-play-btn"])
             .build();
         actions_box.append(&restart_button);
 
         let stop_button = gtk4::Button::builder()
             .icon_name("media-playback-stop-symbolic")
             .tooltip_text("Stop")
-            .css_classes(["flat", "circular", "process-play-btn", "btn-stop"])
+            .css_classes(["flat", "status-chip", "process-play-btn", "btn-stop"])
             .build();
         actions_box.append(&stop_button);
 

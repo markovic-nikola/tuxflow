@@ -2895,7 +2895,7 @@ impl TuxFlowWindow {
                             }
                         }
                     };
-                    GitChangesDialog::show(btn, &location, cb);
+                    GitChangesDialog::show(btn, &location, status_bar_git.git_seed(), cb);
                 }
             }
         });

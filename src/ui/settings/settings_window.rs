@@ -23,6 +23,7 @@ impl SettingsWindow {
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
         on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
+        on_recent_first_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
         keybinding_map: Option<KeybindingMapRef>,
@@ -39,6 +40,7 @@ impl SettingsWindow {
             on_single_expand_changed,
             on_auto_hide_changed,
             on_keybind_hints_changed,
+            on_recent_first_changed,
             on_terminal_theme_changed,
             on_font_changed,
             &kb_map,
@@ -51,6 +53,7 @@ impl SettingsWindow {
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
         on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
+        on_recent_first_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
         keybinding_map: &KeybindingMapRef,
@@ -69,6 +72,7 @@ impl SettingsWindow {
             on_single_expand_changed,
             on_auto_hide_changed,
             on_keybind_hints_changed,
+            on_recent_first_changed,
         );
         dialog.add(&sidebar_page);
 
@@ -712,6 +716,7 @@ impl SettingsWindow {
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
         on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
+        on_recent_first_changed: Option<Rc<dyn Fn(bool)>>,
     ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Sidebar")
@@ -769,6 +774,22 @@ impl SettingsWindow {
             }
         });
         display_group.add(&keybind_hints_row);
+
+        let recent_first_row = adw::SwitchRow::builder()
+            .title("Recently Used First")
+            .subtitle("Keep recently started projects at the top of the sidebar")
+            .active(s.sidebar.recent_first)
+            .build();
+        let settings_ref = settings.clone();
+        recent_first_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            settings_ref.borrow_mut().sidebar.recent_first = active;
+            settings_ref.borrow().save();
+            if let Some(ref cb) = on_recent_first_changed {
+                cb(active);
+            }
+        });
+        display_group.add(&recent_first_row);
 
         drop(s);
 

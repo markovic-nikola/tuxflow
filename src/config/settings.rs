@@ -72,6 +72,10 @@ pub struct SidebarSettings {
     pub single_project_expand: bool,
     pub auto_hide_sidebar: bool,
     pub show_keybind_hints: bool,
+    /// Keep recently started projects at the top of the sidebar. Was
+    /// briefly "running projects first" — the alias migrates that key.
+    #[serde(alias = "running_first")]
+    pub recent_first: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +135,7 @@ impl Default for SidebarSettings {
             single_project_expand: true,
             auto_hide_sidebar: false,
             show_keybind_hints: false,
+            recent_first: false,
         }
     }
 }

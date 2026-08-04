@@ -174,6 +174,65 @@ pub fn dirty_file_count(location: &ProjectLocation) -> usize {
     }
 }
 
+/// Working-tree line stats vs HEAD: (files_changed, added, removed).
+/// Includes staged changes; untracked files are NOT counted (git diff
+/// doesn't see them) — track those separately via `untracked_count`.
+pub fn diff_shortstat(location: &ProjectLocation) -> (usize, usize, usize) {
+    let output = git_command(location, &["diff", "HEAD", "--shortstat"]).output();
+    let text = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return (0, 0, 0),
+    };
+    // " 3 files changed, 120 insertions(+), 45 deletions(-)"
+    let mut files = 0;
+    let mut added = 0;
+    let mut removed = 0;
+    for part in text.split(',') {
+        let num: usize = part
+            .trim()
+            .split(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        if part.contains("file") {
+            files = num;
+        } else if part.contains("insertion") {
+            added = num;
+        } else if part.contains("deletion") {
+            removed = num;
+        }
+    }
+    (files, added, removed)
+}
+
+pub fn untracked_count(location: &ProjectLocation) -> usize {
+    let output = git_command(location, &["status", "--porcelain=v1"]).output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.starts_with("??"))
+            .count(),
+        _ => 0,
+    }
+}
+
+/// One-click sync: fetch, fast-forward pull if behind, push if ahead.
+/// `--ff-only` keeps it safe — diverged histories error out instead of
+/// merging, and the caller should point the user at the Git Changes
+/// dialog. Blocking (several network round trips) — call on a worker.
+pub fn sync_with_remote(location: &ProjectLocation) -> Result<(), String> {
+    run_git_command(location, &["fetch"])?;
+    if commits_behind(location) > 0 {
+        run_git_command(location, &["pull", "--ff-only"])?;
+    }
+    // commits_ahead needs an upstream to compare against, so a plain
+    // `git push` is always enough when it's > 0.
+    if commits_ahead(location) > 0 {
+        run_git_command(location, &["push"])?;
+    }
+    Ok(())
+}
+
 /// Whether the project root contains a `.git`. Local is a cheap stat;
 /// remote is an ssh round trip — call off the main thread for remote.
 pub fn has_git_repo(location: &ProjectLocation) -> bool {

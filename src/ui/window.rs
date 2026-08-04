@@ -19,8 +19,8 @@ use crate::ui::add_command_dialog::AddCommandDialog;
 use crate::ui::add_ssh_dialog::AddSshDialog;
 use crate::ui::command_palette::CommandPalette;
 use crate::ui::git_changes_dialog::{
-    GitChangesDialog, commits_ahead, commits_behind, current_branch, dirty_file_count, git_fetch,
-    has_git_repo,
+    GitChangesDialog, commits_ahead, commits_behind, current_branch, diff_shortstat, git_fetch,
+    has_git_repo, sync_with_remote, untracked_count,
 };
 use crate::ui::sidebar::project_list::ProjectList;
 use crate::ui::status_bar::StatusBar;
@@ -352,6 +352,12 @@ impl TuxFlowWindow {
             sidebar_for_keybind.set_show_keybind_hints(enabled);
         });
 
+        // Re-sort the sidebar live when "running projects first" is toggled
+        let sidebar_for_running = sidebar.clone();
+        let on_recent_first_changed: Rc<dyn Fn(bool)> = Rc::new(move |enabled: bool| {
+            sidebar_for_running.set_recent_first(enabled);
+        });
+
         // Build theme-change callback that applies to all existing terminals
         let ws_for_theme = ws.clone();
         let on_terminal_theme_changed: Rc<dyn Fn(&str)> = Rc::new(move |theme_name: &str| {
@@ -395,6 +401,7 @@ impl TuxFlowWindow {
             &on_single_expand_changed,
             &on_auto_hide_changed,
             &on_keybind_hints_changed,
+            &on_recent_first_changed,
             &on_terminal_theme_changed,
             &on_font_changed,
             &pid_file,
@@ -728,7 +735,8 @@ impl TuxFlowWindow {
         do_fetch: bool,
         in_flight: Option<Rc<Cell<bool>>>,
     ) {
-        let (tx, rx) = tokio::sync::oneshot::channel::<(usize, usize, usize, Option<String>)>();
+        type GitPoll = (usize, usize, Option<String>, (usize, usize, usize), usize);
+        let (tx, rx) = tokio::sync::oneshot::channel::<GitPoll>();
         std::thread::spawn(move || {
             if do_fetch {
                 git_fetch(&location);
@@ -736,8 +744,9 @@ impl TuxFlowWindow {
             let _ = tx.send((
                 commits_ahead(&location),
                 commits_behind(&location),
-                dirty_file_count(&location),
                 current_branch(&location),
+                diff_shortstat(&location),
+                untracked_count(&location),
             ));
         });
         glib::spawn_future_local(async move {
@@ -745,10 +754,10 @@ impl TuxFlowWindow {
             if let Some(flag) = in_flight {
                 flag.set(false);
             }
-            if let Ok((ahead, behind, dirty, branch)) = result {
+            if let Ok((ahead, behind, branch, (files, added, removed), untracked)) = result {
                 status_bar.set_git_sync(ahead, behind);
-                status_bar.set_git_dirty(dirty);
                 status_bar.set_git_branch(branch.as_deref());
+                status_bar.set_git_diffstat(files, added, removed, untracked);
             }
         });
     }
@@ -1917,6 +1926,7 @@ impl TuxFlowWindow {
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
         on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
+        on_recent_first_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         pid_file: &Rc<RefCell<PidFile>>,
@@ -2662,6 +2672,7 @@ impl TuxFlowWindow {
             on_single_expand_changed,
             on_auto_hide_changed,
             on_keybind_hints_changed,
+            on_recent_first_changed,
             on_terminal_theme_changed,
             on_font_changed,
             keybinding_map,
@@ -2926,6 +2937,49 @@ impl TuxFlowWindow {
             }
         });
 
+        // Sync button: one click = fetch + ff-only pull + push, off-thread.
+        // Diverged histories error out (no merge attempt) and point at the
+        // Git Changes dialog. When already in sync it's just a fetch, which
+        // refreshes the counters.
+        let ws_sync = ws.clone();
+        let stack_sync = terminal_stack.clone();
+        let last_proj_sync = last_selected_project.clone();
+        let sidebar_sync = sidebar.clone();
+        let status_bar_sync = status_bar.clone();
+        status_bar.connect_git_sync(move |btn| {
+            let project_name =
+                Self::resolve_active_project(&stack_sync, &last_proj_sync, &sidebar_sync);
+            let Some(proj_name) = project_name else {
+                return;
+            };
+            let Some(location) = ws_sync.borrow().get_project_location(&proj_name) else {
+                return;
+            };
+            status_bar_sync.set_git_syncing(true);
+
+            let sb_done = status_bar_sync.clone();
+            let location_done = location.clone();
+            let parent = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            crate::util::worker::run(
+                move || sync_with_remote(&location),
+                move |result| {
+                    sb_done.set_git_syncing(false);
+                    // Counters refresh regardless — even a failed sync may
+                    // have fetched, and a partial sync changed them.
+                    Self::refresh_status_bar_git(location_done, sb_done.clone(), false);
+                    if let Err(err) = result {
+                        let dialog = adw::AlertDialog::builder()
+                            .heading("Sync failed")
+                            .body(format!("{err}\n\nOpen Git Changes to resolve it manually."))
+                            .build();
+                        dialog.add_response("ok", "OK");
+                        dialog.set_default_response(Some("ok"));
+                        dialog.present(parent.as_ref());
+                    }
+                },
+            );
+        });
+
         // Terminal search bar
         let search_bar = Rc::new(TerminalSearch::new());
 
@@ -2953,7 +3007,7 @@ impl TuxFlowWindow {
                                 Self::refresh_status_bar_git(location, sb_vis.clone(), true);
                             } else {
                                 sb_vis.set_git_sync(0, 0);
-                                sb_vis.set_git_dirty(0);
+                                sb_vis.set_git_diffstat(0, 0, 0, 0);
                                 sb_vis.set_git_branch(None);
                             }
                         }
@@ -2965,7 +3019,7 @@ impl TuxFlowWindow {
                             // the main thread, hide the button until it answers.
                             sb_vis.set_git_available(false);
                             sb_vis.set_git_sync(0, 0);
-                            sb_vis.set_git_dirty(0);
+                            sb_vis.set_git_diffstat(0, 0, 0, 0);
                             sb_vis.set_git_branch(None);
                             let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
                             {
@@ -3000,7 +3054,7 @@ impl TuxFlowWindow {
                             sb_vis.set_remote_hint(None);
                             sb_vis.set_git_available(false);
                             sb_vis.set_git_sync(0, 0);
-                            sb_vis.set_git_dirty(0);
+                            sb_vis.set_git_diffstat(0, 0, 0, 0);
                             sb_vis.set_git_branch(None);
                         }
                     }
@@ -3010,7 +3064,7 @@ impl TuxFlowWindow {
                 sb_vis.set_remote_hint(None);
                 sb_vis.set_git_available(false);
                 sb_vis.set_git_sync(0, 0);
-                sb_vis.set_git_dirty(0);
+                sb_vis.set_git_diffstat(0, 0, 0, 0);
                 sb_vis.set_git_branch(None);
             }
         });
@@ -3114,6 +3168,7 @@ impl TuxFlowWindow {
             on_single_expand_changed,
             on_auto_hide_changed,
             on_keybind_hints_changed,
+            on_recent_first_changed,
             on_terminal_theme_changed,
             on_font_changed,
             keybinding_map,
@@ -3139,6 +3194,7 @@ impl TuxFlowWindow {
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
         on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
+        on_recent_first_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
@@ -3162,6 +3218,7 @@ impl TuxFlowWindow {
         let single_expand_cb = on_single_expand_changed.clone();
         let auto_hide_cb = on_auto_hide_changed.clone();
         let keybind_hints_cb = on_keybind_hints_changed.clone();
+        let recent_first_cb = on_recent_first_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
         let kb_map = keybinding_map.clone();
@@ -3246,6 +3303,7 @@ impl TuxFlowWindow {
                             Some(single_expand_cb.clone()),
                             Some(auto_hide_cb.clone()),
                             Some(keybind_hints_cb.clone()),
+                            Some(recent_first_cb.clone()),
                             Some(theme_cb.clone()),
                             Some(font_cb.clone()),
                             Some(kb_map.clone()),
@@ -3454,6 +3512,7 @@ impl TuxFlowWindow {
         on_single_expand_changed: &Rc<dyn Fn(bool)>,
         on_auto_hide_changed: &Rc<dyn Fn(bool)>,
         on_keybind_hints_changed: &Rc<dyn Fn(bool)>,
+        on_recent_first_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
@@ -3495,6 +3554,7 @@ impl TuxFlowWindow {
         let single_expand_cb = on_single_expand_changed.clone();
         let auto_hide_cb = on_auto_hide_changed.clone();
         let keybind_hints_cb = on_keybind_hints_changed.clone();
+        let recent_first_cb = on_recent_first_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
         let kb_map = keybinding_map.clone();
@@ -3504,6 +3564,7 @@ impl TuxFlowWindow {
                 Some(single_expand_cb.clone()),
                 Some(auto_hide_cb.clone()),
                 Some(keybind_hints_cb.clone()),
+                Some(recent_first_cb.clone()),
                 Some(theme_cb.clone()),
                 Some(font_cb.clone()),
                 Some(kb_map.clone()),

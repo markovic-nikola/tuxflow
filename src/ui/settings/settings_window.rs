@@ -25,7 +25,6 @@ impl SettingsWindow {
         on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
-        on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
         keybinding_map: Option<KeybindingMapRef>,
     ) {
         let settings = Rc::new(RefCell::new(AppSettings::load()));
@@ -42,7 +41,6 @@ impl SettingsWindow {
             on_keybind_hints_changed,
             on_terminal_theme_changed,
             on_font_changed,
-            on_resource_thresholds_changed,
             &kb_map,
         );
     }
@@ -55,7 +53,6 @@ impl SettingsWindow {
         on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
-        on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
         keybinding_map: &KeybindingMapRef,
     ) {
         let dialog = adw::PreferencesDialog::new();
@@ -72,7 +69,6 @@ impl SettingsWindow {
             on_single_expand_changed,
             on_auto_hide_changed,
             on_keybind_hints_changed,
-            on_resource_thresholds_changed,
         );
         dialog.add(&sidebar_page);
 
@@ -716,7 +712,6 @@ impl SettingsWindow {
         on_single_expand_changed: Option<Rc<dyn Fn(bool)>>,
         on_auto_hide_changed: Option<Rc<dyn Fn(bool)>>,
         on_keybind_hints_changed: Option<Rc<dyn Fn(bool)>>,
-        on_resource_thresholds_changed: Option<Rc<dyn Fn(u32, u32)>>,
     ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Sidebar")
@@ -777,95 +772,7 @@ impl SettingsWindow {
 
         drop(s);
 
-        let thresholds_group = adw::PreferencesGroup::builder()
-            .title("Resource Thresholds")
-            .description("Show resource usage when exceeding threshold")
-            .build();
-
-        let (proj_cpu, proj_mem, proc_cpu, proc_mem) = {
-            let s = settings.borrow();
-            (
-                s.sidebar.project_cpu_threshold,
-                s.sidebar.project_mem_threshold,
-                s.sidebar.process_cpu_threshold,
-                s.sidebar.process_mem_threshold,
-            )
-        };
-
-        let project_cpu_row = adw::ComboRow::builder()
-            .title("Project CPU Usage")
-            .model(&gtk4::StringList::new(&[
-                "Always", "25%", "50%", "100%", "200%", "Never",
-            ]))
-            .build();
-        project_cpu_row.set_selected(proj_cpu);
-        let settings_ref = settings.clone();
-        project_cpu_row.connect_selected_notify(move |row| {
-            settings_ref.borrow_mut().sidebar.project_cpu_threshold = row.selected();
-            settings_ref.borrow().save();
-        });
-        thresholds_group.add(&project_cpu_row);
-
-        let project_mem_row = adw::ComboRow::builder()
-            .title("Project Memory Usage")
-            .model(&gtk4::StringList::new(&[
-                "Always", "500MB", "1GB", "2GB", "8GB", "Never",
-            ]))
-            .build();
-        project_mem_row.set_selected(proj_mem);
-        let settings_ref = settings.clone();
-        project_mem_row.connect_selected_notify(move |row| {
-            settings_ref.borrow_mut().sidebar.project_mem_threshold = row.selected();
-            settings_ref.borrow().save();
-        });
-        thresholds_group.add(&project_mem_row);
-
-        let process_cpu_row = adw::ComboRow::builder()
-            .title("Process CPU Usage")
-            .model(&gtk4::StringList::new(&[
-                "Always", "10%", "30%", "60%", "90%", "Never",
-            ]))
-            .build();
-        process_cpu_row.set_selected(proc_cpu);
-        let settings_ref = settings.clone();
-        let thresh_cb_cpu = on_resource_thresholds_changed.clone();
-        process_cpu_row.connect_selected_notify(move |row| {
-            settings_ref.borrow_mut().sidebar.process_cpu_threshold = row.selected();
-            settings_ref.borrow().save();
-            if let Some(ref cb) = thresh_cb_cpu {
-                let s = settings_ref.borrow();
-                cb(
-                    s.sidebar.process_cpu_threshold,
-                    s.sidebar.process_mem_threshold,
-                );
-            }
-        });
-        thresholds_group.add(&process_cpu_row);
-
-        let process_mem_row = adw::ComboRow::builder()
-            .title("Process Memory Usage")
-            .model(&gtk4::StringList::new(&[
-                "Always", "100MB", "500MB", "1GB", "2GB", "Never",
-            ]))
-            .build();
-        process_mem_row.set_selected(proc_mem);
-        let settings_ref = settings.clone();
-        let thresh_cb_mem = on_resource_thresholds_changed.clone();
-        process_mem_row.connect_selected_notify(move |row| {
-            settings_ref.borrow_mut().sidebar.process_mem_threshold = row.selected();
-            settings_ref.borrow().save();
-            if let Some(ref cb) = thresh_cb_mem {
-                let s = settings_ref.borrow();
-                cb(
-                    s.sidebar.process_cpu_threshold,
-                    s.sidebar.process_mem_threshold,
-                );
-            }
-        });
-        thresholds_group.add(&process_mem_row);
-
         page.add(&display_group);
-        page.add(&thresholds_group);
         page
     }
 

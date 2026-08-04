@@ -11,13 +11,8 @@ type ActionCallback = Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>;
 
 pub struct ProcessRow {
     container: gtk4::Box,
-    status_stack: gtk4::Stack,
     status_dot: gtk4::Label,
-    status_spinner: gtk4::Image,
     is_terminal: bool,
-    /// Agent rows use the output-driven working/waiting dot exclusively —
-    /// the CPU-based spinner flip in `set_resources` would cover it.
-    is_agent: bool,
     is_running: Cell<bool>,
     name_label: gtk4::Label,
     /// Shared name used by button callbacks so they track renames.
@@ -25,8 +20,6 @@ pub struct ProcessRow {
     /// Shared qualified name (project::process) for context actions.
     pub qualified_name: Rc<RefCell<String>>,
     keybind_label: gtk4::Label,
-    cpu_label: gtk4::Label,
-    memory_label: gtk4::Label,
     port_label: gtk4::Label,
     browser_button: gtk4::Button,
     play_button: gtk4::Button,
@@ -71,19 +64,7 @@ impl ProcessRow {
             .css_classes(["caption", "status-stopped"])
             .build();
 
-        let status_spinner = gtk4::Image::builder()
-            .icon_name("process-working-symbolic")
-            .pixel_size(10)
-            .css_classes(["status-spinner"])
-            .build();
-
-        let status_stack = gtk4::Stack::builder()
-            .transition_type(gtk4::StackTransitionType::None)
-            .build();
-        status_stack.add_named(&status_dot, Some("dot"));
-        status_stack.add_named(&status_spinner, Some("spinner"));
-        status_stack.set_visible_child_name("dot");
-        container.append(&status_stack);
+        container.append(&status_dot);
 
         // Process name
         let name_label = gtk4::Label::builder()
@@ -95,18 +76,6 @@ impl ProcessRow {
         container.append(&name_label);
 
         // CPU label (hidden by default)
-        let cpu_label = gtk4::Label::builder()
-            .css_classes(["caption", "dim-label", "resource-label"])
-            .visible(false)
-            .build();
-        container.append(&cpu_label);
-
-        // Memory label (hidden by default)
-        let memory_label = gtk4::Label::builder()
-            .css_classes(["caption", "dim-label", "resource-label"])
-            .visible(false)
-            .build();
-        container.append(&memory_label);
 
         // Port label (hidden by default)
         let port_label = gtk4::Label::builder()
@@ -261,18 +230,13 @@ impl ProcessRow {
 
         Self {
             container,
-            status_stack,
             status_dot,
-            status_spinner,
             is_terminal,
-            is_agent: category == ProcessCategory::Agent,
             is_running: Cell::new(false),
             name_label,
             action_name,
             qualified_name: Rc::new(RefCell::new(String::new())),
             keybind_label,
-            cpu_label,
-            memory_label,
             port_label,
             browser_button,
             play_button,
@@ -429,73 +393,21 @@ impl ProcessRow {
         match status {
             ProcessStatus::Running | ProcessStatus::Restarting => {
                 self.is_running.set(true);
-                self.status_spinner.remove_css_class("spinning");
-                self.status_stack.set_visible_child_name("dot");
                 self.status_dot.add_css_class("status-running");
             }
             ProcessStatus::Stopped => {
                 self.is_running.set(false);
-                self.status_spinner.remove_css_class("spinning");
-                self.status_stack.set_visible_child_name("dot");
                 self.status_dot.add_css_class("status-stopped");
-                self.clear_resources();
                 self.set_port(None);
                 self.set_url(None);
             }
             ProcessStatus::Crashed => {
                 self.is_running.set(false);
-                self.status_spinner.remove_css_class("spinning");
-                self.status_stack.set_visible_child_name("dot");
                 self.status_dot.add_css_class("status-crashed");
-                self.clear_resources();
                 self.set_port(None);
                 self.set_url(None);
             }
         }
-    }
-
-    pub fn set_resources(
-        &self,
-        cpu_percent: f64,
-        memory_mb: f64,
-        cpu_threshold: f64,
-        mem_threshold: f64,
-    ) {
-        self.cpu_label.set_label(&format!("{cpu_percent:.1}%"));
-        self.cpu_label
-            .set_visible(cpu_threshold >= 0.0 && cpu_percent > cpu_threshold);
-
-        let mem_str = if memory_mb >= 1024.0 {
-            format!("{:.1}GB", memory_mb / 1024.0)
-        } else {
-            format!("{:.0}MB", memory_mb)
-        };
-        self.memory_label.set_label(&mem_str);
-        self.memory_label
-            .set_visible(mem_threshold >= 0.0 && memory_mb > mem_threshold);
-
-        // Toggle spinner based on CPU activity (not for terminals). Agent
-        // rows opt out entirely: their indicator is the output-driven
-        // working/waiting dot, which the spinner would cover.
-        if self.is_running.get() && !self.is_agent {
-            if cpu_percent > 1.0 {
-                self.status_spinner.add_css_class("spinning");
-                self.status_stack.set_visible_child_name("spinner");
-            } else {
-                self.status_spinner.remove_css_class("spinning");
-                self.status_dot.remove_css_class("status-stopped");
-                self.status_dot.remove_css_class("status-crashed");
-                self.status_dot.add_css_class("status-running");
-                self.status_stack.set_visible_child_name("dot");
-            }
-        }
-    }
-
-    pub fn clear_resources(&self) {
-        self.cpu_label.set_visible(false);
-        self.memory_label.set_visible(false);
-        self.status_spinner.remove_css_class("spinning");
-        self.status_stack.set_visible_child_name("dot");
     }
 
     pub fn set_port(&self, port: Option<u16>) {

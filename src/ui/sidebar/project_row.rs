@@ -13,7 +13,6 @@ pub struct ProjectRow {
     expander_icon: gtk4::Image,
     icon_area: gtk4::Box,
     name_label: gtk4::Label,
-    memory_label: gtk4::Label,
     revealer: gtk4::Revealer,
     content_box: gtk4::Box,
     controls_box: gtk4::Box,
@@ -55,13 +54,6 @@ impl ProjectRow {
             .css_classes(["project-name"])
             .build();
         header_row.append(&name_label);
-
-        // Memory label (hidden by default)
-        let memory_label = gtk4::Label::builder()
-            .css_classes(["caption", "dim-label", "resource-label"])
-            .visible(false)
-            .build();
-        header_row.append(&memory_label);
 
         // Control buttons (visible on hover)
         let controls_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
@@ -169,7 +161,6 @@ impl ProjectRow {
             expander_icon,
             icon_area,
             name_label,
-            memory_label,
             revealer,
             content_box,
             controls_box,
@@ -297,20 +288,6 @@ impl ProjectRow {
             .is_none()
         {
             Self::update_icon_widget(&self.icon_area, name, None);
-        }
-    }
-
-    pub fn set_memory(&self, total_mb: f64) {
-        if total_mb > 0.1 {
-            let mem_str = if total_mb >= 1024.0 {
-                format!("{:.1}GB", total_mb / 1024.0)
-            } else {
-                format!("{:.0}MB", total_mb)
-            };
-            self.memory_label.set_label(&mem_str);
-            self.memory_label.set_visible(true);
-        } else {
-            self.memory_label.set_visible(false);
         }
     }
 

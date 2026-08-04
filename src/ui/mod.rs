@@ -1,5 +1,6 @@
 pub mod accent;
 pub mod add_command_dialog;
+pub mod add_remote_project_dialog;
 pub mod add_ssh_dialog;
 pub mod command_palette;
 pub mod edit_project_dialog;

@@ -292,6 +292,42 @@ pub fn notify_restart(
     );
 }
 
+/// Remote process lost its ssh connection (exit 255) and is being restarted.
+pub fn notify_reconnect(
+    project_name: &str,
+    process_name: &str,
+    attempt: u32,
+    icon_path: Option<&Path>,
+) {
+    send(
+        project_name,
+        &format!("{process_name}: connection lost — reconnecting (attempt {attempt})"),
+        icon_path,
+        None,
+    );
+}
+
+/// Remote process lost its ssh connection and won't be restarted automatically.
+pub fn notify_disconnect(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
+    send(
+        project_name,
+        &format!("{process_name}: ssh connection lost"),
+        icon_path,
+        None,
+    );
+}
+
+/// A remote project's host couldn't be reached while loading it at startup;
+/// TuxFlow keeps retrying in the background. Fired once per outage.
+pub fn notify_remote_unreachable(project_name: &str, host: &str) {
+    send(
+        project_name,
+        &format!("Can't reach {host} — will keep retrying in the background"),
+        None,
+        None,
+    );
+}
+
 pub fn notify_finish(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
     send(
         project_name,

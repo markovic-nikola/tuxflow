@@ -30,23 +30,30 @@ impl ProjectDetail {
         let cards_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
         cards_box.set_halign(gtk4::Align::Start);
 
-        // Directory card
-        let dir_card = Self::build_card(
-            "Directory",
-            &project.dir.to_string_lossy(),
-            "folder-symbolic",
-        );
+        // Directory card. For remote projects the copy button copies the
+        // scp-style host:path form, which is what you'd paste into a shell.
+        let (card_title, card_icon, copy_text) = match &project.location {
+            crate::remote::ProjectLocation::Local(p) => (
+                "Directory",
+                "folder-symbolic",
+                p.to_string_lossy().into_owned(),
+            ),
+            crate::remote::ProjectLocation::Ssh { host, dir } => (
+                "Remote Directory",
+                "folder-remote-symbolic",
+                format!("{host}:{dir}"),
+            ),
+        };
+        let dir_card = Self::build_card(card_title, &project.key(), card_icon);
         // Add copy path button
-        let dir_str = project.dir.to_string_lossy().to_string();
         let copy_btn = gtk4::Button::builder()
             .icon_name("edit-copy-symbolic")
             .tooltip_text("Copy Path")
             .css_classes(["flat", "circular"])
             .build();
-        let dir_owned = dir_str.clone();
         copy_btn.connect_clicked(move |_| {
             if let Some(display) = gtk4::gdk::Display::default() {
-                display.clipboard().set_text(&dir_owned);
+                display.clipboard().set_text(&copy_text);
             }
         });
         if let Some(content) = dir_card.last_child()
@@ -56,9 +63,9 @@ impl ProjectDetail {
         }
         cards_box.append(&dir_card);
 
-        // Config card
-        let config_path = project.dir.join("tuxflow.toml");
-        let config_status = if config_path.exists() {
+        // Config card — state captured at load time; no disk I/O on the UI
+        // thread, and no ssh round trip for remote projects.
+        let config_status = if project.config_loaded {
             "Valid"
         } else {
             "Not found"

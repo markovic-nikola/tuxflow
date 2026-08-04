@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::LazyLock;
 
@@ -13,6 +13,8 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
+
+use crate::remote::{ProjectLocation, sh_quote, ssh_mux_options};
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_nonewlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
@@ -88,11 +90,35 @@ fn parse_status_line(line: &str) -> Option<ChangedFile> {
     })
 }
 
-fn load_changed_files(project_dir: &Path) -> Vec<ChangedFile> {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1"])
-        .current_dir(project_dir)
-        .output();
+/// Build a git invocation for the machine that owns the project files:
+/// plain `git` in the project dir locally, or `ssh host 'cd dir && git …'`
+/// over the shared ControlMaster connection for remote projects. Every
+/// caller runs the command on a worker thread, so remote latency is fine.
+fn git_command(location: &ProjectLocation, args: &[&str]) -> std::process::Command {
+    match location {
+        ProjectLocation::Local(dir) => {
+            let mut cmd = std::process::Command::new("git");
+            cmd.args(args).current_dir(dir);
+            cmd
+        }
+        ProjectLocation::Ssh { host, dir } => {
+            let mut cmd = std::process::Command::new("ssh");
+            cmd.args(ssh_mux_options());
+            cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
+            cmd.arg(host);
+            let git_args = args
+                .iter()
+                .map(|a| sh_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            cmd.arg(format!("cd {} && git {}", sh_quote(dir), git_args));
+            cmd
+        }
+    }
+}
+
+fn load_changed_files(location: &ProjectLocation) -> Vec<ChangedFile> {
+    let output = git_command(location, &["status", "--porcelain=v1"]).output();
 
     let output = match output {
         Ok(o) if o.status.success() => o,
@@ -103,11 +129,8 @@ fn load_changed_files(project_dir: &Path) -> Vec<ChangedFile> {
     stdout.lines().filter_map(parse_status_line).collect()
 }
 
-fn git_status_hash(project_dir: &Path) -> u64 {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1"])
-        .current_dir(project_dir)
-        .output();
+fn git_status_hash(location: &ProjectLocation) -> u64 {
+    let output = git_command(location, &["status", "--porcelain=v1"]).output();
     match output {
         Ok(o) if o.status.success() => {
             let mut hasher = DefaultHasher::new();
@@ -118,11 +141,8 @@ fn git_status_hash(project_dir: &Path) -> u64 {
     }
 }
 
-fn commits_ahead(project_dir: &Path) -> usize {
-    let output = std::process::Command::new("git")
-        .args(["rev-list", "--count", "@{u}..HEAD"])
-        .current_dir(project_dir)
-        .output();
+fn commits_ahead(location: &ProjectLocation) -> usize {
+    let output = git_command(location, &["rev-list", "--count", "@{u}..HEAD"]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .trim()
@@ -132,11 +152,8 @@ fn commits_ahead(project_dir: &Path) -> usize {
     }
 }
 
-pub fn commits_behind(project_dir: &Path) -> usize {
-    let output = std::process::Command::new("git")
-        .args(["rev-list", "--count", "HEAD..@{u}"])
-        .current_dir(project_dir)
-        .output();
+pub fn commits_behind(location: &ProjectLocation) -> usize {
+    let output = git_command(location, &["rev-list", "--count", "HEAD..@{u}"]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .trim()
@@ -146,17 +163,25 @@ pub fn commits_behind(project_dir: &Path) -> usize {
     }
 }
 
-pub fn dirty_file_count(project_dir: &Path) -> usize {
-    let output = std::process::Command::new("git")
-        .args(["status", "--porcelain=v1"])
-        .current_dir(project_dir)
-        .output();
+pub fn dirty_file_count(location: &ProjectLocation) -> usize {
+    let output = git_command(location, &["status", "--porcelain=v1"]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter(|l| !l.is_empty())
             .count(),
         _ => 0,
+    }
+}
+
+/// Whether the project root contains a `.git`. Local is a cheap stat;
+/// remote is an ssh round trip — call off the main thread for remote.
+pub fn has_git_repo(location: &ProjectLocation) -> bool {
+    match location {
+        ProjectLocation::Local(dir) => dir.join(".git").exists(),
+        ProjectLocation::Ssh { host, dir } => {
+            crate::remote::fs::remote_dir_exists(host, &format!("{}/.git", dir)).unwrap_or(false)
+        }
     }
 }
 
@@ -180,17 +205,12 @@ fn update_pull_button(btn: &gtk4::Button, behind: usize) {
     }
 }
 
-pub fn git_fetch(project_dir: &Path) {
-    let _ = std::process::Command::new("git")
-        .args(["fetch"])
-        .current_dir(project_dir)
-        .output();
+pub fn git_fetch(location: &ProjectLocation) {
+    let _ = git_command(location, &["fetch"]).output();
 }
 
-fn run_git_command(project_dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(project_dir)
+fn run_git_command(location: &ProjectLocation, args: &[&str]) -> Result<String, String> {
+    let output = git_command(location, args)
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -201,8 +221,8 @@ fn run_git_command(project_dir: &Path, args: &[&str]) -> Result<String, String> 
     }
 }
 
-fn current_branch(project_dir: &Path) -> Option<String> {
-    let name = run_git_command(project_dir, &["branch", "--show-current"])
+fn current_branch(location: &ProjectLocation) -> Option<String> {
+    let name = run_git_command(location, &["branch", "--show-current"])
         .ok()?
         .trim()
         .to_string();
@@ -219,22 +239,17 @@ fn show_error_dialog(parent: &impl IsA<gtk4::Widget>, heading: &str, message: &s
     dialog.present(Some(parent));
 }
 
-fn load_diff_for_file(project_dir: &Path, file: &ChangedFile) -> DiffResult {
+fn load_diff_for_file(location: &ProjectLocation, file: &ChangedFile) -> DiffResult {
     let output = if matches!(file.status, FileStatus::Untracked) {
-        std::process::Command::new("git")
-            .args(["diff", "--no-index", "--", "/dev/null", &file.path])
-            .current_dir(project_dir)
-            .output()
+        git_command(
+            location,
+            &["diff", "--no-index", "--", "/dev/null", &file.path],
+        )
+        .output()
     } else if file.staged {
-        std::process::Command::new("git")
-            .args(["diff", "--cached", "--", &file.path])
-            .current_dir(project_dir)
-            .output()
+        git_command(location, &["diff", "--cached", "--", &file.path]).output()
     } else {
-        std::process::Command::new("git")
-            .args(["diff", "--", &file.path])
-            .current_dir(project_dir)
-            .output()
+        git_command(location, &["diff", "--", &file.path]).output()
     };
 
     // Cap diff text before highlighting. Minified files produce one giant
@@ -433,7 +448,7 @@ pub struct GitChangesDialog;
 impl GitChangesDialog {
     pub fn show(
         parent: &impl IsA<gtk4::Widget>,
-        project_dir: &Path,
+        location: &ProjectLocation,
         on_git_state_changed: impl Fn() + 'static,
     ) {
         let on_changed: Rc<dyn Fn()> = Rc::new(on_git_state_changed);
@@ -621,7 +636,7 @@ impl GitChangesDialog {
 
         // Store files for selection callback
         let files_store = std::rc::Rc::new(std::cell::RefCell::new(Vec::<ChangedFile>::new()));
-        let dir = project_dir.to_path_buf();
+        let dir = location.clone();
 
         // Initial branch label (synchronous — single fast git call)
         if let Some(branch) = current_branch(&dir) {
@@ -943,7 +958,7 @@ impl GitChangesDialog {
             alive_close.set(false);
         });
 
-        let poll_dir = project_dir.to_path_buf();
+        let poll_dir = location.clone();
         let last_hash = Rc::new(Cell::new(0u64));
         let fetch_counter = Rc::new(Cell::new(0u32));
         let poll_listbox = listbox.clone();
@@ -1043,7 +1058,7 @@ impl GitChangesDialog {
     }
 
     fn load_files(
-        project_dir: PathBuf,
+        location: ProjectLocation,
         listbox: gtk4::ListBox,
         content_stack: gtk4::Stack,
         diff_view: gtk4::TextView,
@@ -1052,7 +1067,7 @@ impl GitChangesDialog {
         let (tx, rx) = oneshot::channel::<Vec<ChangedFile>>();
 
         std::thread::spawn(move || {
-            let files = load_changed_files(&project_dir);
+            let files = load_changed_files(&location);
             let _ = tx.send(files);
         });
 

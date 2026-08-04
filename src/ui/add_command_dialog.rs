@@ -16,6 +16,7 @@ struct FormFields {
     cmd_row: adw::EntryRow,
     start_with_project_row: adw::SwitchRow,
     auto_restart_row: adw::SwitchRow,
+    open_in_browser_row: adw::SwitchRow,
     watch_row: adw::EntryRow,
 }
 
@@ -50,6 +51,12 @@ fn build_form_fields(content: &gtk4::Box) -> FormFields {
         .build();
     toggle_group.add(&auto_restart_row);
 
+    let open_in_browser_row = adw::SwitchRow::builder()
+        .title("Open in Browser")
+        .subtitle("Open the detected URL after you start it")
+        .build();
+    toggle_group.add(&open_in_browser_row);
+
     content.append(&toggle_group);
 
     // File watch patterns
@@ -66,6 +73,7 @@ fn build_form_fields(content: &gtk4::Box) -> FormFields {
         cmd_row,
         start_with_project_row,
         auto_restart_row,
+        open_in_browser_row,
         watch_row,
     }
 }
@@ -161,6 +169,7 @@ impl AddCommandDialog {
                 working_dir: None,
                 start_with_project: fields.start_with_project_row.is_active(),
                 auto_restart: fields.auto_restart_row.is_active(),
+                open_in_browser: fields.open_in_browser_row.is_active(),
                 restart_when_changed: parse_watch_patterns(&fields.watch_row.text()),
                 env: std::collections::HashMap::new(),
                 category: ProcessCategory::Command,
@@ -232,6 +241,9 @@ impl AddCommandDialog {
             .start_with_project_row
             .set_active(current.start_with_project);
         fields.auto_restart_row.set_active(current.auto_restart);
+        fields
+            .open_in_browser_row
+            .set_active(current.open_in_browser);
         if !current.restart_when_changed.is_empty() {
             fields
                 .watch_row
@@ -269,6 +281,7 @@ impl AddCommandDialog {
                 working_dir: working_dir.clone(),
                 start_with_project: fields.start_with_project_row.is_active(),
                 auto_restart: fields.auto_restart_row.is_active(),
+                open_in_browser: fields.open_in_browser_row.is_active(),
                 restart_when_changed: parse_watch_patterns(&fields.watch_row.text()),
                 env: env.clone(),
                 category: category.clone(),
@@ -384,6 +397,7 @@ impl AddCommandDialog {
                 working_dir: None,
                 start_with_project: false,
                 auto_restart: false,
+                open_in_browser: false,
                 restart_when_changed: Vec::new(),
                 env: std::collections::HashMap::new(),
                 category: ProcessCategory::Agent,

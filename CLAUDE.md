@@ -44,7 +44,11 @@ src/
     auto_restart.rs        # Crash detection + exponential backoff
     pid_file.rs            # PID file tracking
   detect/
-    detector.rs            # Tech stack auto-detection (package.json, Cargo.toml, etc.)
+    detector.rs            # Tech stack auto-detection (package.json, Cargo.toml, etc.) over ProjectFs
+  remote/
+    mod.rs                 # ProjectLocation (Local/Ssh), sh_quote, ssh ControlMaster options, remote command wrapping
+    fs.rs                  # ProjectFs trait: LocalFs (std::fs) / SshFs (ssh exec over shared connection)
+    tunnel.rs              # TunnelManager: ssh -L port forwards for detected ports on remote projects
   watcher/
     file_watcher.rs        # notify + glob matching, triggers process restart
   mcp/
@@ -59,6 +63,7 @@ src/
     terminal_search.rs     # Ctrl+F search overlay
     command_palette.rs     # Ctrl+K command palette
     add_command_dialog.rs  # Add command/agent dialog
+    add_remote_project_dialog.rs # Add remote (SSH) project dialog with BatchMode verification
     add_ssh_dialog.rs      # Add SSH connection dialog
     edit_project_dialog.rs # Edit project dialog
     project_detail.rs      # Project overview panel
@@ -73,6 +78,7 @@ src/
       settings_window.rs   # AdwPreferencesWindow with all settings tabs
   util/
     port_detector.rs       # Regex scan terminal output for ports/URLs
+    worker.rs              # run(): blocking work on a thread, result on the GTK main loop
     resource_monitor.rs    # CPU/memory via /proc/<pid>/stat
     icon_detector.rs       # Project icon auto-detection
     notifications.rs       # Desktop notifications via libnotify
@@ -91,6 +97,7 @@ data/
 - **URL handling:** VTE regex matching + Ctrl+click opens via `xdg-open`. Sidebar/status bar browser buttons use `gtk4::UriLauncher`
 - **Resource monitoring:** Polls `/proc/<pid>/stat` and `/proc/<pid>/statm` every 2s, updates sidebar process rows
 - **`TUXFLOW_CHILD=1`** env var is set in window.rs and inherited by child processes (used to prevent recursive spawning)
+- **Remote projects:** a project's `ProjectLocation` is `Local(PathBuf)` or `Ssh { host, dir }`, persisted in projects.toml as an opaque `ssh://host/path` key (no schema migration). Remote processes spawn as `exec ssh -t <mux> host '<wrap>'` in the normal VTE pipeline; all ssh invocations share a ControlMaster connection (`$XDG_RUNTIME_DIR/tuxflow/ssh-%C`). The wrap runs the command inside a tmux session on a dedicated server (`tmux -L tuxflow`, status off, mouse on, deterministic `tf-<proc>-<fnv32>` session names from project key + process name), so connection loss and app quit only *detach* — reconnect and app relaunch reattach via `new-session -A`; the command's exit code round-trips through `/tmp/.<session>-<uid>.exit` (uid-namespaced — deterministic session names would otherwise collide across users on a shared host) so crash detection still works. Hosts without tmux fall back inline to direct exec (no persistence; `pkill -s` on the pidfile PID covers the kill). Stop kills the tmux session + pidfile login session and flags the next spawn to kill-before-create (`remote_fresh_next` — avoids racing the fire-and-forget remote kill); app quit calls `detach_all()` instead, so remote processes deliberately outlive TuxFlow. Exit 255 on a remote process is surfaced as "connection lost — reconnecting", not a crash; reconnects retry forever (backoff capped at 32 s, one notification per outage) since the session is still alive on the host. Project load probes `tmux list-sessions` and auto-reattaches processes whose sessions are still alive, so the UI never shows "stopped" for a running detached process. Mouse selections inside tmux reach the local clipboard via TuxFlow's own bridge (mouse-up on a remote terminal → `tmux show-buffer` over ssh → GTK clipboard, change-detected by hash) — NO released VTE implements OSC 52 (verified through 0.84), so the standard escape-sequence route is a dead end. The reverse direction too: pasting (Ctrl+Shift+V) while the clipboard holds an image uploads the PNG to the host (`remote::upload_image` → `/tmp/.tuxflow-img-*.png`) and types the path into the terminal — agents treat image paths as attachments. Detected ports auto-tunnel via `ssh -N -L` (remote/tunnel.rs) — every local port seen in output, remapping to a free local port on collision (badge/URL show the local port); tunnels use dedicated connections (NOT the mux — a forward requested via a mux client survives in the master after the client dies) with PDEATHSIG so they can't outlive the app. Git UI works remotely (`git_changes_dialog::git_command` routes through ssh; `.git` probe runs on a worker thread). Editor button uses `code --remote ssh-remote+host` for code-family editors (util/editor.rs). Add Remote dialog autocompletes remote paths (debounced `ls -1dp` over ssh). Still gated off for remote: file watcher, icon detection, resource stats, MCP, live re-detection in Edit Project. Remote probing (config/detection/git) runs on worker threads via `util::worker::run` — never block the GTK main thread with ssh, and never poll a channel from `idle_add_local` (it busy-spins the main loop). Startup loads of unreachable remote projects notify once and retry in the background with capped backoff (`ProbeError::Unreachable` vs `Invalid` decides retryability)
 
 ## Config Files
 

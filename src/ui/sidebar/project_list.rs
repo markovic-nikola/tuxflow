@@ -414,7 +414,30 @@ impl ProjectList {
                 .append(self.sections.borrow()[last_idx].header.widget());
         }
 
-        self.container.append(project_row.widget());
+        // Insert the row mirroring the workspace's project order (which
+        // respects the saved sidebar order) instead of appending — remote
+        // projects arrive asynchronously and would otherwise always land at
+        // the bottom. `Some(None)` = first position; `None` = order unknown,
+        // fall back to append.
+        let insert_after: Option<Option<gtk4::Box>> =
+            self.workspace.borrow().as_ref().and_then(|ws| {
+                let ws_b = ws.borrow();
+                let order: Vec<String> = ws_b.projects().iter().map(|p| p.name.clone()).collect();
+                let my_idx = order.iter().position(|n| n == project_name)?;
+                let rows = self.project_rows.borrow();
+                Some(
+                    order[..my_idx]
+                        .iter()
+                        .rev()
+                        .find_map(|n| rows.get(n).map(|r| r.widget().clone())),
+                )
+            });
+        match insert_after {
+            Some(sibling) => self
+                .container
+                .insert_child_after(project_row.widget(), sibling.as_ref()),
+            None => self.container.append(project_row.widget()),
+        }
         self.project_managers
             .borrow_mut()
             .insert(project_name.to_string(), manager.clone());
@@ -515,32 +538,27 @@ impl ProjectList {
                 "copy_path" => {
                     if let Some(ref ws) = *ws_ref.borrow() {
                         let ws_borrow = ws.borrow();
-                        if let Some(dir) = ws_borrow.get_project_dir(&pname)
+                        if let Some(location) = ws_borrow.get_project_location(&pname)
                             && let Some(display) = gtk4::gdk::Display::default()
                         {
-                            display.clipboard().set_text(&dir.to_string_lossy());
+                            // Remote projects copy the scp-style host:path form
+                            let text = match &location {
+                                crate::remote::ProjectLocation::Local(p) => {
+                                    p.to_string_lossy().into_owned()
+                                }
+                                crate::remote::ProjectLocation::Ssh { host, dir } => {
+                                    format!("{host}:{dir}")
+                                }
+                            };
+                            display.clipboard().set_text(&text);
                         }
                     }
                 }
                 "open_in_editor" => {
                     if let Some(ref ws) = *ws_ref.borrow() {
                         let ws_borrow = ws.borrow();
-                        if let Some(dir) = ws_borrow.get_project_dir(&pname) {
-                            let settings = crate::config::settings::AppSettings::load();
-                            let editor = &settings.tools.default_editor;
-                            let mut cmd = std::process::Command::new(editor);
-                            if settings.tools.reuse_editor_window
-                                && matches!(
-                                    editor.as_str(),
-                                    "code" | "cursor" | "codium" | "code-insiders"
-                                )
-                            {
-                                cmd.arg("--reuse-window");
-                            }
-                            cmd.arg(&dir);
-                            if let Err(e) = cmd.spawn() {
-                                log::error!("Failed to open editor '{}': {}", editor, e);
-                            }
+                        if let Some(location) = ws_borrow.get_project_location(&pname) {
+                            crate::util::editor::open_in_editor(&location);
                         }
                     }
                 }
@@ -550,8 +568,8 @@ impl ProjectList {
                     if let (Some(ws), Some(win)) = (ws, win) {
                         let ws_borrow = ws.borrow();
                         let dir = ws_borrow
-                            .get_project_dir(&pname)
-                            .map(|d| d.to_string_lossy().to_string())
+                            .get_project_location(&pname)
+                            .map(|l| l.key())
                             .unwrap_or_default();
                         let icon = ws_borrow.get_project_icon(&pname);
                         let commands = ws_borrow.list_toggleable_commands(&pname);
@@ -1722,6 +1740,13 @@ impl ProjectList {
         }
     }
 
+    /// Agent-only: pulse/steady the status dot (working vs waiting).
+    pub fn set_process_working(&self, qualified_name: &str, working: bool) {
+        if let Some(row) = self.process_rows.borrow().get(qualified_name) {
+            row.set_working(working);
+        }
+    }
+
     pub fn set_process_url(&self, qualified_name: &str, url: Option<&str>) {
         if let Some(row) = self.process_rows.borrow().get(qualified_name) {
             row.set_url(url);
@@ -1814,6 +1839,13 @@ impl ProjectList {
     }
 
     /// Expand a project by name, respecting accordion mode.
+    /// Badge a project row as remote (icon + host:dir tooltip).
+    pub fn set_project_remote_hint(&self, project_name: &str, hint: &str) {
+        if let Some(row) = self.project_rows.borrow().get(project_name) {
+            row.set_remote_hint(hint);
+        }
+    }
+
     pub fn expand_project(&self, project_name: &str) {
         let rows = self.project_rows.borrow();
         if let Some(row) = rows.get(project_name) {

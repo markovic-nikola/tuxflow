@@ -3,6 +3,8 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 
+use crate::ui::git_changes_dialog::GitSeed;
+
 pub struct StatusBar {
     container: gtk4::Box,
     remote_icon: gtk4::Image,
@@ -117,7 +119,7 @@ impl StatusBar {
         let git_btn = gtk4::Button::builder()
             .child(&git_btn_content)
             .tooltip_text("Git Changes")
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat", "status-chip"])
             .visible(false)
             .build();
 
@@ -176,7 +178,7 @@ impl StatusBar {
         gtk4::Button::builder()
             .icon_name(icon)
             .tooltip_text(label)
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat", "status-chip"])
             .build()
     }
 
@@ -288,6 +290,19 @@ impl StatusBar {
     /// you can't stop something that isn't running.
     pub fn set_process_running(&self, running: bool) {
         self.stop_btn.set_visible(running);
+    }
+
+    /// Last-known sync state, for seeding the Git Changes dialog so it
+    /// opens with the Push/Pull buttons already correct.
+    pub fn git_seed(&self) -> GitSeed {
+        GitSeed {
+            ahead: self.git_ahead.get(),
+            behind: self.git_behind.get(),
+            branch: self
+                .git_branch_label
+                .is_visible()
+                .then(|| self.git_branch_label.label().to_string()),
+        }
     }
 
     pub fn set_git_available(&self, available: bool) {

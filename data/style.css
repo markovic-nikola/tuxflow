@@ -381,6 +381,32 @@
     color: #d29922;
 }
 
+/* Status-bar buttons (git chip + action icons): quiet at rest, soft
+   accent tint on hover — matches the sidebar row hover language
+   instead of the stock circular pill */
+.status-chip {
+    border-radius: 6px;
+    padding: 2px 8px;
+    min-height: 24px;
+    background: transparent;
+    transition: background 150ms;
+}
+
+.status-chip:hover {
+    background: alpha(@accent_bg_color, 0.12);
+}
+
+.status-chip:active {
+    background: alpha(@accent_bg_color, 0.2);
+}
+
+/* Sidebar row buttons share the chip hover but keep their compact
+   24px hit area (this must come after .status-chip to win) */
+.status-chip.process-play-btn,
+.status-chip.browser-btn {
+    padding: 0;
+}
+
 .git-pull-btn:hover {
     background: #e3b341;
 }

@@ -445,10 +445,20 @@ fn apply_styling(buffer: &gtk4::TextBuffer, result: &DiffResult) {
 
 pub struct GitChangesDialog;
 
+/// Last-known sync state, carried over from the status-bar poller so the
+/// dialog can render the Push/Pull buttons and branch label immediately
+/// instead of waiting for its own fetch + recount round trip.
+pub struct GitSeed {
+    pub ahead: usize,
+    pub behind: usize,
+    pub branch: Option<String>,
+}
+
 impl GitChangesDialog {
     pub fn show(
         parent: &impl IsA<gtk4::Widget>,
         location: &ProjectLocation,
+        seed: GitSeed,
         on_git_state_changed: impl Fn() + 'static,
     ) {
         let on_changed: Rc<dyn Fn()> = Rc::new(on_git_state_changed);
@@ -638,27 +648,35 @@ impl GitChangesDialog {
         let files_store = std::rc::Rc::new(std::cell::RefCell::new(Vec::<ChangedFile>::new()));
         let dir = location.clone();
 
-        // Initial branch label (synchronous — single fast git call)
-        if let Some(branch) = current_branch(&dir) {
+        // Seed branch label and Push/Pull buttons from the status-bar
+        // poller's last-known state — instant, no git calls on open.
+        if let Some(ref branch) = seed.branch {
             branch_label.set_label(&format!("⎇ {branch}"));
         }
+        update_push_button(&push_btn, seed.ahead);
+        update_pull_button(&pull_btn, seed.behind);
 
-        // Initial push/pull status
+        // Then fetch + recount in the background to correct the seed
+        // (the ↓ count is only as fresh as the last fetch).
         {
             let dir_init = dir.clone();
             let push_btn_init = push_btn.clone();
             let pull_btn_init = pull_btn.clone();
-            let (tx, rx) = oneshot::channel::<(usize, usize)>();
+            let branch_label_init = branch_label.clone();
+            let (tx, rx) = oneshot::channel::<(usize, usize, Option<String>)>();
             std::thread::spawn(move || {
                 git_fetch(&dir_init);
                 let ahead = commits_ahead(&dir_init);
                 let behind = commits_behind(&dir_init);
-                let _ = tx.send((ahead, behind));
+                let _ = tx.send((ahead, behind, current_branch(&dir_init)));
             });
             glib::spawn_future_local(async move {
-                if let Ok((ahead, behind)) = rx.await {
+                if let Ok((ahead, behind, branch)) = rx.await {
                     update_push_button(&push_btn_init, ahead);
                     update_pull_button(&pull_btn_init, behind);
+                    if let Some(branch) = branch {
+                        branch_label_init.set_label(&format!("⎇ {branch}"));
+                    }
                 }
             });
         }

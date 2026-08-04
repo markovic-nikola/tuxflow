@@ -62,19 +62,19 @@ impl ProjectRow {
         let start_btn = gtk4::Button::builder()
             .icon_name("media-playback-start-symbolic")
             .tooltip_text("Start all marked processes")
-            .css_classes(["flat", "circular", "btn-play"])
+            .css_classes(["flat", "status-chip", "btn-play"])
             .build();
 
         let restart_btn = gtk4::Button::builder()
             .icon_name("view-refresh-symbolic")
             .tooltip_text("Restart all running processes")
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat", "status-chip"])
             .build();
 
         let stop_btn = gtk4::Button::builder()
             .icon_name("media-playback-stop-symbolic")
             .tooltip_text("Stop all")
-            .css_classes(["flat", "circular", "btn-stop"])
+            .css_classes(["flat", "status-chip", "btn-stop"])
             .build();
 
         controls_box.append(&start_btn);

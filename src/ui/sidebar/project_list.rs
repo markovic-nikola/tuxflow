@@ -53,6 +53,13 @@ pub struct ProjectList {
     // Whether to show the "Ctrl+N" keybind hints on running process rows.
     // Refreshed by `set_show_keybind_hints` when the settings dialog saves.
     show_keybind_hints: Cell<bool>,
+    // "Running projects first" sort. Shared with the project DnD drop
+    // handler so a manual drag re-applies the tiering.
+    recent_first: Rc<Cell<bool>>,
+    // Last known per-project running state, to re-sort only on transitions
+    // (update_process_status fires on every status change, most of which
+    // don't flip the project between tiers).
+    project_running: RefCell<HashMap<String, bool>>,
 }
 
 impl ProjectList {
@@ -168,6 +175,100 @@ impl ProjectList {
             single_expand,
             selected_qname: Rc::new(RefCell::new(None)),
             show_keybind_hints: Cell::new(settings.sidebar.show_keybind_hints),
+            recent_first: Rc::new(Cell::new(settings.sidebar.recent_first)),
+            project_running: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// Toggle "recently used first". Re-sorts immediately; call from the
+    /// settings dialog's save callback.
+    pub fn set_recent_first(&self, enabled: bool) {
+        self.recent_first.set(enabled);
+        self.apply_project_sort();
+    }
+
+    fn apply_project_sort(&self) {
+        Self::sort_project_rows(
+            &self.container,
+            &self.workspace,
+            &self.project_rows,
+            &self.process_statuses,
+            self.recent_first.get(),
+        );
+    }
+
+    /// Reposition project rows. `recent_first` shows two tiers: projects
+    /// with something running on top, then stopped ones. The running tier
+    /// keeps start order (a newly started project appends BELOW already-
+    /// running ones, so their positions stay stable); the stopped tier is
+    /// most-recently-used first, so a project you just stopped slips in
+    /// right below the running tier instead of sinking to its manual
+    /// position. Never-used projects keep the manual (drag & drop) order at
+    /// the bottom, which is also the whole order when the setting is off.
+    fn sort_project_rows(
+        container: &gtk4::Box,
+        workspace: &Rc<RefCell<Option<WorkspaceRef>>>,
+        project_rows: &Rc<RefCell<HashMap<String, ProjectRow>>>,
+        statuses: &Rc<RefCell<HashMap<String, ProcessStatus>>>,
+        recent_first: bool,
+    ) {
+        let Some(ws) = workspace.borrow().clone() else {
+            return;
+        };
+        let ws_borrow = ws.borrow();
+        let order: Vec<String> = ws_borrow
+            .projects()
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+
+        let desired: Vec<String> = if recent_first {
+            let statuses = statuses.borrow();
+            let is_running = |name: &str| {
+                let prefix = format!("{name}::");
+                statuses.iter().any(|(qname, status)| {
+                    qname.starts_with(&prefix)
+                        && matches!(status, ProcessStatus::Running | ProcessStatus::Restarting)
+                })
+            };
+            let mut keyed: Vec<(bool, u64, usize, String)> = order
+                .into_iter()
+                .enumerate()
+                .map(|(manual_pos, name)| {
+                    (
+                        is_running(&name),
+                        ws_borrow.project_last_used(&name),
+                        manual_pos,
+                        name,
+                    )
+                })
+                .collect();
+            keyed.sort_by(|a, b| {
+                b.0.cmp(&a.0)
+                    .then_with(|| {
+                        if a.0 {
+                            // Running tier: earliest start first — stable.
+                            a.1.cmp(&b.1)
+                        } else {
+                            // Stopped tier: most recently used first.
+                            b.1.cmp(&a.1)
+                        }
+                    })
+                    .then(a.2.cmp(&b.2))
+            });
+            keyed.into_iter().map(|(_, _, _, name)| name).collect()
+        } else {
+            order
+        };
+        drop(ws_borrow);
+
+        let rows = project_rows.borrow();
+        let mut prev: Option<gtk4::Box> = None;
+        for name in desired {
+            if let Some(row) = rows.get(name.as_str()) {
+                container.reorder_child_after(row.widget(), prev.as_ref());
+                prev = Some(row.widget().clone());
+            }
         }
     }
 
@@ -310,6 +411,8 @@ impl ProjectList {
         let container_ref = self.container.clone();
         let ws_ref = self.workspace.clone();
         let project_rows_ref = self.project_rows.clone();
+        let statuses_ref = self.process_statuses.clone();
+        let recent_first_ref = self.recent_first.clone();
         let header_ref = project_row.header_row().clone();
         drop_target.connect_drop(move |_, value, _, y| {
             let Ok(dragged_name) = value.get::<String>() else {
@@ -336,6 +439,19 @@ impl ProjectList {
             if let Some(ref ws) = *ws_ref.borrow() {
                 ws.borrow_mut()
                     .reorder_project(&dragged_name, &pname_drop, before);
+            }
+            drop(rows);
+            // Manual order is saved above, but while recency sort is on the
+            // visible order stays recency-driven — re-apply it so the drop
+            // doesn't leave a one-off arrangement on screen.
+            if recent_first_ref.get() {
+                Self::sort_project_rows(
+                    &container_ref,
+                    &ws_ref,
+                    &project_rows_ref,
+                    &statuses_ref,
+                    true,
+                );
             }
             true
         });
@@ -456,6 +572,9 @@ impl ProjectList {
             .insert(project_name.to_string(), project_row);
         self.refresh_project_start_state(project_name);
         self.refresh_project_running_state(project_name);
+        if self.recent_first.get() {
+            self.apply_project_sort();
+        }
     }
 
     pub fn refresh_all_project_start_states(&self) {
@@ -480,6 +599,33 @@ impl ProjectList {
         let has_running = self.project_has_running(project_name);
         if let Some(row) = self.project_rows.borrow().get(project_name) {
             row.set_has_running(has_running);
+        }
+        let flipped = self
+            .project_running
+            .borrow_mut()
+            .insert(project_name.to_string(), has_running)
+            != Some(has_running);
+        // Tier change: started projects stamp their last-used time and float
+        // to the top; stopped ones just re-sort (slipping below the running
+        // tier but keeping their recency rank). Deferred to idle because this
+        // runs from status-change callbacks that can fire while the workspace
+        // is already borrowed (e.g. "stop all" iterates ws.projects()) — the
+        // stamp needs borrow_mut.
+        if flipped {
+            let ws_ref = self.workspace.clone();
+            let container = self.container.clone();
+            let project_rows = self.project_rows.clone();
+            let statuses = self.process_statuses.clone();
+            let recent_first = self.recent_first.clone();
+            let name = project_name.to_string();
+            glib::idle_add_local_once(move || {
+                if has_running && let Some(ws) = ws_ref.borrow().clone() {
+                    ws.borrow_mut().touch_project_last_used(&name);
+                }
+                if recent_first.get() {
+                    Self::sort_project_rows(&container, &ws_ref, &project_rows, &statuses, true);
+                }
+            });
         }
     }
 

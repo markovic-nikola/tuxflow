@@ -407,6 +407,17 @@
     padding: 0;
 }
 
+/* Working-tree line counts in the status-bar changes chip */
+.diff-added {
+    color: #73c991;
+    font-weight: 600;
+}
+
+.diff-removed {
+    color: #f14c4c;
+    font-weight: 600;
+}
+
 .git-pull-btn:hover {
     background: #e3b341;
 }

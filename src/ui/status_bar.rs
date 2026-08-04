@@ -15,11 +15,15 @@ pub struct StatusBar {
     status_label: gtk4::Label,
     focus_btn: gtk4::Button,
     git_btn: gtk4::Button,
+    git_sync_btn: gtk4::Button,
+    git_sync_spinner: gtk4::Spinner,
     git_branch_label: gtk4::Label,
     git_sync_label: gtk4::Label,
+    diff_added_label: gtk4::Label,
+    diff_removed_label: gtk4::Label,
+    git_available: Cell<bool>,
     git_ahead: Cell<usize>,
     git_behind: Cell<usize>,
-    git_dirty: Cell<usize>,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
@@ -95,10 +99,9 @@ impl StatusBar {
 
         let focus_btn = Self::make_button("Focus", "focus-windows-symbolic");
 
-        // Git button: icon + current branch + ahead/behind counters, all one
-        // clickable chip. Filled by the periodic git poll (set_git_branch /
-        // set_git_sync); the counters hide when the branch is in sync.
-        let git_icon = gtk4::Image::from_icon_name("send-to-symbolic");
+        // Sync chip: branch name + ↓↑ counters. One click pulls (ff-only)
+        // and pushes; a spinner replaces the counters while syncing.
+        let git_sync_spinner = gtk4::Spinner::builder().visible(false).build();
         let git_branch_label = gtk4::Label::builder()
             .label("")
             .visible(false)
@@ -112,10 +115,34 @@ impl StatusBar {
             .use_markup(true)
             .css_classes(["caption"])
             .build();
+        let sync_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
+        sync_content.append(&git_sync_spinner);
+        sync_content.append(&git_branch_label);
+        sync_content.append(&git_sync_label);
+        let git_sync_btn = gtk4::Button::builder()
+            .child(&sync_content)
+            .tooltip_text("Pull & Push")
+            .css_classes(["flat", "status-chip"])
+            .visible(false)
+            .build();
+
+        // Changes chip: icon + working-tree "+N −M" line counts. Click
+        // opens the Git Changes dialog. Filled by the periodic git poll.
+        let git_icon = gtk4::Image::from_icon_name("send-to-symbolic");
+        let diff_added_label = gtk4::Label::builder()
+            .label("")
+            .visible(false)
+            .css_classes(["caption", "diff-added"])
+            .build();
+        let diff_removed_label = gtk4::Label::builder()
+            .label("")
+            .visible(false)
+            .css_classes(["caption", "diff-removed"])
+            .build();
         let git_btn_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 5);
         git_btn_content.append(&git_icon);
-        git_btn_content.append(&git_branch_label);
-        git_btn_content.append(&git_sync_label);
+        git_btn_content.append(&diff_added_label);
+        git_btn_content.append(&diff_removed_label);
         let git_btn = gtk4::Button::builder()
             .child(&git_btn_content)
             .tooltip_text("Git Changes")
@@ -130,6 +157,7 @@ impl StatusBar {
         stop_btn.add_css_class("btn-stop");
         let restart_btn = Self::make_button("Restart", "view-refresh-symbolic");
 
+        actions.append(&git_sync_btn);
         actions.append(&git_btn);
         actions.append(&focus_btn);
         actions.append(&browser_btn);
@@ -161,11 +189,15 @@ impl StatusBar {
             status_label,
             focus_btn,
             git_btn,
+            git_sync_btn,
+            git_sync_spinner,
             git_branch_label,
             git_sync_label,
+            diff_added_label,
+            diff_removed_label,
+            git_available: Cell::new(false),
             git_ahead: Cell::new(0),
             git_behind: Cell::new(0),
-            git_dirty: Cell::new(0),
             browser_btn,
             clear_btn,
             stop_btn,
@@ -298,15 +330,27 @@ impl StatusBar {
         GitSeed {
             ahead: self.git_ahead.get(),
             behind: self.git_behind.get(),
-            branch: self
-                .git_branch_label
-                .is_visible()
-                .then(|| self.git_branch_label.label().to_string()),
+            branch: self.git_branch_label.get_visible().then(|| {
+                // Label carries a "⎇ " display prefix — strip it back off.
+                let label = self.git_branch_label.label();
+                label
+                    .strip_prefix("\u{2387} ")
+                    .unwrap_or(label.as_str())
+                    .to_string()
+            }),
         }
     }
 
     pub fn set_git_available(&self, available: bool) {
+        self.git_available.set(available);
         self.git_btn.set_visible(available);
+        self.update_sync_visibility();
+    }
+
+    /// Sync chip needs both git and a branch (detached HEAD can't pull/push).
+    fn update_sync_visibility(&self) {
+        self.git_sync_btn
+            .set_visible(self.git_available.get() && self.git_branch_label.get_visible());
     }
 
     /// Show commits to push (↑, green) / pull (↓, amber) inside the git
@@ -329,44 +373,35 @@ impl StatusBar {
             self.git_sync_label.set_markup(&parts.join(" "));
             self.git_sync_label.set_visible(true);
         }
-        self.update_git_tooltip();
+        let tip = match (ahead, behind) {
+            (0, 0) => "Pull & Push (in sync \u{2014} click to fetch)".to_string(),
+            (a, 0) => format!("Pull & Push ({a} to push)"),
+            (0, b) => format!("Pull & Push ({b} to pull)"),
+            (a, b) => format!("Pull & Push ({a} to push, {b} to pull)"),
+        };
+        self.git_sync_btn.set_tooltip_text(Some(&tip));
     }
 
-    /// Show the current branch inside the git chip. `None` (detached HEAD,
-    /// or branch not yet known) hides the label, leaving just the icon.
-    pub fn set_git_branch(&self, branch: Option<&str>) {
-        match branch {
-            Some(b) => {
-                self.git_branch_label.set_label(b);
-                self.git_branch_label.set_visible(true);
-            }
-            None => self.git_branch_label.set_visible(false),
-        }
-    }
-
-    pub fn set_git_dirty(&self, dirty: usize) {
-        self.git_dirty.set(dirty);
-        if dirty > 0 {
+    /// Working-tree stats on the changes chip: "+N −M" line counts, amber
+    /// icon tint while dirty. Untracked files don't show in line counts
+    /// (git diff can't see them) — they go in the tooltip.
+    pub fn set_git_diffstat(&self, files: usize, added: usize, removed: usize, untracked: usize) {
+        self.diff_added_label.set_label(&format!("+{added}"));
+        self.diff_added_label.set_visible(added > 0);
+        self.diff_removed_label
+            .set_label(&format!("\u{2212}{removed}"));
+        self.diff_removed_label.set_visible(removed > 0);
+        if files > 0 || untracked > 0 {
             self.git_btn.add_css_class("git-dirty");
         } else {
             self.git_btn.remove_css_class("git-dirty");
         }
-        self.update_git_tooltip();
-    }
-
-    fn update_git_tooltip(&self) {
         let mut parts = Vec::new();
-        let dirty = self.git_dirty.get();
-        let ahead = self.git_ahead.get();
-        let behind = self.git_behind.get();
-        if dirty > 0 {
-            parts.push(format!("{dirty} uncommitted"));
+        if files > 0 {
+            parts.push(format!("{files} files: +{added} \u{2212}{removed}"));
         }
-        if ahead > 0 {
-            parts.push(format!("{ahead} to push"));
-        }
-        if behind > 0 {
-            parts.push(format!("{behind} to pull"));
+        if untracked > 0 {
+            parts.push(format!("{untracked} untracked"));
         }
         let tip = if parts.is_empty() {
             "Git Changes".to_string()
@@ -374,6 +409,30 @@ impl StatusBar {
             format!("Git Changes ({})", parts.join(", "))
         };
         self.git_btn.set_tooltip_text(Some(&tip));
+    }
+
+    /// Spinner + insensitive while the one-click sync runs.
+    pub fn set_git_syncing(&self, syncing: bool) {
+        self.git_sync_spinner.set_visible(syncing);
+        self.git_sync_spinner.set_spinning(syncing);
+        self.git_sync_btn.set_sensitive(!syncing);
+    }
+
+    pub fn connect_git_sync(&self, cb: impl Fn(&gtk4::Button) + 'static) {
+        self.git_sync_btn.connect_clicked(move |btn| cb(btn));
+    }
+
+    /// Show the current branch on the sync chip. `None` (detached HEAD, or
+    /// branch not yet known) hides the whole chip — nothing to pull/push.
+    pub fn set_git_branch(&self, branch: Option<&str>) {
+        match branch {
+            Some(b) => {
+                self.git_branch_label.set_label(&format!("\u{2387} {b}"));
+                self.git_branch_label.set_visible(true);
+            }
+            None => self.git_branch_label.set_visible(false),
+        }
+        self.update_sync_visibility();
     }
 
     pub fn connect_git_changes(&self, cb: impl Fn(&gtk4::Button) + 'static) {

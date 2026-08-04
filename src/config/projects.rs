@@ -22,6 +22,10 @@ pub struct SavedProjects {
     pub deleted_processes: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub custom_commands: HashMap<String, Vec<ProcessConfig>>,
+    /// Unix seconds of the last user-visible activity (a process starting)
+    /// per project. Drives the sidebar's "recently used first" sort.
+    #[serde(default)]
+    pub last_used: HashMap<String, u64>,
 }
 
 impl SavedProjects {
@@ -133,6 +137,16 @@ impl SavedProjects {
 
     pub fn is_expanded(&self, dir: &str) -> Option<bool> {
         self.expanded.get(dir).copied()
+    }
+
+    pub fn set_last_used(&mut self, dir: &str, timestamp: u64) {
+        self.last_used.insert(dir.to_string(), timestamp);
+        self.save();
+    }
+
+    /// 0 = never used.
+    pub fn get_last_used(&self, dir: &str) -> u64 {
+        self.last_used.get(dir).copied().unwrap_or(0)
     }
 
     pub fn add_deleted_process(&mut self, dir: &str, process_name: &str) {

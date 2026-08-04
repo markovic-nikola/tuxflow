@@ -515,6 +515,28 @@ impl Workspace {
             .and_then(|p| self.saved.is_expanded(&p.key()))
     }
 
+    /// Stamp "now" as the project's last activity (drives the sidebar's
+    /// recently-used sort). Persists immediately.
+    pub fn touch_project_last_used(&mut self, project_name: &str) {
+        if let Some(project) = self.projects.iter().find(|p| p.name == project_name) {
+            let dir_str = project.key();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            self.saved.set_last_used(&dir_str, now);
+        }
+    }
+
+    /// Unix seconds of the project's last activity; 0 = never used.
+    pub fn project_last_used(&self, project_name: &str) -> u64 {
+        self.projects
+            .iter()
+            .find(|p| p.name == project_name)
+            .map(|p| self.saved.get_last_used(&p.key()))
+            .unwrap_or(0)
+    }
+
     pub fn save_custom_command(
         &mut self,
         project_name: &str,

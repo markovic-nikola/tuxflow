@@ -1,17 +1,51 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gtk4::gio;
 use gtk4::prelude::*;
+use gtk4::{cairo, gio, glib};
 
 use crate::config::schema::ProcessCategory;
 use crate::process::manager::ProcessStatus;
 
 type ActionCallback = Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>;
 
+/// Working-state indicator animation (GTK CSS has no transform, so the
+/// morph + spin is cairo-drawn on a DrawingArea, advanced by a frame-clock
+/// tick): the dot morphs into a square, the square spins with a pace that
+/// eases fast-slow-fast, and morphing back to a circle when work ends.
+struct WorkingAnim {
+    /// Target state: true while the agent is producing output.
+    active: Cell<bool>,
+    /// 0.0 = circle, 1.0 = square.
+    morph: Cell<f64>,
+    /// Current rotation in radians.
+    angle: Cell<f64>,
+    /// Time accumulator driving the speed oscillation.
+    phase: Cell<f64>,
+    /// Last frame-clock timestamp (µs); i64::MIN = no frame yet.
+    last_us: Cell<i64>,
+    /// Guards against stacking multiple tick callbacks.
+    ticking: Cell<bool>,
+}
+
+/// Seconds for the circle<->square morph.
+const MORPH_SECS: f64 = 0.25;
+/// Each spin cycle bursts up to SPIN_FAST, then winds down toward
+/// SPIN_SLOW (rad/s) for the rest of the cycle, repeating until done.
+const SPIN_FAST: f64 = 11.0;
+/// Floor is kept visibly turning — at 0.3 the wind-down read as a full stop.
+const SPIN_SLOW: f64 = 1.6;
+/// Seconds per burst-and-wind-down cycle.
+const SPIN_CYCLE_SECS: f64 = 2.2;
+/// Fraction of the cycle spent accelerating (the burst).
+const SPIN_ATTACK: f64 = 0.15;
+
 pub struct ProcessRow {
     container: gtk4::Box,
     status_dot: gtk4::Label,
+    status_stack: gtk4::Stack,
+    status_area: gtk4::DrawingArea,
+    anim: Rc<WorkingAnim>,
     is_terminal: bool,
     is_running: Cell<bool>,
     name_label: gtk4::Label,
@@ -58,13 +92,65 @@ impl ProcessRow {
         container.add_css_class("process-row");
         container.set_tooltip_text(Some(command));
 
-        // Status indicator: stack with spinner (running) and dot (stopped/crashed)
+        // Status indicator: a Stack switching between the status dot and the
+        // cairo-drawn working animation. Both 14px wide so nothing shifts.
         let status_dot = gtk4::Label::builder()
             .label("\u{25CF}") // ●
+            .width_request(14)
             .css_classes(["caption", "status-stopped"])
             .build();
 
-        container.append(&status_dot);
+        // status-working only supplies the color (amber, or project yellow
+        // in remote projects) — resolved via CSS so theming stays in one place.
+        let status_area = gtk4::DrawingArea::builder()
+            .content_width(14)
+            .content_height(14)
+            .valign(gtk4::Align::Center)
+            .css_classes(["status-working"])
+            .build();
+
+        let anim = Rc::new(WorkingAnim {
+            active: Cell::new(false),
+            morph: Cell::new(0.0),
+            angle: Cell::new(0.0),
+            phase: Cell::new(0.0),
+            last_us: Cell::new(i64::MIN),
+            ticking: Cell::new(false),
+        });
+
+        let draw_anim = anim.clone();
+        status_area.set_draw_func(move |area, cr, w, h| {
+            let m = draw_anim.morph.get();
+            let color = area.color();
+            cr.save().ok();
+            cr.translate(w as f64 / 2.0, h as f64 / 2.0);
+            cr.rotate(draw_anim.angle.get());
+            // Same width as the resting dot; corner radius runs from
+            // half-side (= circle) down to 0 (sharp-cornered square).
+            let half = 4.0;
+            let radius = half * (1.0 - m);
+            rounded_square(cr, half, radius);
+            let (r, g, b, a) = (
+                color.red() as f64,
+                color.green() as f64,
+                color.blue() as f64,
+                color.alpha() as f64,
+            );
+            // Hollow square: the fill drains out with the morph, leaving
+            // just the outline; it fills back in on the way to the dot.
+            cr.set_source_rgba(r, g, b, a * (1.0 - m));
+            cr.fill_preserve().ok();
+            cr.set_line_width(1.4);
+            cr.set_source_rgba(r, g, b, a);
+            cr.stroke().ok();
+            cr.restore().ok();
+        });
+
+        let status_stack = gtk4::Stack::builder().valign(gtk4::Align::Center).build();
+        status_stack.add_named(&status_dot, Some("dot"));
+        status_stack.add_named(&status_area, Some("working"));
+
+        container.append(&status_stack);
 
         // Process name
         let name_label = gtk4::Label::builder()
@@ -231,6 +317,9 @@ impl ProcessRow {
         Self {
             container,
             status_dot,
+            status_stack,
+            status_area,
+            anim,
             is_terminal,
             is_running: Cell::new(false),
             name_label,
@@ -361,20 +450,84 @@ impl ProcessRow {
         popover
     }
 
-    /// Agent-only: amber/pulsing dot while the agent is actively producing
-    /// output, steady green when it's waiting for input. No-op unless running.
+    /// Agent-only: while the agent is actively producing output the dot
+    /// morphs into a spinning square (see WorkingAnim); morphs back to the
+    /// steady dot when it goes idle. No-op unless running.
     pub fn set_working(&self, working: bool) {
         let want = working && self.is_running.get();
-        let has = self.status_dot.has_css_class("status-working");
-        if want == has {
+        if want == self.anim.active.get() {
             return;
         }
         log::debug!("agent status dot: working={want}");
+        self.anim.active.set(want);
         if want {
-            self.status_dot.add_css_class("status-working");
-        } else {
-            self.status_dot.remove_css_class("status-working");
+            self.status_stack.set_visible_child_name("working");
+            self.start_working_tick();
         }
+        // On stop the tick callback morphs back to a circle, swaps the
+        // stack to the dot, and unregisters itself.
+    }
+
+    fn start_working_tick(&self) {
+        if self.anim.ticking.replace(true) {
+            return;
+        }
+        self.anim.last_us.set(i64::MIN);
+        let anim = self.anim.clone();
+        let stack = self.status_stack.downgrade();
+        self.status_area.add_tick_callback(move |area, clock| {
+            let now = clock.frame_time();
+            let last = anim.last_us.replace(now);
+            let dt = if last == i64::MIN {
+                0.0
+            } else {
+                // Clamp so unmapped gaps (collapsed project) don't jump.
+                ((now - last) as f64 / 1e6).clamp(0.0, 0.05)
+            };
+
+            // Morph toward square while active, back toward circle after.
+            let target = if anim.active.get() { 1.0 } else { 0.0 };
+            let step = dt / MORPH_SECS;
+            let m = anim.morph.get();
+            let m = if target > m {
+                (m + step).min(1.0)
+            } else {
+                (m - step).max(0.0)
+            };
+            anim.morph.set(m);
+
+            // Spin pace: rapid spin-up burst, then a long wind-down to a
+            // crawl, repeating until the agent finishes. Scaled by the
+            // morph so the circle phases don't spin invisibly.
+            anim.phase.set(anim.phase.get() + dt);
+            let p = (anim.phase.get() / SPIN_CYCLE_SECS).fract();
+            let envelope = if p < SPIN_ATTACK {
+                // Ease-out attack: jumps toward full speed immediately.
+                let a = p / SPIN_ATTACK;
+                a * (2.0 - a)
+            } else {
+                // Quadratic release: sheds most speed early, then lingers
+                // at a crawl until the next burst.
+                let q = (p - SPIN_ATTACK) / (1.0 - SPIN_ATTACK);
+                (1.0 - q) * (1.0 - q)
+            };
+            let speed = SPIN_SLOW + (SPIN_FAST - SPIN_SLOW) * envelope;
+            anim.angle.set(anim.angle.get() + speed * dt * m);
+
+            area.queue_draw();
+
+            // Fully morphed back: show the plain dot again and stop ticking.
+            if !anim.active.get() && m <= 0.0 {
+                anim.ticking.set(false);
+                anim.angle.set(0.0);
+                anim.phase.set(0.0);
+                if let Some(stack) = stack.upgrade() {
+                    stack.set_visible_child_name("dot");
+                }
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     pub fn set_status(&self, status: ProcessStatus) {
@@ -383,7 +536,8 @@ impl ProcessRow {
         self.status_dot.remove_css_class("status-stopped");
         self.status_dot.remove_css_class("status-crashed");
         self.status_dot.remove_css_class("status-restarting");
-        self.status_dot.remove_css_class("status-working");
+        // Wind down the working animation if a status change interrupts it.
+        self.anim.active.set(false);
 
         let is_running = matches!(status, ProcessStatus::Running | ProcessStatus::Restarting);
         self.play_button.set_visible(!is_running);
@@ -491,4 +645,17 @@ impl ProcessRow {
     pub fn set_command_tooltip(&self, command: &str) {
         self.container.set_tooltip_text(Some(command));
     }
+}
+
+/// Path a square of half-side `half` centered on the origin with corner
+/// radius `radius`. radius == half yields a circle (the morph endpoints).
+fn rounded_square(cr: &cairo::Context, half: f64, radius: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let c = half - radius;
+    cr.new_sub_path();
+    cr.arc(c, -c, radius, -FRAC_PI_2, 0.0); // top-right
+    cr.arc(c, c, radius, 0.0, FRAC_PI_2); // bottom-right
+    cr.arc(-c, c, radius, FRAC_PI_2, PI); // bottom-left
+    cr.arc(-c, -c, radius, PI, 1.5 * PI); // top-left
+    cr.close_path();
 }

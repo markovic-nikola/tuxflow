@@ -92,6 +92,11 @@ assets = [
 		"644",
 	],
 	[
+		"data/icons/hicolor/scalable/actions/tuxflow-remote-symbolic.svg",
+		"usr/share/icons/hicolor/scalable/actions/",
+		"644",
+	],
+	[
 		"README.md",
 		"usr/share/doc/tuxflow/",
 		"644",

@@ -40,7 +40,7 @@ impl ProjectDetail {
             ),
             crate::remote::ProjectLocation::Ssh { host, dir } => (
                 "Remote Directory",
-                "folder-remote-symbolic",
+                "tuxflow-remote-symbolic",
                 format!("{host}:{dir}"),
             ),
         };

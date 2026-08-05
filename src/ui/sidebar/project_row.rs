@@ -271,10 +271,12 @@ impl ProjectRow {
         Self::update_icon_widget(&self.icon_area, &name, icon_path);
     }
 
-    /// Mark this project as remote: tooltip with the host:dir it lives on.
-    /// (The visual indicator lives in the status bar for the active project.)
+    /// Mark this project as remote: tooltip with the host:dir it lives on,
+    /// and the sidebar accent shifts to TuxFlow yellow (see .project-remote
+    /// rules in style.css).
     pub fn set_remote_hint(&self, hint: &str) {
         self.header_row.set_tooltip_text(Some(hint));
+        self.container.add_css_class("project-remote");
     }
 
     pub fn set_name(&self, name: &str) {

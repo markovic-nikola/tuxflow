@@ -207,6 +207,12 @@ pub struct ProcessManager {
     settings: AppSettings,
     /// Where this project's files live; remote managers wrap commands in ssh.
     location: ProjectLocation,
+    /// Per-project wiring for one process (auto-restart, terminal signal
+    /// hookup, port detection, clipboard bridge). Built once in
+    /// `wire_project`; call for every process added AFTER project load so
+    /// dynamically added ones behave identically to load-time ones.
+    /// Invoke via a clone with no manager borrow held — it re-borrows.
+    wiring_factory: Option<Rc<dyn Fn(&str)>>,
 }
 
 impl ProcessManager {
@@ -219,7 +225,16 @@ impl ProcessManager {
             on_file_watch_restart: None,
             settings: AppSettings::load(),
             location,
+            wiring_factory: None,
         }))
+    }
+
+    pub fn set_wiring_factory(&mut self, f: Rc<dyn Fn(&str)>) {
+        self.wiring_factory = Some(f);
+    }
+
+    pub fn wiring_factory(&self) -> Option<Rc<dyn Fn(&str)>> {
+        self.wiring_factory.clone()
     }
 
     pub fn location(&self) -> &ProjectLocation {

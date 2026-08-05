@@ -66,6 +66,25 @@ pub fn list_remote_dirs(host: &str, prefix: &str) -> Vec<String> {
     }
 }
 
+/// Fetch a remote file's bytes (capped at `max_bytes`) over the shared
+/// connection. None on any failure or an empty file. Blocking — worker
+/// threads only. Used to pull small assets (project icons) to a local cache.
+pub fn fetch_remote_file(host: &str, abs_path: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    let out = Command::new("ssh")
+        .args(ssh_mux_options())
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        .arg(host)
+        .arg("--")
+        .arg(format!("head -c {} -- {}", max_bytes, sh_quote(abs_path)))
+        .output()
+        .ok()?;
+    if out.status.success() && !out.stdout.is_empty() {
+        Some(out.stdout)
+    } else {
+        None
+    }
+}
+
 pub struct LocalFs {
     root: PathBuf,
 }

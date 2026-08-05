@@ -133,17 +133,30 @@ const TMUX_OPTIONS: &str = "set -g exit-empty off \\; \
      set -g history-limit 50000 \\; set -g escape-time 10 \\; \
      set -g set-titles on \\; set -g set-titles-string '#{pane_title}'";
 
+/// FNV-1a by hand — std's DefaultHasher isn't guaranteed stable across
+/// releases, and these hashes end up in persistent names (tmux sessions,
+/// icon cache files).
+fn fnv64_iter(bytes: impl Iterator<Item = u8>) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+/// Stable hash of a string, e.g. a project key, for cache file names.
+pub fn fnv64(s: &str) -> u64 {
+    fnv64_iter(s.bytes())
+}
+
 /// Deterministic tmux session name for one process of one project. Stable
 /// across app restarts so a fresh TuxFlow launch reattaches to sessions left
 /// running by the previous one. FNV-1a by hand — std's DefaultHasher isn't
 /// guaranteed stable across releases. tmux forbids `.`/`:` in names; the
 /// slug keeps only shell-innocuous characters.
 pub fn remote_session_name(project_key: &str, process_name: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in project_key.bytes().chain([0u8]).chain(process_name.bytes()) {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
+    let hash = fnv64_iter(project_key.bytes().chain([0u8]).chain(process_name.bytes()));
     let slug: String = process_name
         .chars()
         .map(|c| {
@@ -197,8 +210,16 @@ pub fn wrap_remote_command(
                 .join(" ")
         );
     }
-    let pid_capture = pidfile
-        .map(|f| format!("echo $$ > {} && ", sh_quote(f)))
+    // `$pf` lets the wrapper clean its own pidfile up on the way out — by
+    // then the login-shell PID inside is dead anyway (kills of tmux-backed
+    // processes go through the session name).
+    let (pid_capture, pid_cleanup) = pidfile
+        .map(|f| {
+            (
+                format!("pf={}; echo $$ > \"$pf\" && ", sh_quote(f)),
+                "rm -f \"$pf\"; ".to_string(),
+            )
+        })
         .unwrap_or_default();
     // The command through the remote user's login+interactive shell so PATH
     // setup (nvm, cargo) applies — runs inside the tmux pane, or directly on
@@ -240,7 +261,9 @@ pub fn wrap_remote_command(
     // the attach itself failed — pass the tmux client's status through so
     // real failures aren't masked as clean exits. A captured-output file is
     // replayed first (awk drops the blank tail rows the pane capture pads
-    // with), putting the finished command's output back on screen.
+    // with), putting the finished command's output back on screen. The
+    // wrapper removes its pidfile and the read exit-file on the way out so
+    // /tmp doesn't accumulate a file per spawn.
     let remote = format!(
         "cd {dir_q} && {pid_capture}\
          if command -v tmux >/dev/null 2>&1; then \
@@ -250,7 +273,9 @@ pub fn wrap_remote_command(
          if [ -f \"$of\" ]; then \
          awk 'NF{{n=NR}} {{l[NR]=$0}} END{{for(i=1;i<=n;i++) print l[i]}}' \"$of\"; \
          rm -f \"$of\"; fi; \
-         if [ -f \"$ef\" ]; then exit \"$(cat \"$ef\")\"; else exit \"$tst\"; fi; \
+         {pid_cleanup}\
+         if [ -f \"$ef\" ]; then s=\"$(cat \"$ef\")\"; rm -f \"$ef\"; exit \"$s\"; \
+         else exit \"$tst\"; fi; \
          else exec {login_shell}; fi"
     );
     // LogLevel=ERROR mutes the mux client's "Shared connection … closed"

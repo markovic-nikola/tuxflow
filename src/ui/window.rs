@@ -163,6 +163,19 @@ impl TuxFlowWindow {
         let project_name_cells: ProjectNameCells = Rc::new(RefCell::new(HashMap::new()));
         let status_bar = Rc::new(StatusBar::new());
 
+        // Local message composer under agent terminals; visibility follows
+        // the selected process (agents only) and the tools.agent_composer
+        // setting, tracked in a Cell so the settings toggle applies live.
+        let composer = Rc::new(crate::ui::composer_bar::ComposerBar::new());
+        {
+            let s = settings.borrow();
+            composer.apply_terminal_style(
+                s.appearance.font_size,
+                &crate::ui::terminal_theme::background_css(&s.appearance.terminal_theme),
+            );
+        }
+        let composer_enabled = Rc::new(Cell::new(AppSettings::load().tools.agent_composer));
+
         // Check for updates in background
         {
             let status_bar_ref = status_bar.clone();
@@ -238,6 +251,8 @@ impl TuxFlowWindow {
         let status_bar_ref = status_bar.clone();
         let last_proj_ref = last_selected_project.clone();
         let ws_select = ws.clone();
+        let composer_sel = composer.clone();
+        let composer_enabled_sel = composer_enabled.clone();
         sidebar.set_on_process_selected(move |qname| {
             // Materialize the VTE terminal lazily on first selection.
             // Use try_borrow to avoid panic when this fires during a manager borrow_mut
@@ -270,6 +285,8 @@ impl TuxFlowWindow {
                 let sb_idle = status_bar_ref.clone();
                 let proj_owned = proj.to_string();
                 let qname_owned = qname.to_string();
+                let composer_idle = composer_sel.clone();
+                let composer_enabled_idle = composer_enabled_sel.clone();
                 glib::idle_add_local_once(move || {
                     let ws_borrow = ws_idle.borrow();
                     let running = is_qualified_process_running(&ws_borrow, Some(&qname_owned));
@@ -297,6 +314,27 @@ impl TuxFlowWindow {
                     }
                     sb_idle.set_project_info(Some(&proj_owned), proj_r, proj_t);
                     sb_idle.set_global_info(global_r, global_t, true, &running_names);
+
+                    // Composer only under agent terminals (and only when
+                    // enabled). try_borrow: this can fire mid-spawn.
+                    let is_agent = ws_borrow
+                        .projects()
+                        .iter()
+                        .find(|p| p.name == proj_owned)
+                        .and_then(|project| project.manager.try_borrow().ok())
+                        .and_then(|mgr| {
+                            qname_owned.split_once("::").map(|(_, pname)| {
+                                mgr.get_process(pname).is_some_and(|p| {
+                                    p.config.category
+                                        == crate::config::schema::ProcessCategory::Agent
+                                })
+                            })
+                        })
+                        .unwrap_or(false);
+                    // Switching terminals clears pending attachments (their
+                    // paths are machine-specific).
+                    composer_idle.set_context(&qname_owned);
+                    composer_idle.set_visible(composer_enabled_idle.get() && is_agent);
                 });
             }
             let url = sidebar_ref.get_process_url(qname);
@@ -306,6 +344,7 @@ impl TuxFlowWindow {
         // Wire process deletion → remove terminal from stack and handle selected fallback
         let stack_ref = terminal_stack.clone();
         let selected_ref = selected_process.clone();
+        let composer_del = composer.clone();
         sidebar.set_on_process_deleted(move |qname| {
             if let Some(child) = stack_ref.child_by_name(qname) {
                 stack_ref.remove(&child);
@@ -313,6 +352,7 @@ impl TuxFlowWindow {
             let mut sel = selected_ref.borrow_mut();
             if sel.as_deref() == Some(qname) {
                 stack_ref.set_visible_child_name("__welcome__");
+                composer_del.set_visible(false);
                 *sel = None;
             }
         });
@@ -359,7 +399,10 @@ impl TuxFlowWindow {
         });
 
         // Build theme-change callback that applies to all existing terminals
+        // (and the composer bar, which blends into the terminal background)
         let ws_for_theme = ws.clone();
+        let composer_theme = composer.clone();
+        let settings_theme = settings.clone();
         let on_terminal_theme_changed: Rc<dyn Fn(&str)> = Rc::new(move |theme_name: &str| {
             let ws_borrow = ws_for_theme.borrow();
             for project in ws_borrow.projects() {
@@ -368,6 +411,10 @@ impl TuxFlowWindow {
                     .borrow_mut()
                     .apply_terminal_theme(theme_name);
             }
+            composer_theme.apply_terminal_style(
+                settings_theme.borrow().appearance.font_size,
+                &crate::ui::terminal_theme::background_css(theme_name),
+            );
             // Update COLORFGBG so newly spawned processes pick the right colors
             // SAFETY: called on the main GTK thread
             unsafe {
@@ -380,14 +427,108 @@ impl TuxFlowWindow {
         });
 
         // Build font-change callback that applies to all existing terminals
+        // (and the composer input, which mirrors the terminal font size)
         let ws_for_font = ws.clone();
+        let composer_font = composer.clone();
         let on_font_changed: Rc<dyn Fn()> = Rc::new(move || {
             let settings = AppSettings::load();
             let ws_borrow = ws_for_font.borrow();
             for project in ws_borrow.projects() {
                 project.manager.borrow_mut().apply_font_settings(&settings);
             }
+            composer_font.apply_terminal_style(
+                settings.appearance.font_size,
+                &crate::ui::terminal_theme::background_css(&settings.appearance.terminal_theme),
+            );
         });
+
+        // Composer send → attachments are delivered natively first (staged
+        // as the agent's clipboard + Ctrl+V, so Claude shows [Image #N]
+        // instead of a path), then the text, then Enter.
+        {
+            let ws_send = ws.clone();
+            let stack_send = terminal_stack.clone();
+            composer.set_on_send(move |text, attachments| {
+                let Some(terminal) = Self::visible_terminal(&ws_send, &stack_send) else {
+                    return;
+                };
+                let host = Self::remote_paste_target(&ws_send, &stack_send).map(|(h, _)| h);
+                Self::deliver_composed(terminal, host, attachments.into(), text, false);
+            });
+        }
+
+        // Composer image paste → materialize the image as a /tmp file on
+        // whichever machine the agent runs on (nothing persists past a
+        // reboot), then show a pending-attachment chip. The path is spliced
+        // into the message on send — agents treat image paths as attachments.
+        {
+            let ws_img = ws.clone();
+            let stack_img = terminal_stack.clone();
+            let composer_img = composer.clone();
+            composer.set_on_image_paste(move || {
+                let remote_host = Self::remote_paste_target(&ws_img, &stack_img).map(|(h, _)| h);
+                let composer_add = composer_img.clone();
+                let clipboard = composer_img.widget().clipboard();
+                clipboard.read_texture_async(
+                    gtk4::gio::Cancellable::NONE,
+                    move |res: Result<Option<gtk4::gdk::Texture>, _>| {
+                        let Ok(Some(texture)) = res else {
+                            log::warn!("composer image paste: couldn't read clipboard texture");
+                            return;
+                        };
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        match remote_host {
+                            Some(host) => {
+                                let png = texture.save_to_png_bytes();
+                                let upload_host = host.clone();
+                                crate::util::worker::run(
+                                    move || {
+                                        crate::remote::upload_temp_image(
+                                            &upload_host,
+                                            png.as_ref(),
+                                            stamp,
+                                        )
+                                    },
+                                    move |result| match result {
+                                        Ok(path) => {
+                                            composer_add.add_attachment(&path, Some(&texture))
+                                        }
+                                        Err(e) => log::error!(
+                                            "composer image paste: upload to {host} failed: {e}"
+                                        ),
+                                    },
+                                );
+                            }
+                            None => {
+                                let path = format!("/tmp/.tuxflow-img-{stamp}.png");
+                                match texture.save_to_png(&path) {
+                                    Ok(()) => composer_add.add_attachment(&path, Some(&texture)),
+                                    Err(e) => {
+                                        log::error!("composer image paste: save failed: {e}")
+                                    }
+                                }
+                            }
+                        }
+                    },
+                );
+            });
+        }
+
+        // Settings toggle applies live to the current selection
+        let on_composer_changed: Rc<dyn Fn(bool)> = {
+            let composer_ref = composer.clone();
+            let enabled_ref = composer_enabled.clone();
+            let ws_ref = ws.clone();
+            let stack_ref = terminal_stack.clone();
+            Rc::new(move |enabled| {
+                enabled_ref.set(enabled);
+                composer_ref
+                    .set_visible(enabled && Self::visible_terminal_is_agent(&ws_ref, &stack_ref));
+            })
+        };
 
         // Build UI
         let content = Self::build_content(
@@ -404,8 +545,10 @@ impl TuxFlowWindow {
             &on_recent_first_changed,
             &on_terminal_theme_changed,
             &on_font_changed,
+            &on_composer_changed,
             &pid_file,
             &status_bar,
+            &composer,
             &keybinding_map,
             &auto_hide,
             &focus_gate,
@@ -513,6 +656,105 @@ impl TuxFlowWindow {
     /// `(host, is_agent)` for the currently visible terminal when it belongs
     /// to a remote project — what image-paste bridging needs to decide how
     /// (and whether) to act. None for local projects or no visible terminal.
+    /// Deliver a composed message to an agent terminal: each attachment is
+    /// staged as the agent's clipboard (shim file remotely, real clipboard
+    /// locally) and announced with Ctrl+V — the native attachment route —
+    /// paced so the agent ingests one image before the next arrives. The
+    /// text follows in one bracketed paste (multi-line stays in the input),
+    /// then Enter submits.
+    fn deliver_composed(
+        terminal: vte4::Terminal,
+        host: Option<String>,
+        mut attachments: std::collections::VecDeque<crate::ui::composer_bar::Attachment>,
+        text: String,
+        after_attachments: bool,
+    ) {
+        /// Pause after each Ctrl+V so the agent reads the staged image
+        /// before the clipboard is overwritten or the text lands.
+        const INGEST_MS: u64 = 400;
+        let Some(att) = attachments.pop_front() else {
+            if !text.is_empty() {
+                let mut buf = Vec::with_capacity(text.len() + 17);
+                buf.extend_from_slice(b"\x1b[200~");
+                // Keep the [Image #N] tokens on their own line; the prompt
+                // starts below (a newline inside bracketed paste inserts —
+                // it can't submit).
+                if after_attachments {
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(text.as_bytes());
+                buf.extend_from_slice(b"\x1b[201~");
+                terminal.feed_child(&buf);
+            }
+            glib::timeout_add_local_once(std::time::Duration::from_millis(60), move || {
+                terminal.feed_child(b"\r");
+            });
+            return;
+        };
+        match host.clone() {
+            Some(h) => {
+                let path = att.path.clone();
+                let stage_host = h.clone();
+                crate::util::worker::run(
+                    move || crate::remote::stage_clipboard_image(&stage_host, &path),
+                    move |result| {
+                        match result {
+                            Ok(()) => terminal.feed_child(&[0x16]),
+                            Err(e) => {
+                                log::error!("composer send: staging attachment on {h} failed: {e}")
+                            }
+                        }
+                        let t = terminal.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(INGEST_MS),
+                            move || Self::deliver_composed(t, host, attachments, text, true),
+                        );
+                    },
+                );
+            }
+            None => {
+                if let Some(ref texture) = att.texture {
+                    terminal.clipboard().set_texture(texture);
+                }
+                terminal.feed_child(&[0x16]);
+                glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(INGEST_MS),
+                    move || Self::deliver_composed(terminal, host, attachments, text, true),
+                );
+            }
+        }
+    }
+
+    /// The VTE terminal of the currently visible process, if materialized.
+    fn visible_terminal(ws: &WorkspaceRef, stack: &gtk4::Stack) -> Option<vte4::Terminal> {
+        let name = stack.visible_child_name()?;
+        let (proj, pname) = name.as_str().split_once("::")?;
+        let ws_b = ws.borrow();
+        let project = ws_b.projects().iter().find(|p| p.name == proj)?;
+        let mgr = project.manager.try_borrow().ok()?;
+        mgr.get_process(pname).and_then(|p| p.terminal.clone())
+    }
+
+    /// Whether the currently visible terminal belongs to an Agent process.
+    fn visible_terminal_is_agent(ws: &WorkspaceRef, stack: &gtk4::Stack) -> bool {
+        let Some(name) = stack.visible_child_name() else {
+            return false;
+        };
+        let Some((proj, pname)) = name.as_str().split_once("::") else {
+            return false;
+        };
+        let ws_b = ws.borrow();
+        ws_b.projects()
+            .iter()
+            .find(|p| p.name == proj)
+            .and_then(|project| project.manager.try_borrow().ok())
+            .and_then(|mgr| {
+                mgr.get_process(pname)
+                    .map(|p| p.config.category == crate::config::schema::ProcessCategory::Agent)
+            })
+            .unwrap_or(false)
+    }
+
     fn remote_paste_target(ws: &WorkspaceRef, stack: &gtk4::Stack) -> Option<(String, bool)> {
         let (proj, pname) = stack.visible_child_name().and_then(|n| {
             n.split_once("::")
@@ -1503,23 +1745,31 @@ impl TuxFlowWindow {
                 // For Agent-category processes, also build the idle handler
                 // (BEL + activity stamp) and remember the cells so the
                 // per-project silence ticker can read them.
-                let (agent_idle_handler, last_activity_cell, is_idle_cell) = if is_agent {
-                    let kind = crate::util::notifications::AgentKind::from_command(&command);
-                    let last_activity = Rc::new(Cell::new(Instant::now()));
-                    let is_idle = Rc::new(Cell::new(false));
-                    let handler = crate::process::auto_restart::build_agent_idle_handler(
-                        &project_name,
-                        name,
-                        kind,
-                        last_activity.clone(),
-                        is_idle.clone(),
-                        focus_gate.clone(),
-                        icon_resolver.clone(),
-                    );
-                    (Some(handler), Some(last_activity), Some(is_idle))
-                } else {
-                    (None, None, None)
-                };
+                let (agent_idle_handler, last_activity_cell, activity_burst_cell, is_idle_cell) =
+                    if is_agent {
+                        let kind = crate::util::notifications::AgentKind::from_command(&command);
+                        let last_activity = Rc::new(Cell::new(Instant::now()));
+                        let activity_burst = Rc::new(Cell::new(0u32));
+                        let is_idle = Rc::new(Cell::new(false));
+                        let handler = crate::process::auto_restart::build_agent_idle_handler(
+                            &project_name,
+                            name,
+                            kind,
+                            last_activity.clone(),
+                            activity_burst.clone(),
+                            is_idle.clone(),
+                            focus_gate.clone(),
+                            icon_resolver.clone(),
+                        );
+                        (
+                            Some(handler),
+                            Some(last_activity),
+                            Some(activity_burst),
+                            Some(is_idle),
+                        )
+                    } else {
+                        (None, None, None, None)
+                    };
 
                 // Capture refs for the on_materialized closure
                 let detector_ref = detector.clone();
@@ -1549,6 +1799,7 @@ impl TuxFlowWindow {
                 proc.name_cell = Some(name_cell);
                 proc.qname_cell = Some(qname_cell);
                 proc.last_activity = last_activity_cell;
+                proc.activity_burst = activity_burst_cell;
                 proc.is_idle = is_idle_cell;
                 proc.on_materialized = Some(Box::new(move |terminal: &vte4::Terminal| {
                     // Replace placeholder in stack with real terminal
@@ -1842,23 +2093,27 @@ impl TuxFlowWindow {
                     String,
                     crate::util::notifications::AgentKind,
                     Rc<Cell<Instant>>,
+                    Rc<Cell<u32>>,
                     Rc<Cell<bool>>,
                 )> = {
                     let mgr = manager_ref.borrow();
                     mgr.processes_by_category(crate::config::schema::ProcessCategory::Agent)
                         .into_iter()
                         .filter(|p| p.status == ProcessStatus::Running)
-                        .filter_map(|p| match (&p.last_activity, &p.is_idle) {
-                            (Some(la), Some(idle)) => Some((
-                                p.id.clone(),
-                                crate::util::notifications::AgentKind::from_command(
-                                    &p.config.command,
-                                ),
-                                la.clone(),
-                                idle.clone(),
-                            )),
-                            _ => None,
-                        })
+                        .filter_map(
+                            |p| match (&p.last_activity, &p.activity_burst, &p.is_idle) {
+                                (Some(la), Some(burst), Some(idle)) => Some((
+                                    p.id.clone(),
+                                    crate::util::notifications::AgentKind::from_command(
+                                        &p.config.command,
+                                    ),
+                                    la.clone(),
+                                    burst.clone(),
+                                    idle.clone(),
+                                )),
+                                _ => None,
+                            },
+                        )
                         .collect()
                 };
                 if cells.is_empty() {
@@ -1867,17 +2122,23 @@ impl TuxFlowWindow {
                 let settings = AppSettings::load();
                 let threshold = settings.notifications.agent_idle_silence_seconds;
                 let project_name = pname_cell_tick.borrow().clone();
-                for (name, kind, la, idle) in cells {
-                    // Working/waiting dot: an agent that produced output in
-                    // the last few seconds is actively working (its spinner
-                    // repaints the terminal continuously); a quiet one is
-                    // waiting for input.
+                for (name, kind, la, burst, idle) in cells {
+                    // Working/waiting dot with hysteresis: turning ON needs
+                    // a genuine repaint burst (a working agent redraws its
+                    // spinner continuously — dozens of events per tick),
+                    // which keeps the few trailing repaints after it
+                    // finishes from flapping the indicator. Once on, brief
+                    // lulls are ridden out via the recent-activity window.
                     const AGENT_WORKING_WINDOW_SECS: u64 = 4;
+                    const WORKING_BURST_MIN: u32 = 3;
+                    let events = burst.replace(0);
                     let qname = workspace::qualified_name(&project_name, &name);
-                    sidebar_tick.set_process_working(
-                        &qname,
-                        la.get().elapsed().as_secs() < AGENT_WORKING_WINDOW_SECS,
-                    );
+                    let working = if sidebar_tick.is_process_working(&qname) {
+                        la.get().elapsed().as_secs() < AGENT_WORKING_WINDOW_SECS
+                    } else {
+                        events >= WORKING_BURST_MIN
+                    };
+                    sidebar_tick.set_process_working(&qname, working);
                     crate::process::auto_restart::check_agent_silence(
                         &project_name,
                         &name,
@@ -1921,8 +2182,10 @@ impl TuxFlowWindow {
         on_recent_first_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
+        on_composer_changed: &Rc<dyn Fn(bool)>,
         pid_file: &Rc<RefCell<PidFile>>,
         status_bar: &Rc<StatusBar>,
+        composer: &Rc<crate::ui::composer_bar::ComposerBar>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         auto_hide: &Rc<Cell<bool>>,
         focus_gate: &crate::process::auto_restart::FocusGate,
@@ -2540,6 +2803,7 @@ impl TuxFlowWindow {
             on_recent_first_changed,
             on_terminal_theme_changed,
             on_font_changed,
+            on_composer_changed,
             keybinding_map,
         );
 
@@ -2974,8 +3238,13 @@ impl TuxFlowWindow {
             });
         }
 
+        // Terminal area + composer bar under it (visible for agents only)
+        let content_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        content_box.append(terminal_stack);
+        content_box.append(composer.widget());
+
         let content_overlay = gtk4::Overlay::new();
-        content_overlay.set_child(Some(terminal_stack));
+        content_overlay.set_child(Some(&content_box));
         content_overlay.add_overlay(palette.widget());
         content_overlay.add_overlay(search_bar.widget());
 
@@ -3031,9 +3300,11 @@ impl TuxFlowWindow {
             on_recent_first_changed,
             on_terminal_theme_changed,
             on_font_changed,
+            on_composer_changed,
             keybinding_map,
             last_selected_project,
             status_bar,
+            composer,
         );
 
         vbox.upcast()
@@ -3054,9 +3325,11 @@ impl TuxFlowWindow {
         on_recent_first_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
+        on_composer_changed: &Rc<dyn Fn(bool)>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
         last_selected_project: &Rc<RefCell<Option<String>>>,
         status_bar: &Rc<StatusBar>,
+        composer: &Rc<crate::ui::composer_bar::ComposerBar>,
     ) {
         let key_controller = gtk4::EventControllerKey::new();
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -3075,6 +3348,8 @@ impl TuxFlowWindow {
         let recent_first_cb = on_recent_first_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
+        let composer_cb = on_composer_changed.clone();
+        let composer_ref = composer.clone();
         let kb_map = keybinding_map.clone();
         let last_proj_ref = last_selected_project.clone();
         let sb_ref = status_bar.clone();
@@ -3121,7 +3396,12 @@ impl TuxFlowWindow {
                         }
                     }
                     ShortcutAction::Paste => {
-                        if let Some(child) = stack_ref.visible_child()
+                        // Composer focused: the paste belongs to it (images
+                        // become attachment chips, text inserts locally) —
+                        // never to the terminal underneath.
+                        if composer_ref.input_has_focus() {
+                            composer_ref.paste();
+                        } else if let Some(child) = stack_ref.visible_child()
                             && let Ok(terminal) = child.downcast::<vte4::Terminal>()
                         {
                             // Remote terminal + image in the clipboard: the
@@ -3157,6 +3437,7 @@ impl TuxFlowWindow {
                             Some(recent_first_cb.clone()),
                             Some(theme_cb.clone()),
                             Some(font_cb.clone()),
+                            Some(composer_cb.clone()),
                             Some(kb_map.clone()),
                         );
                     }
@@ -3262,6 +3543,9 @@ impl TuxFlowWindow {
             if ctrl
                 && !state.contains(gdk::ModifierType::SHIFT_MASK)
                 && keyval == gdk::Key::v
+                // Composer focused: let the event reach it (its own handler
+                // turns image pastes into attachment chips).
+                && !composer_ref.input_has_focus()
                 && let Some((host, true)) = Self::remote_paste_target(&ws_ref, &stack_ref)
                 && let Some(child) = stack_ref.visible_child()
                 && let Ok(terminal) = child.downcast::<vte4::Terminal>()
@@ -3363,6 +3647,7 @@ impl TuxFlowWindow {
         on_recent_first_changed: &Rc<dyn Fn(bool)>,
         on_terminal_theme_changed: &Rc<dyn Fn(&str)>,
         on_font_changed: &Rc<dyn Fn()>,
+        on_composer_changed: &Rc<dyn Fn(bool)>,
         keybinding_map: &Rc<RefCell<KeybindingMap>>,
     ) -> (adw::HeaderBar, gtk4::Label) {
         let headerbar = adw::HeaderBar::new();
@@ -3405,6 +3690,7 @@ impl TuxFlowWindow {
         let recent_first_cb = on_recent_first_changed.clone();
         let theme_cb = on_terminal_theme_changed.clone();
         let font_cb = on_font_changed.clone();
+        let composer_cb = on_composer_changed.clone();
         let kb_map = keybinding_map.clone();
         settings_btn.connect_clicked(move |_| {
             crate::ui::settings::settings_window::SettingsWindow::show(
@@ -3415,6 +3701,7 @@ impl TuxFlowWindow {
                 Some(recent_first_cb.clone()),
                 Some(theme_cb.clone()),
                 Some(font_cb.clone()),
+                Some(composer_cb.clone()),
                 Some(kb_map.clone()),
             );
         });

@@ -62,6 +62,7 @@ src/
     terminal_view.rs       # VTE terminal wrapper
     terminal_search.rs     # Ctrl+F search overlay
     command_palette.rs     # Command palette (Ctrl+Shift+P)
+    composer_bar.rs        # Local message composer under agent terminals (beats ssh typing lag)
     add_command_dialog.rs  # Add command/agent dialog
     add_remote_project_dialog.rs # Add remote (SSH) project dialog with BatchMode verification
     add_ssh_dialog.rs      # Add SSH connection dialog
@@ -110,5 +111,6 @@ Always run `cargo fmt --all` after changing Rust code, before committing.
 ## TODO
 
 - **Split terminal view** — Currently `gtk4::Stack` (one at a time). Would need `gtk4::Paned` for side-by-side
+- **Composer inline images** — Composer delivers attachments first, then text. Nicer: `insert_paintable` thumbnails at the cursor, send walks the buffer and interleaves text chunks with Ctrl+V per image so `[Image #N]` lands where it was placed. Replaces the chip row; needs thumbnail scaling, upload-in-flight gating on send, identity-based (not order) texture→path matching
 - **Tests** — Core modules covered (config, detector, port detector, log buffer). UI and process management untested (require GTK runtime)
 - **CI** — No GitHub Actions or verified packaging builds yet

@@ -377,6 +377,7 @@ pub fn build_agent_idle_handler(
     process_name: &str,
     kind: AgentKind,
     last_activity: Rc<Cell<Instant>>,
+    activity_burst: Rc<Cell<u32>>,
     is_idle: Rc<Cell<bool>>,
     focus_gate: Option<FocusGate>,
     icon_resolver: Option<IconResolver>,
@@ -385,12 +386,15 @@ pub fn build_agent_idle_handler(
     let process_name = process_name.to_string();
 
     Box::new(move |terminal: &vte4::Terminal| {
-        // contents-changed: stamp activity + reset idle edge-trigger.
+        // contents-changed: stamp activity + count the burst + reset the
+        // idle edge-trigger.
         {
             let la = last_activity.clone();
+            let burst = activity_burst.clone();
             let idle = is_idle.clone();
             terminal.connect_contents_changed(move |_| {
                 la.set(Instant::now());
+                burst.set(burst.get().saturating_add(1));
                 idle.set(false);
             });
         }

@@ -3,6 +3,7 @@ pub mod add_command_dialog;
 pub mod add_remote_project_dialog;
 pub mod add_ssh_dialog;
 pub mod command_palette;
+pub mod composer_bar;
 pub mod edit_project_dialog;
 pub mod git_changes_dialog;
 pub mod project_detail;

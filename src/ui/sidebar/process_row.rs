@@ -468,6 +468,11 @@ impl ProcessRow {
         // stack to the dot, and unregisters itself.
     }
 
+    /// Whether the working animation is currently active (or winding down).
+    pub fn is_working(&self) -> bool {
+        self.anim.active.get()
+    }
+
     fn start_working_tick(&self) {
         if self.anim.ticking.replace(true) {
             return;

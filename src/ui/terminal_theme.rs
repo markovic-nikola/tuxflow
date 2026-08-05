@@ -263,6 +263,14 @@ pub fn apply(terminal: &vte4::Terminal, name: &str) {
     terminal.set_color_cursor_foreground(Some(&theme.background));
 }
 
+/// The named theme's background as a CSS color string (same fallback as
+/// `apply`). Used to blend chrome around the terminal — e.g. the composer
+/// bar — into the terminal area.
+pub fn background_css(name: &str) -> String {
+    let theme = THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0]);
+    theme.background.to_string()
+}
+
 pub fn is_dark_theme(name: &str) -> bool {
     let theme = THEMES.iter().find(|t| t.name == name).unwrap_or(&THEMES[0]);
     let bg = &theme.background;

@@ -40,6 +40,11 @@ pub struct ManagedProcess {
     /// Last VTE `contents-changed` timestamp. Populated for Agent-category
     /// processes only; used by the idle-silence fallback ticker.
     pub last_activity: Option<Rc<Cell<Instant>>>,
+    /// `contents-changed` events since the ticker last looked. A working
+    /// agent repaints continuously (dozens per tick); trailing repaints
+    /// after it finishes are single events — the rate gates the working
+    /// indicator so it doesn't flap on stragglers.
+    pub activity_burst: Option<Rc<Cell<u32>>>,
     /// Edge-trigger guard for the idle-silence ticker: `true` once a silence
     /// notification has fired for the current quiet period, reset on next
     /// `contents-changed`.
@@ -79,6 +84,7 @@ impl ManagedProcess {
             name_cell: None,
             qname_cell: None,
             last_activity: None,
+            activity_burst: None,
             is_idle: None,
             remote_pidfile: None,
             remote_session: None,

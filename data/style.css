@@ -17,26 +17,16 @@
     color: #cca700;
 }
 
-/* Agent actively producing output: amber (busy), pulsing where the CSS
-   engine supports it. Steady green = running and waiting for input. */
+/* Agent actively producing output: the dot morphs into a spinning square
+   (cairo-drawn — see WorkingAnim in process_row.rs; GTK CSS has no
+   transform). This rule only supplies the color: amber here, project
+   yellow for remote (see .project-remote). Steady green = running and
+   waiting for input.
+   NOTE for future animations: GTK's keyframes parser rejects
+   comma-separated selectors ("0%, 100% { }") — use from/50%/to. Verify
+   with `cargo run --example css_check` after editing this file. */
 .status-working {
     color: #e0a030;
-    animation: tf-working-pulse 1.2s ease-in-out infinite;
-}
-
-/* NOTE: GTK's keyframes parser rejects comma-separated selectors
-   ("0%, 100% { }") — use from/50%/to. Verify with `cargo run --example
-   css_check` after editing this file. */
-@keyframes tf-working-pulse {
-    from {
-        opacity: 1;
-    }
-    50% {
-        opacity: 0.3;
-    }
-    to {
-        opacity: 1;
-    }
 }
 
 /* Sidebar */
@@ -92,6 +82,55 @@
 
 .project-has-running .project-name {
     color: #73c991;
+}
+
+/* Remote projects: sidebar accent shifts to TuxFlow yellow (logo color)
+   so local vs remote reads at a glance. These rules sit below
+   .project-has-running on purpose — remote yellow is the project's
+   identity and wins over running green; the status dots still show
+   what's running. */
+@define-color remote_accent #ffce5c;
+
+.project-remote .project-name {
+    color: @remote_accent;
+}
+
+.project-container.project-remote {
+    border-left: 2px solid alpha(@remote_accent, 0.65);
+}
+
+.project-remote .project-row:hover {
+    background: alpha(@remote_accent, 0.12);
+}
+
+.project-remote .project-row.project-active {
+    background: alpha(@remote_accent, 0.14);
+}
+
+.project-remote .project-icon {
+    background: alpha(@remote_accent, 0.32);
+}
+
+.project-remote .process-row:hover {
+    background: alpha(@remote_accent, 0.12);
+}
+
+.project-remote .process-row-selected {
+    background: alpha(@remote_accent, 0.22);
+}
+
+.project-remote .process-row-selected:hover {
+    background: alpha(@remote_accent, 0.26);
+}
+
+/* Remote status dots: running (and the working spinner) take the
+   project yellow. */
+.project-remote .status-running {
+    color: @remote_accent;
+}
+
+.project-remote .status-working {
+    color: @remote_accent;
 }
 
 .project-content {

@@ -46,7 +46,9 @@ impl StatusBar {
 
         // Remote-project indicator: shown when the active project lives on
         // an ssh host; tooltip carries host:dir.
-        let remote_icon = gtk4::Image::from_icon_name("folder-remote-symbolic");
+        // Bundled copy of Adwaita's folder-remote-symbolic — app-namespaced
+        // so the user's icon theme can't override the glyph.
+        let remote_icon = gtk4::Image::from_icon_name("tuxflow-remote-symbolic");
         remote_icon.set_pixel_size(14);
         remote_icon.add_css_class("dim-label");
         remote_icon.set_visible(false);

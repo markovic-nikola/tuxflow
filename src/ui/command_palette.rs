@@ -314,7 +314,7 @@ impl CommandPalette {
             PaletteItem {
                 category: "PROJECT".to_string(),
                 label: "New remote project (over SSH)".to_string(),
-                icon: "folder-remote-symbolic".to_string(),
+                icon: "tuxflow-remote-symbolic".to_string(),
                 action: "add_remote_project".to_string(),
             },
             PaletteItem {

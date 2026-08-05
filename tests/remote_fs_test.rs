@@ -236,13 +236,22 @@ fn wrapped_remote_command_runs_in_cwd_with_env() {
     let content = fs::read_to_string(&marker).unwrap();
     assert_eq!(content, "hello world|with'quote");
 
-    // The pid capture ran in the login session and holds a real PID
-    let pid: i32 = fs::read_to_string(&pidfile)
-        .unwrap()
-        .trim()
-        .parse()
-        .expect("pidfile should contain a PID");
-    assert!(pid > 0);
+    // Pidfile lifecycle differs by path: the tmux wrapper deletes it on the
+    // way out (/tmp hygiene — the PID inside is dead by then), while the
+    // no-tmux fallback `exec`s the command and can't clean up after itself.
+    if has_tmux() {
+        assert!(
+            !pidfile.exists(),
+            "tmux wrapper should remove its pidfile on exit"
+        );
+    } else {
+        let pid: i32 = fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("pidfile should contain a PID");
+        assert!(pid > 0);
+    }
     kill_test_tmux(project.path());
 }
 

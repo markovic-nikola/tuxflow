@@ -26,6 +26,7 @@ impl SettingsWindow {
         on_recent_first_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
+        on_composer_changed: Option<Rc<dyn Fn(bool)>>,
         keybinding_map: Option<KeybindingMapRef>,
     ) {
         let settings = Rc::new(RefCell::new(AppSettings::load()));
@@ -43,6 +44,7 @@ impl SettingsWindow {
             on_recent_first_changed,
             on_terminal_theme_changed,
             on_font_changed,
+            on_composer_changed,
             &kb_map,
         );
     }
@@ -56,6 +58,7 @@ impl SettingsWindow {
         on_recent_first_changed: Option<Rc<dyn Fn(bool)>>,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
         on_font_changed: Option<Rc<dyn Fn()>>,
+        on_composer_changed: Option<Rc<dyn Fn(bool)>>,
         keybinding_map: &KeybindingMapRef,
     ) {
         let dialog = adw::PreferencesDialog::new();
@@ -85,7 +88,7 @@ impl SettingsWindow {
         dialog.add(&hotkeys_page);
 
         // Tools page
-        let tools_page = Self::build_tools_page(settings);
+        let tools_page = Self::build_tools_page(settings, on_composer_changed);
         dialog.add(&tools_page);
 
         // Integrations page
@@ -1001,11 +1004,34 @@ impl SettingsWindow {
         dialog.add_controller(key_controller);
     }
 
-    fn build_tools_page(settings: &SettingsRef) -> adw::PreferencesPage {
+    fn build_tools_page(
+        settings: &SettingsRef,
+        on_composer_changed: Option<Rc<dyn Fn(bool)>>,
+    ) -> adw::PreferencesPage {
         let page = adw::PreferencesPage::builder()
             .title("Tools")
             .icon_name("applications-utilities-symbolic")
             .build();
+
+        let agents_group = adw::PreferencesGroup::builder().title("Agents").build();
+        let composer_row = adw::SwitchRow::builder()
+            .title("Message Composer")
+            .subtitle(
+                "Compose messages locally under agent terminals and send in one go \u{2014} \
+                 avoids per-keystroke lag on remote projects",
+            )
+            .active(settings.borrow().tools.agent_composer)
+            .build();
+        let settings_ref = settings.clone();
+        composer_row.connect_active_notify(move |row| {
+            settings_ref.borrow_mut().tools.agent_composer = row.is_active();
+            settings_ref.borrow().save();
+            if let Some(ref cb) = on_composer_changed {
+                cb(row.is_active());
+            }
+        });
+        agents_group.add(&composer_row);
+        page.add(&agents_group);
 
         let group = adw::PreferencesGroup::builder()
             .title("Default Applications")

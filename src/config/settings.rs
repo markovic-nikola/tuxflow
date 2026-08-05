@@ -84,6 +84,10 @@ pub struct ToolSettings {
     pub default_editor: String,
     pub default_terminal: String,
     pub reuse_editor_window: bool,
+    /// Show the local message composer under agent terminals (typing is
+    /// local, the message is sent to the PTY in one write — avoids
+    /// per-keystroke ssh lag on remote projects).
+    pub agent_composer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +150,8 @@ impl Default for ToolSettings {
             reuse_editor_window: true,
             default_editor: "xdg-open".to_string(),
             default_terminal: "xdg-open".to_string(),
+            // Off by default — opt in via Settings → Tools → Agents.
+            agent_composer: false,
         }
     }
 }

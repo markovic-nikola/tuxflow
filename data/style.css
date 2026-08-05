@@ -219,6 +219,68 @@
     color: #f14c4c;
 }
 
+/* Agent message composer — paint the bar with the window chrome color so
+   it matches the sidebar/status bar instead of the darker surface behind */
+.composer-bar {
+    border-top: 1px solid alpha(@borders, 0.3);
+    padding: 6px 8px;
+    background: @window_bg_color;
+}
+
+.composer-field {
+    background: alpha(@borders, 0.12);
+    border: 1px solid alpha(@borders, 0.45);
+    border-radius: 8px;
+    transition: border-color 150ms;
+}
+
+/* Focused input: border picks up the accent so it's clear where typing goes */
+.composer-field:focus-within {
+    border-color: alpha(@accent_bg_color, 0.6);
+}
+
+/* Font size comes from the terminal font-size setting (provider in
+   composer_bar.rs) */
+.composer-input,
+.composer-input text {
+    background: transparent;
+}
+
+/* Pending image attachments */
+.composer-chips {
+    padding-bottom: 6px;
+}
+
+.composer-chip {
+    background: alpha(@borders, 0.15);
+    border-radius: 6px;
+    padding: 2px 2px 2px 4px;
+}
+
+.composer-chip-thumb {
+    border-radius: 4px;
+}
+
+.composer-chip-close {
+    min-width: 18px;
+    min-height: 18px;
+    padding: 0;
+}
+
+/* Send button: visible at rest (the shared chip hover tint), stronger
+   on hover/press */
+.composer-bar .status-chip {
+    background: alpha(@accent_bg_color, 0.12);
+}
+
+.composer-bar .status-chip:hover {
+    background: alpha(@accent_bg_color, 0.28);
+}
+
+.composer-bar .status-chip:active {
+    background: alpha(@accent_bg_color, 0.38);
+}
+
 /* Status bar */
 .status-bar {
     border-top: 1px solid alpha(@borders, 0.3);

@@ -408,16 +408,54 @@ esac
 /// file, provisioning the `xclip` shim on first use. Returns the absolute
 /// remote path (for typing into non-agent terminals). Blocking — call from
 /// a worker thread.
-pub fn upload_clipboard_image(host: &str, png: &[u8]) -> Result<String, String> {
-    use std::io::Write;
-    let script = format!(
+/// Shell snippet that installs the xclip shim if missing. Prefix for any
+/// script that wants the agent's next Ctrl+V to read our clipboard file.
+fn shim_provision_script() -> String {
+    format!(
         "mkdir -p ~/.cache/tuxflow ~/.local/bin && \
          if [ ! -e ~/.local/bin/xclip ]; then \
-         printf '%s' {} > ~/.local/bin/xclip && chmod +x ~/.local/bin/xclip; fi && \
-         cat > ~/.cache/tuxflow/clipboard.png && \
-         echo \"$HOME/.cache/tuxflow/clipboard.png\"",
+         printf '%s' {} > ~/.local/bin/xclip && chmod +x ~/.local/bin/xclip; fi",
         sh_quote(CLIPBOARD_SHIM)
+    )
+}
+
+pub fn upload_clipboard_image(host: &str, png: &[u8]) -> Result<String, String> {
+    let script = format!(
+        "{} && cat > ~/.cache/tuxflow/clipboard.png && \
+         echo \"$HOME/.cache/tuxflow/clipboard.png\"",
+        shim_provision_script()
     );
+    ssh_stream_stdin(host, &script, png)
+}
+
+/// Stage an already-uploaded image file as the shim's clipboard content
+/// (fresh mtime), so the agent's next Ctrl+V attaches it natively. Used by
+/// the composer to deliver each pending attachment at send time. Blocking —
+/// call from a worker thread.
+pub fn stage_clipboard_image(host: &str, remote_path: &str) -> Result<(), String> {
+    let script = format!(
+        "{} && cp -f {} ~/.cache/tuxflow/clipboard.png",
+        shim_provision_script(),
+        sh_quote(remote_path)
+    );
+    ssh_stream_stdin(host, &script, &[]).map(|_| ())
+}
+
+/// Upload PNG bytes to a unique file under /tmp on `host` and return the
+/// remote path. Used by the composer's attachment chips: each image needs
+/// its own file (the clipboard shim above is a single rotating slot), and
+/// /tmp guarantees nothing outlives a reboot. `stamp` disambiguates
+/// concurrent uploads. Blocking — call from a worker thread.
+pub fn upload_temp_image(host: &str, png: &[u8], stamp: u128) -> Result<String, String> {
+    let path = format!("/tmp/.tuxflow-img-{stamp}.png");
+    let script = format!("cat > {p} && echo {p}", p = sh_quote(&path));
+    ssh_stream_stdin(host, &script, png)
+}
+
+/// Run `script` on `host` with `stdin_bytes` streamed to its stdin; returns
+/// trimmed stdout on success, trimmed stderr on failure.
+fn ssh_stream_stdin(host: &str, script: &str, stdin_bytes: &[u8]) -> Result<String, String> {
+    use std::io::Write;
     let mut child = std::process::Command::new("ssh")
         .args(ssh_mux_options())
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
@@ -433,8 +471,8 @@ pub fn upload_clipboard_image(host: &str, png: &[u8]) -> Result<String, String> 
         .stdin
         .take()
         .expect("stdin was piped")
-        .write_all(png)
-        .map_err(|e| format!("failed to stream image: {e}"))?;
+        .write_all(stdin_bytes)
+        .map_err(|e| format!("failed to stream stdin: {e}"))?;
     let out = child
         .wait_with_output()
         .map_err(|e| format!("ssh failed: {e}"))?;

@@ -1869,6 +1869,15 @@ impl ProjectList {
         }
     }
 
+    /// Whether the row's working indicator is currently on (hysteresis
+    /// input for the activity ticker).
+    pub fn is_process_working(&self, qualified_name: &str) -> bool {
+        self.process_rows
+            .borrow()
+            .get(qualified_name)
+            .is_some_and(|row| row.is_working())
+    }
+
     pub fn set_process_url(&self, qualified_name: &str, url: Option<&str>) {
         if let Some(row) = self.process_rows.borrow().get(qualified_name) {
             row.set_url(url);

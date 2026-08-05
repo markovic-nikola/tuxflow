@@ -15,15 +15,15 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **Process management** — Start, stop, restart dev servers and background tasks from one place
 - **AI agent support** — Run Claude Code, Codex, Gemini CLI, OpenCode, and other AI agents side-by-side
 - **Agent idle notifications** — Get notified when an agent finishes its turn (terminal BEL + optional silence fallback), with per-agent sound overrides
-- **Multi-project workspace** — Open multiple projects in one window with expandable sidebar sections
+- **Multi-project workspace** — Open multiple projects in one window with expandable sidebar sections, optional recently-used-first sorting, and a filter that narrows both projects and processes
+- **Remote projects (SSH)** — Open a project that lives on another machine: processes run on the host inside persistent tmux sessions, so dropped connections and app restarts just detach and reattach — dev servers keep running. Detected ports auto-tunnel to localhost, clipboard and image paste bridge both ways, and git, stack detection, and project icons all work over the same shared connection
 - **SSH connections** — Connect to remote hosts from `~/.ssh/config`, managed like any other process
 - **Embedded terminals** — Full VTE4 terminals with ANSI color, true color, and mouse support
 - **Auto-restart** — Crashed processes restart automatically with exponential backoff
 - **File watching** — Restart processes when source files change (glob patterns)
-- **Git integration** — Status, diff, commit, push, and pull from a built-in dialog; live ahead/behind indicators and current branch in the status bar; auto-retry on transient pull errors
-- **Stack detection** — Auto-detects your tech stack (Node.js, Rust, Go, Python, PHP, Docker) and suggests commands
-- **Port/URL detection** — Detects ports and URLs in terminal output, Ctrl+click to open in browser
-- **Resource monitoring** — Per-process CPU and memory usage via `/proc`, aggregated across child process trees
+- **Git integration** — Status, diff, commit, push, and pull from a built-in dialog; status bar shows the branch with one-click sync (fetch + pull + push) and live working-tree `+/−` line counts
+- **Stack detection** — Auto-detects your tech stack (Node.js, Rust, Go, Python, PHP/Laravel, Docker) and suggests commands
+- **Port/URL detection** — Detects ports and URLs in terminal output, Ctrl+click to open in browser, optional per-process auto-open on start
 - **MCP server** — Exposes tools over Unix socket so AI agents can observe and control processes
 - **Command palette** — Ctrl+Shift+P fuzzy search for quick actions
 - **Terminal search** — Ctrl+Shift+F to search terminal output
@@ -119,7 +119,7 @@ auto_restart = true
 | `Ctrl+N` | Add project or process |
 | `Ctrl+T` | New terminal |
 | `Ctrl+,` | Settings |
-| `Ctrl+F` | Filter processes |
+| `Ctrl+F` | Filter projects & processes |
 | `Ctrl+Shift+F` | Terminal search |
 | `Ctrl+Up/Down` | Previous/Next process |
 | `Ctrl+Shift+Up/Down` | Previous/Next project |

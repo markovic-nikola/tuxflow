@@ -377,10 +377,6 @@
     color: #ffffff;
 }
 
-.git-dirty image {
-    color: #d29922;
-}
-
 /* Status-bar buttons (git chip + action icons): quiet at rest, soft
    accent tint on hover — matches the sidebar row hover language
    instead of the stock circular pill */

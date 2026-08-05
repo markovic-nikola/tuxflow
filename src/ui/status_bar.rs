@@ -409,11 +409,6 @@ impl StatusBar {
         self.diff_removed_label
             .set_label(&format!("\u{2212}{}", Self::compact_count(removed)));
         self.diff_removed_label.set_visible(removed > 0);
-        if files > 0 || untracked > 0 {
-            self.git_btn.add_css_class("git-dirty");
-        } else {
-            self.git_btn.remove_css_class("git-dirty");
-        }
         let mut parts = Vec::new();
         if files > 0 {
             parts.push(format!("{files} files: +{added} \u{2212}{removed}"));

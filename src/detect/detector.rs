@@ -110,6 +110,13 @@ pub fn detect_stacks_conservative_fs(fs: &dyn ProjectFs) -> Vec<DetectedStack> {
                 _ => false,
             });
         }
+        if stack.name == "PHP" {
+            // Keep the pre-expansion Laravel set for existing projects —
+            // migrate/tinker only appear in the add-project dialog.
+            stack
+                .suggested_processes
+                .retain(|p| !matches!(p.name.as_str(), "artisan migrate" | "artisan tinker"));
+        }
     }
     stacks
 }
@@ -231,11 +238,22 @@ fn detect_php(fs: &dyn ProjectFs, content: &str) -> Vec<ProcessConfig> {
 
         if is_laravel {
             procs.push(make_process("artisan serve", "php artisan serve", true));
-            let vite = fs.exists_many(&["vite.config.js", "vite.config.ts"]);
-            if vite[0] || vite[1] {
-                procs.push(make_process("npm:dev", "npm run dev", true));
+            // A vite frontend normally comes with package.json scripts, which
+            // the Node.js rule already surfaces with the right package
+            // manager (bun/pnpm/…) — suggesting it here too would duplicate
+            // that with a hardcoded npm. Only step in when there's a vite
+            // config but no package.json to detect from.
+            let checks = fs.exists_many(&["vite.config.js", "vite.config.ts", "package.json"]);
+            if (checks[0] || checks[1]) && !checks[2] {
+                procs.push(make_process("vite dev", "npm run dev", true));
             }
             procs.push(make_process("queue", "php artisan queue:work", false));
+            procs.push(make_process(
+                "artisan migrate",
+                "php artisan migrate",
+                false,
+            ));
+            procs.push(make_process("artisan tinker", "php artisan tinker", false));
         } else {
             procs.push(make_process("PHP server", "php -S localhost:8000", true));
         }

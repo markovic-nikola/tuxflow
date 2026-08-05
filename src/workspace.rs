@@ -19,6 +19,10 @@ pub struct Project {
     pub icon_path: Option<String>,
     /// Whether a tuxflow.toml was found and parsed at load time.
     pub config_loaded: bool,
+    /// Stacks detected when the project was loaded. Kept so UI that needs
+    /// suggestions later (Edit Project) has something for remote projects,
+    /// where a live re-detection would mean ssh round trips on the UI thread.
+    pub detected_stacks: Vec<DetectedStack>,
     pub _file_watcher: Option<FileWatcher>,
 }
 
@@ -45,6 +49,9 @@ pub struct PreparedProject {
     pub manager: ProcessManagerRef,
     pub stacks: Vec<DetectedStack>,
     pub config_loaded: bool,
+    /// Icon already fetched to a local path during a remote probe;
+    /// None for local projects (they detect directly from disk).
+    pub icon_hint: Option<String>,
 }
 
 /// Everything fetched from a remote host during project preparation.
@@ -55,6 +62,10 @@ pub struct RemoteProbe {
     /// tmux sessions alive on the host — processes still running detached
     /// from a previous app run; the loader reattaches them.
     pub live_sessions: Vec<String>,
+    /// Local path of a project icon fetched from the host into the cache
+    /// (GTK can only render local files). Only probed when the project has
+    /// no saved icon yet.
+    pub icon_path: Option<String>,
 }
 
 /// Why a remote probe failed — decides whether retrying makes sense.
@@ -77,8 +88,14 @@ impl std::fmt::Display for ProbeError {
 }
 
 /// Probe a remote project dir over ssh: read tuxflow.toml or run stack
-/// detection. Blocking — call from a worker thread, never the GTK main thread.
-pub fn probe_remote(host: &str, dir: &str, conservative: bool) -> Result<RemoteProbe, ProbeError> {
+/// detection, and (when `fetch_icon`) pull a project icon into the local
+/// cache. Blocking — call from a worker thread, never the GTK main thread.
+pub fn probe_remote(
+    host: &str,
+    dir: &str,
+    conservative: bool,
+    fetch_icon: bool,
+) -> Result<RemoteProbe, ProbeError> {
     match crate::remote::fs::remote_dir_exists(host, dir) {
         Ok(true) => {}
         Ok(false) => {
@@ -90,12 +107,18 @@ pub fn probe_remote(host: &str, dir: &str, conservative: bool) -> Result<RemoteP
     }
     let live_sessions = crate::remote::list_live_sessions(host);
     let fs = SshFs::new(host, dir);
+    let icon_path = if fetch_icon {
+        fetch_remote_icon(host, dir, &fs)
+    } else {
+        None
+    };
     if let Ok(content) = fs.read_to_string("tuxflow.toml") {
         return match loader::load_config_str(&content) {
             Ok(config) => Ok(RemoteProbe {
                 config: Some(config),
                 stacks: Vec::new(),
                 live_sessions,
+                icon_path,
             }),
             Err(e) => {
                 return Err(ProbeError::Invalid(format!(
@@ -113,7 +136,28 @@ pub fn probe_remote(host: &str, dir: &str, conservative: bool) -> Result<RemoteP
         config: None,
         stacks,
         live_sessions,
+        icon_path,
     })
+}
+
+/// Detect a project icon on the host (one batched round trip) and copy it
+/// into `~/.cache/tuxflow/icons/` so GTK can render it. Best-effort.
+fn fetch_remote_icon(host: &str, dir: &str, fs: &SshFs) -> Option<String> {
+    let rel = crate::util::icon_detector::detect_icon_fs(fs)?;
+    let abs = format!("{}/{}", dir.trim_end_matches('/'), rel);
+    // Icons are small; 2 MB guards against something mislabeled as one.
+    let bytes = crate::remote::fs::fetch_remote_file(host, &abs, 2 * 1024 * 1024)?;
+    let ext = rel.rsplit('.').next().unwrap_or("png");
+    let cache_dir = dirs::cache_dir()?.join("tuxflow/icons");
+    std::fs::create_dir_all(&cache_dir).ok()?;
+    let key = format!("ssh://{host}{dir}");
+    let path = cache_dir.join(format!("{:016x}.{ext}", crate::remote::fnv64(&key)));
+    std::fs::write(&path, &bytes).ok()?;
+    log::info!(
+        "Fetched remote project icon {host}:{abs} -> {}",
+        path.display()
+    );
+    Some(path.to_string_lossy().into_owned())
 }
 
 pub type WorkspaceRef = Rc<RefCell<Workspace>>;
@@ -141,6 +185,12 @@ impl Workspace {
 
     pub fn saved_directories(&self) -> Vec<String> {
         self.saved.directories.clone()
+    }
+
+    /// Whether a project (by key) already has a persisted icon — remote
+    /// probes skip the icon fetch when it does.
+    pub fn has_saved_icon(&self, key: &str) -> bool {
+        self.saved.get_icon(key).is_some()
     }
 
     /// Prepare a project for loading: detect stacks but don't add detected processes yet.
@@ -203,7 +253,9 @@ impl Workspace {
             probe.config.is_some(),
             probe.stacks.len()
         );
-        self.assemble_prepared(location, probe.config, probe.stacks)
+        let mut prepared = self.assemble_prepared(location, probe.config, probe.stacks)?;
+        prepared.icon_hint = probe.icon_path;
+        Some(prepared)
     }
 
     /// Shared assembly for local and remote preparation: dedupe check,
@@ -249,6 +301,7 @@ impl Workspace {
             manager,
             stacks,
             config_loaded,
+            icon_hint: None,
         })
     }
 
@@ -264,7 +317,8 @@ impl Workspace {
             key: dir_string,
             manager,
             config_loaded,
-            ..
+            stacks: detected_stacks,
+            icon_hint,
         } = prepared;
 
         // Add the selected detected processes. working_dir is a path on the
@@ -329,7 +383,12 @@ impl Workspace {
         };
 
         let icon_path = self.saved.get_icon(&dir_string).cloned().or_else(|| {
-            let detected = local_dir.as_deref().and_then(icon_detector::detect_icon);
+            // Local projects detect from disk; remote ones arrive with the
+            // icon already fetched to the cache by the probe (icon_hint).
+            let detected = local_dir
+                .as_deref()
+                .and_then(icon_detector::detect_icon)
+                .or(icon_hint);
             if let Some(ref path) = detected {
                 log::info!("Auto-detected project icon: {path}");
                 self.saved.set_icon(&dir_string, Some(path.clone()));
@@ -348,6 +407,7 @@ impl Workspace {
             manager,
             icon_path,
             config_loaded,
+            detected_stacks,
             _file_watcher: file_watcher,
         };
 
@@ -445,6 +505,17 @@ impl Workspace {
         if let Some(idx) = self.projects.iter().position(|p| p.name == project_name) {
             let project = &self.projects[idx];
             let dir_str = project.key();
+            // A fetched remote icon lives in our cache — delete it with the
+            // project so removals don't orphan cache files. Icons pointing
+            // into the project tree (local detection) are left alone.
+            if let (Some(icon), Some(cache_dir)) =
+                (self.saved.get_icon(&dir_str), dirs::cache_dir())
+            {
+                let icon_path = PathBuf::from(icon);
+                if icon_path.starts_with(cache_dir.join("tuxflow/icons")) {
+                    let _ = std::fs::remove_file(&icon_path);
+                }
+            }
             project.manager.borrow_mut().stop_all();
             self.saved.remove(&dir_str);
             self.projects.remove(idx);
@@ -614,10 +685,13 @@ impl Workspace {
         }
 
         // Live re-detection would block the UI thread on ssh round trips for
-        // remote projects — skip it there (active + hidden custom still listed).
+        // remote projects — fall back to the stacks detected at load time
+        // there, so hidden detected commands still resolve and can be
+        // re-enabled. (Slightly stale: commands added to the remote project
+        // since load appear after the next app restart.)
         let detected_now: Vec<DetectedStack> = match project.local_dir() {
             Some(dir) => detector::detect_stacks(&dir),
-            None => Vec::new(),
+            None => project.detected_stacks.clone(),
         };
 
         // 2. Hidden commands (in deleted_processes), resolved from custom_commands or detection

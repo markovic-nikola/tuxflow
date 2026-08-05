@@ -243,6 +243,41 @@ fn detect_laravel() {
             .iter()
             .any(|p| p.command.contains("artisan serve"))
     );
+    assert!(
+        stacks[0]
+            .suggested_processes
+            .iter()
+            .any(|p| p.command.contains("artisan migrate"))
+    );
+}
+
+#[test]
+fn laravel_with_package_json_does_not_duplicate_vite_dev() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("composer.json"),
+        r#"{"require":{"laravel/framework":"^11.0"}}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("vite.config.js"), "export default {}").unwrap();
+    fs::write(
+        dir.path().join("package.json"),
+        r#"{"scripts":{"dev":"vite"}}"#,
+    )
+    .unwrap();
+
+    let stacks = detect_stacks(dir.path());
+    // The Node.js rule owns package.json scripts (with the right package
+    // manager); the PHP rule must not add a second, npm-hardcoded dev.
+    let php = stacks.iter().find(|s| s.name == "PHP").unwrap();
+    assert!(
+        !php.suggested_processes
+            .iter()
+            .any(|p| p.command.contains("run dev")),
+        "PHP stack duplicated the vite dev suggestion"
+    );
+    let node = stacks.iter().find(|s| s.name == "Node.js").unwrap();
+    assert!(node.suggested_processes.iter().any(|p| p.name == "dev"));
 }
 
 #[test]

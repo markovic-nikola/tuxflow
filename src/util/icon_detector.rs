@@ -53,6 +53,23 @@ const CANDIDATES: &[&str] = &[
     ".github/icon.png",
 ];
 
+/// Find a project icon over a `ProjectFs` — the remote-capable variant.
+/// Glob candidates are skipped (no remote glob support); everything else is
+/// checked in one batched round trip. Returns the matching relative path.
+pub fn detect_icon_fs(fs: &dyn crate::remote::fs::ProjectFs) -> Option<&'static str> {
+    let candidates: Vec<&'static str> = CANDIDATES
+        .iter()
+        .filter(|c| !c.contains('*'))
+        .copied()
+        .collect();
+    let present = fs.exists_many(&candidates);
+    candidates
+        .into_iter()
+        .zip(present)
+        .find(|(_, p)| *p)
+        .map(|(c, _)| c)
+}
+
 /// Try to find a project icon by checking common file locations.
 /// Returns the absolute path to the first match found.
 pub fn detect_icon(project_dir: &Path) -> Option<String> {

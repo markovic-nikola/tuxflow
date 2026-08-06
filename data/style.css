@@ -91,7 +91,10 @@
    what's running. */
 @define-color remote_accent #ffce5c;
 
-.project-remote .project-name {
+/* Title only lights up while something inside is running — idle remote
+   projects keep the default title color (the icon tint and dim border
+   still mark them as remote). */
+.project-remote.project-has-running .project-name {
     color: @remote_accent;
 }
 

@@ -53,36 +53,47 @@ const CANDIDATES: &[&str] = &[
     ".github/icon.png",
 ];
 
-/// Find a project icon over a `ProjectFs` — the remote-capable variant.
+/// Find project icons over a `ProjectFs` — the remote-capable variant.
 /// Glob candidates are skipped (no remote glob support); everything else is
-/// checked in one batched round trip. Returns the matching relative path.
-pub fn detect_icon_fs(fs: &dyn crate::remote::fs::ProjectFs) -> Option<&'static str> {
+/// checked in one batched round trip. Returns every present, non-empty
+/// match in priority order so callers can fall through when fetching one
+/// fails.
+pub fn detect_icons_fs(fs: &dyn crate::remote::fs::ProjectFs) -> Vec<&'static str> {
     let candidates: Vec<&'static str> = CANDIDATES
         .iter()
         .filter(|c| !c.contains('*'))
         .copied()
         .collect();
-    let present = fs.exists_many(&candidates);
+    let present = fs.exists_many_nonempty(&candidates);
     candidates
         .into_iter()
         .zip(present)
-        .find(|(_, p)| *p)
+        .filter(|(_, p)| *p)
         .map(|(c, _)| c)
+        .collect()
+}
+
+/// Non-empty regular file — 0-byte placeholders (Laravel's default
+/// favicon.ico) must not win the scan.
+fn is_usable_icon(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 /// Try to find a project icon by checking common file locations.
-/// Returns the absolute path to the first match found.
+/// Returns the absolute path to the first usable match found.
 pub fn detect_icon(project_dir: &Path) -> Option<String> {
     for candidate in CANDIDATES {
         if candidate.contains('*') {
             if let Ok(matches) = glob::glob(&project_dir.join(candidate).to_string_lossy())
-                && let Some(Ok(path)) = matches.into_iter().next()
+                && let Some(path) = matches.flatten().find(|p| is_usable_icon(p))
             {
                 return Some(path.to_string_lossy().to_string());
             }
         } else {
             let path = project_dir.join(candidate);
-            if path.is_file() {
+            if is_usable_icon(&path) {
                 return Some(path.to_string_lossy().to_string());
             }
         }

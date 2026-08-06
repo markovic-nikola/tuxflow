@@ -1137,7 +1137,10 @@ impl TuxFlowWindow {
         let probe_host = host.clone();
         let fetch_icon = !ws.borrow().has_saved_icon(&location.key());
         crate::util::worker::run(
-            move || workspace::probe_remote(&probe_host, &dir, true, fetch_icon),
+            // Full detection: the conservative trim happens in
+            // auto_select_processes, so Edit Project can still list and
+            // restore every command detection found on the host.
+            move || workspace::probe_remote(&probe_host, &dir, false, fetch_icon),
             move |result| match result {
                 Ok(probe) => {
                     let live_sessions = probe.live_sessions.clone();

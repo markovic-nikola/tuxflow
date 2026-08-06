@@ -101,7 +101,15 @@ pub fn detect_stacks_conservative(project_dir: &Path) -> Vec<DetectedStack> {
 
 pub fn detect_stacks_conservative_fs(fs: &dyn ProjectFs) -> Vec<DetectedStack> {
     let mut stacks = detect_stacks_fs(fs);
-    for stack in &mut stacks {
+    apply_conservative_filter(&mut stacks);
+    stacks
+}
+
+/// Trim fully-detected stacks down to the conservative subset. Applied when
+/// deciding what to ADD silently (startup); the full stacks stay available
+/// for listing, so Edit Project can offer everything detection found.
+pub fn apply_conservative_filter(stacks: &mut Vec<DetectedStack>) {
+    for stack in stacks {
         if stack.name == "Node.js" {
             let has_dev = stack.suggested_processes.iter().any(|p| p.name == "dev");
             stack.suggested_processes.retain(|p| match p.name.as_str() {
@@ -118,7 +126,6 @@ pub fn detect_stacks_conservative_fs(fs: &dyn ProjectFs) -> Vec<DetectedStack> {
                 .retain(|p| !matches!(p.name.as_str(), "artisan migrate" | "artisan tinker"));
         }
     }
-    stacks
 }
 
 fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {

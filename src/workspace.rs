@@ -141,20 +141,34 @@ pub fn probe_remote(
 }
 
 /// Detect a project icon on the host (one batched round trip) and copy it
-/// into `~/.cache/tuxflow/icons/` so GTK can render it. Best-effort.
+/// into `~/.cache/tuxflow/icons/` so GTK can render it. Candidates are
+/// tried in priority order until one actually downloads — a single
+/// unreadable file must not cost the project its icon. Best-effort.
 fn fetch_remote_icon(host: &str, dir: &str, fs: &SshFs) -> Option<String> {
-    let rel = crate::util::icon_detector::detect_icon_fs(fs)?;
-    let abs = format!("{}/{}", dir.trim_end_matches('/'), rel);
+    let key = format!("ssh://{host}{dir}");
+    for rel in crate::util::icon_detector::detect_icons_fs(fs) {
+        let abs = format!("{}/{}", dir.trim_end_matches('/'), rel);
+        match cache_remote_icon(host, &abs, &key) {
+            Some(path) => return Some(path),
+            None => log::info!("Remote icon candidate {host}:{abs} didn't fetch; trying next"),
+        }
+    }
+    None
+}
+
+/// Download `abs_path` from `host` into `~/.cache/tuxflow/icons/`, named by
+/// the project key so re-fetches overwrite the same slot. Returns the local
+/// path GTK can render. Blocking — call from a worker thread.
+pub fn cache_remote_icon(host: &str, abs_path: &str, project_key: &str) -> Option<String> {
     // Icons are small; 2 MB guards against something mislabeled as one.
-    let bytes = crate::remote::fs::fetch_remote_file(host, &abs, 2 * 1024 * 1024)?;
-    let ext = rel.rsplit('.').next().unwrap_or("png");
+    let bytes = crate::remote::fs::fetch_remote_file(host, abs_path, 2 * 1024 * 1024)?;
+    let ext = abs_path.rsplit('.').next().unwrap_or("png");
     let cache_dir = dirs::cache_dir()?.join("tuxflow/icons");
     std::fs::create_dir_all(&cache_dir).ok()?;
-    let key = format!("ssh://{host}{dir}");
-    let path = cache_dir.join(format!("{:016x}.{ext}", crate::remote::fnv64(&key)));
+    let path = cache_dir.join(format!("{:016x}.{ext}", crate::remote::fnv64(project_key)));
     std::fs::write(&path, &bytes).ok()?;
     log::info!(
-        "Fetched remote project icon {host}:{abs} -> {}",
+        "Fetched remote project icon {host}:{abs_path} -> {}",
         path.display()
     );
     Some(path.to_string_lossy().into_owned())
@@ -278,6 +292,22 @@ impl Workspace {
             project_name = custom_name.clone();
         }
 
+        // Duplicate display names break every by-name lookup — sidebar
+        // rows, Edit Project, icons, commands all resolve first-match, so
+        // a local checkout and its remote twin would silently cross wires.
+        // Disambiguate: remote duplicates get the host, then numbering.
+        if self.projects.iter().any(|p| p.name == project_name) {
+            let base = project_name.clone();
+            if let ProjectLocation::Ssh { host, .. } = &location {
+                project_name = format!("{base} ({host})");
+            }
+            let mut n = 2;
+            while self.projects.iter().any(|p| p.name == project_name) {
+                project_name = format!("{base} ({n})");
+                n += 1;
+            }
+        }
+
         let mut config_loaded = false;
         if let Some(config) = config {
             if self.saved.get_name(&key).is_none() {
@@ -323,12 +353,25 @@ impl Workspace {
 
         // Add the selected detected processes. working_dir is a path on the
         // machine that owns the files — the remote dir for ssh projects.
+        // Selections beyond the conservative subset would silently vanish
+        // on restart (the startup loader only auto-adds the conservative
+        // set) — persist them as custom commands, exactly like the Edit
+        // Project enable path does.
         {
+            let mut conservative = detected_stacks.clone();
+            detector::apply_conservative_filter(&mut conservative);
+            let conservative_names: std::collections::HashSet<&str> = conservative
+                .iter()
+                .flat_map(|s| s.suggested_processes.iter().map(|p| p.name.as_str()))
+                .collect();
             let default_dir = location.dir_str();
             let mut mgr = manager.borrow_mut();
             for mut pc in selected_processes {
                 if pc.working_dir.is_none() {
                     pc.working_dir = Some(default_dir.clone());
+                }
+                if !config_loaded && !conservative_names.contains(pc.name.as_str()) {
+                    self.saved.add_custom_command(&dir_string, pc.clone());
                 }
                 mgr.add_process(pc);
             }
@@ -343,7 +386,11 @@ impl Workspace {
         if let Some(custom_cmds) = self.saved.get_custom_commands(&dir_string) {
             let mut mgr = manager.borrow_mut();
             for cmd in custom_cmds.clone() {
-                mgr.add_process(cmd);
+                // Skip names already in the manager — freshly-persisted
+                // selections above are also in the custom list now.
+                if mgr.get_process(&cmd.name).is_none() {
+                    mgr.add_process(cmd);
+                }
             }
         }
 
@@ -474,8 +521,13 @@ impl Workspace {
             }
         }
 
-        prepared
-            .stacks
+        // Only the conservative subset is added without the user asking —
+        // the full stacks stay on the project for Edit Project to offer.
+        // (Non-conservative commands the user selected at add time come
+        // back via custom_commands in finalize_project.)
+        let mut stacks = prepared.stacks.clone();
+        detector::apply_conservative_filter(&mut stacks);
+        stacks
             .iter()
             .flat_map(|s| s.suggested_processes.clone())
             .collect()

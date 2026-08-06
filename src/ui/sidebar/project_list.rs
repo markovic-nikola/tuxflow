@@ -727,6 +727,14 @@ impl ProjectList {
                             .get_project_location(&pname)
                             .map(|l| l.key())
                             .unwrap_or_default();
+                        let remote = ws_borrow
+                            .get_project_location(&pname)
+                            .and_then(|l| match l {
+                                crate::remote::ProjectLocation::Ssh { host, dir } => {
+                                    Some((host, dir))
+                                }
+                                crate::remote::ProjectLocation::Local(_) => None,
+                            });
                         let icon = ws_borrow.get_project_icon(&pname);
                         let commands = ws_borrow.list_toggleable_commands(&pname);
                         drop(ws_borrow);
@@ -747,6 +755,7 @@ impl ProjectList {
                             &win,
                             &pname_for_dialog,
                             &dir,
+                            remote,
                             icon.as_deref(),
                             commands,
                             move |result: EditProjectResult| {

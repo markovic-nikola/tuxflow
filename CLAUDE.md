@@ -111,6 +111,7 @@ Always run `cargo fmt --all` after changing Rust code, before committing.
 
 ## TODO
 
+- **File upload to remote terminals** — Extend the image-paste bridge to arbitrary files: Ctrl+Shift+V with a file on the clipboard (`text/uri-list`) uploads over the existing ssh connection and types the remote path, like images do today (`remote::upload_image`). Plus a `GtkDropTarget` on the terminal view so drag-and-drop works too — local projects get path-paste-on-drop natively from VTE; remote should match
 - **Split terminal view** — Currently `gtk4::Stack` (one at a time). Would need `gtk4::Paned` for side-by-side
 - **Composer inline images** — Composer delivers attachments first, then text. Nicer: `insert_paintable` thumbnails at the cursor, send walks the buffer and interleaves text chunks with Ctrl+V per image so `[Image #N]` lands where it was placed. Replaces the chip row; needs thumbnail scaling, upload-in-flight gating on send, identity-based (not order) texture→path matching
 - **Tests** — Core modules covered (config, detector, port detector, log buffer). UI and process management untested (require GTK runtime)

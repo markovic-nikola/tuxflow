@@ -1,6 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+use std::time::Duration;
+
+use gtk4::glib;
 
 use adw::prelude::*;
 use gtk4::prelude::*;
@@ -18,6 +21,12 @@ pub struct EditProjectResult {
     pub disabled_commands: Vec<String>,
 }
 
+/// Resting dialog height, and the taller variant while the remote icon
+/// picker is open (its suggestion list needs the extra viewport — the icon
+/// group sits low in the page).
+const EDIT_DIALOG_HEIGHT: i32 = 640;
+const PICKER_DIALOG_HEIGHT: i32 = 860;
+
 pub struct EditProjectDialog;
 
 impl EditProjectDialog {
@@ -25,6 +34,9 @@ impl EditProjectDialog {
         parent: &impl IsA<gtk4::Widget>,
         project_name: &str,
         project_dir: &str,
+        // (host, dir on host) for remote projects — enables the remote
+        // icon picker.
+        remote: Option<(String, String)>,
         current_icon: Option<&str>,
         commands: Vec<CommandToggleEntry>,
         on_save: impl Fn(EditProjectResult) + 'static,
@@ -32,7 +44,7 @@ impl EditProjectDialog {
         let dialog = adw::Dialog::builder()
             .title("Edit Project")
             .content_width(520)
-            .content_height(640)
+            .content_height(EDIT_DIALOG_HEIGHT)
             .build();
         crate::ui::guard_dialog_maximize(&dialog);
 
@@ -197,13 +209,179 @@ impl EditProjectDialog {
             .css_classes(["flat"])
             .build();
         icon_menu_box.append(&auto_detect_btn);
-        icon_menu_box.append(&choose_file_btn);
+        // Local projects browse local files; remote projects get the
+        // on-host picker below instead — a local file dialog on a remote
+        // project reads as the wrong filesystem.
+        if remote.is_none() {
+            icon_menu_box.append(&choose_file_btn);
+        }
+
+        // Remote projects: pick an icon file on the host, with the same
+        // debounced ls-over-ssh completion as the Add Remote dialog. The
+        // chosen file is downloaded into the icon cache (GTK renders local
+        // files only).
+        let remote_picker_box = gtk4::Box::builder()
+            .orientation(gtk4::Orientation::Vertical)
+            .spacing(6)
+            .margin_top(6)
+            .visible(false)
+            .build();
+        let remote_path_entry = gtk4::Entry::builder()
+            .placeholder_text("Path to an image on the host…")
+            .build();
+        let remote_suggestions = gtk4::ListBox::new();
+        remote_suggestions.add_css_class("boxed-list");
+        let remote_suggestions_scroll = gtk4::ScrolledWindow::builder()
+            .child(&remote_suggestions)
+            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(360)
+            .visible(false)
+            .build();
+        remote_picker_box.append(&remote_path_entry);
+        remote_picker_box.append(&remote_suggestions_scroll);
+
+        if let Some((host, remote_dir)) = remote.clone() {
+            let choose_remote_btn = gtk4::Button::builder()
+                .label(format!("Choose on {host}…"))
+                .css_classes(["flat"])
+                .build();
+            icon_menu_box.append(&choose_remote_btn);
+
+            // Reveal the picker prefilled with the project dir. The dialog
+            // grows while the picker is open — the icon group sits low in
+            // the page, so at the resting height the suggestion list would
+            // be clipped to a sliver by the dialog's bottom edge.
+            {
+                let picker_box = remote_picker_box.clone();
+                let entry = remote_path_entry.clone();
+                let popover_close = icon_menu_popover.clone();
+                let dialog_grow = dialog.clone();
+                let dir_prefill = format!("{}/", remote_dir.trim_end_matches('/'));
+                choose_remote_btn.connect_clicked(move |_| {
+                    popover_close.popdown();
+                    dialog_grow.set_content_height(PICKER_DIALOG_HEIGHT);
+                    picker_box.set_visible(true);
+                    entry.set_text(&dir_prefill);
+                    entry.set_position(-1);
+                    entry.grab_focus();
+                });
+            }
+
+            // Debounced completion (dirs + image files), generation-guarded
+            // so stale probe results never land.
+            const SUGGEST_DEBOUNCE_MS: u64 = 200;
+            let suggest_gen: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+            {
+                let host = host.clone();
+                let list = remote_suggestions.clone();
+                let scroll = remote_suggestions_scroll.clone();
+                let suggest_gen = suggest_gen.clone();
+                remote_path_entry.connect_changed(move |row| {
+                    let my_gen = suggest_gen.get() + 1;
+                    suggest_gen.set(my_gen);
+                    let prefix = row.text().to_string();
+                    if !prefix.starts_with('/') {
+                        scroll.set_visible(false);
+                        return;
+                    }
+                    let host = host.clone();
+                    let gen_at_fire = suggest_gen.clone();
+                    let list = list.clone();
+                    let scroll = scroll.clone();
+                    glib::timeout_add_local_once(
+                        Duration::from_millis(SUGGEST_DEBOUNCE_MS),
+                        move || {
+                            if gen_at_fire.get() != my_gen {
+                                return; // superseded by a newer keystroke
+                            }
+                            crate::util::worker::run(
+                                move || crate::remote::fs::list_remote_icon_paths(&host, &prefix),
+                                move |paths| {
+                                    if gen_at_fire.get() != my_gen {
+                                        return; // superseded while probing
+                                    }
+                                    while let Some(child) = list.first_child() {
+                                        list.remove(&child);
+                                    }
+                                    for p in &paths {
+                                        let label = gtk4::Label::builder()
+                                            .label(p)
+                                            .xalign(0.0)
+                                            .ellipsize(gtk4::pango::EllipsizeMode::Start)
+                                            .margin_start(12)
+                                            .margin_end(12)
+                                            .margin_top(8)
+                                            .margin_bottom(8)
+                                            .build();
+                                        let row = gtk4::ListBoxRow::new();
+                                        row.set_child(Some(&label));
+                                        list.append(&row);
+                                    }
+                                    scroll.set_visible(!paths.is_empty());
+                                },
+                            );
+                        },
+                    );
+                });
+            }
+
+            // Directories descend; picking an image fetches it into the
+            // cache and makes it the icon.
+            {
+                let entry = remote_path_entry.clone();
+                let picker_box = remote_picker_box.clone();
+                let store_ref = icon_path_store.clone();
+                let update_preview_remote = update_preview.clone();
+                let pname_remote = project_name.to_string();
+                let dialog_shrink = dialog.clone();
+                let key = format!("ssh://{host}{remote_dir}");
+                remote_suggestions.connect_row_activated(move |_, row| {
+                    let Some(label) = row.child().and_downcast::<gtk4::Label>() else {
+                        return;
+                    };
+                    let path = label.text().to_string();
+                    if path.ends_with('/') {
+                        entry.set_text(&path);
+                        entry.set_position(-1);
+                        entry.grab_focus();
+                        return;
+                    }
+                    entry.set_sensitive(false);
+                    let host = host.clone();
+                    let key = key.clone();
+                    let entry = entry.clone();
+                    let picker_box = picker_box.clone();
+                    let store_ref = store_ref.clone();
+                    let update_preview_remote = update_preview_remote.clone();
+                    let pname_remote = pname_remote.clone();
+                    let dialog_shrink = dialog_shrink.clone();
+                    crate::util::worker::run(
+                        move || crate::workspace::cache_remote_icon(&host, &path, &key),
+                        move |local| {
+                            entry.set_sensitive(true);
+                            match local {
+                                Some(local_path) => {
+                                    update_preview_remote(Some(&local_path), &pname_remote);
+                                    *store_ref.borrow_mut() = Some(local_path);
+                                    picker_box.set_visible(false);
+                                    dialog_shrink.set_content_height(EDIT_DIALOG_HEIGHT);
+                                }
+                                None => log::error!("Remote icon fetch failed"),
+                            }
+                        },
+                    );
+                });
+            }
+        }
+
         icon_menu_box.append(&clear_icon_btn);
         icon_menu_popover.set_child(Some(&icon_menu_box));
         icon_menu_btn.set_popover(Some(&icon_menu_popover));
         icon_row.add_suffix(&icon_menu_btn);
 
         icon_group.add(&icon_row);
+        icon_group.add(&remote_picker_box);
         page.add(&icon_group);
 
         // --- Commands section: grouped into Active / Hidden / Detected ---

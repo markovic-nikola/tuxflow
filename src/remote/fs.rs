@@ -16,6 +16,13 @@ pub trait ProjectFs: Send + Sync {
     fn exists_many(&self, rels: &[&str]) -> Vec<bool> {
         rels.iter().map(|r| self.exists(r)).collect()
     }
+    /// Like `exists_many`, but only counts non-empty regular files. Icon
+    /// detection needs this — Laravel ships a 0-byte favicon.ico
+    /// placeholder that would otherwise win the candidate scan and render
+    /// nothing.
+    fn exists_many_nonempty(&self, rels: &[&str]) -> Vec<bool> {
+        self.exists_many(rels)
+    }
 }
 
 /// Check a directory exists on `host`, distinguishing "no such dir"
@@ -41,14 +48,26 @@ pub fn remote_dir_exists(host: &str, dir: &str) -> Result<bool, String> {
     }
 }
 
-/// List remote directories whose absolute path starts with `prefix` (which
-/// may end mid-name). One ssh round trip; returns absolute paths with a
-/// trailing '/'. Used by the add-remote-project path autocompletion — call
-/// from a worker thread only.
-pub fn list_remote_dirs(host: &str, prefix: &str) -> Vec<String> {
+/// Raw `ls -1dp` over ssh for `prefix*`: absolute paths, dirs marked with a
+/// trailing '/'. `remote_filter` is a grep -iE pattern applied on the host
+/// BEFORE the result cap — filtering after `head` would let unwanted
+/// entries eat the whole budget (a project root full of .md/.json files
+/// would starve out the directories). Call from a worker thread only.
+fn list_remote_raw(
+    host: &str,
+    prefix: &str,
+    remote_filter: Option<&str>,
+    limit: u32,
+) -> Vec<String> {
     // Quote the typed prefix but leave the glob star outside the quotes so
     // the remote shell expands it. -d: don't descend, -p: mark dirs with '/'.
-    let cmd = format!("ls -1dp -- {}* 2>/dev/null | head -n 10", sh_quote(prefix));
+    let filter = remote_filter
+        .map(|pat| format!(" | grep -iE {}", sh_quote(pat)))
+        .unwrap_or_default();
+    let cmd = format!(
+        "ls -1dp -- {}* 2>/dev/null{filter} | head -n {limit}",
+        sh_quote(prefix)
+    );
     let out = Command::new("ssh")
         .args(ssh_mux_options())
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
@@ -59,11 +78,23 @@ pub fn list_remote_dirs(host: &str, prefix: &str) -> Vec<String> {
     match out {
         Ok(o) => String::from_utf8_lossy(&o.stdout)
             .lines()
-            .filter(|l| l.ends_with('/') && l.starts_with('/'))
+            .filter(|l| l.starts_with('/'))
             .map(str::to_string)
             .collect(),
         Err(_) => Vec::new(),
     }
+}
+
+/// List remote directories whose absolute path starts with `prefix` (which
+/// may end mid-name). Used by the add-remote-project path autocompletion.
+pub fn list_remote_dirs(host: &str, prefix: &str) -> Vec<String> {
+    list_remote_raw(host, prefix, Some("/$"), 10)
+}
+
+/// Directories (for descending) plus image files — the completion set for
+/// the remote icon picker in Edit Project.
+pub fn list_remote_icon_paths(host: &str, prefix: &str) -> Vec<String> {
+    list_remote_raw(host, prefix, Some(r"(/|\.(svg|png|webp|ico|jpe?g))$"), 20)
 }
 
 /// Fetch a remote file's bytes (capped at `max_bytes`) over the shared
@@ -102,6 +133,16 @@ impl ProjectFs for LocalFs {
 
     fn exists(&self, rel: &str) -> bool {
         self.root.join(rel).exists()
+    }
+
+    fn exists_many_nonempty(&self, rels: &[&str]) -> Vec<bool> {
+        rels.iter()
+            .map(|r| {
+                std::fs::metadata(self.root.join(r))
+                    .map(|m| m.is_file() && m.len() > 0)
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 }
 
@@ -167,12 +208,23 @@ impl ProjectFs for SshFs {
     }
 
     fn exists_many(&self, rels: &[&str]) -> Vec<bool> {
+        self.exists_batch(rels, "-e")
+    }
+
+    fn exists_many_nonempty(&self, rels: &[&str]) -> Vec<bool> {
+        self.exists_batch(rels, "-s")
+    }
+}
+
+impl SshFs {
+    /// One round trip: `test <flag>` each path, report which passed.
+    fn exists_batch(&self, rels: &[&str], test_flag: &str) -> Vec<bool> {
         if rels.is_empty() {
             return Vec::new();
         }
         let quoted: Vec<String> = rels.iter().map(|r| sh_quote(&self.abs(r))).collect();
         let cmd = format!(
-            "for f in {}; do test -e \"$f\" && printf '%s\\n' \"$f\"; done; true",
+            "for f in {}; do test {test_flag} \"$f\" && printf '%s\\n' \"$f\"; done; true",
             quoted.join(" ")
         );
         let Ok(out) = self.ssh_exec(&cmd) else {

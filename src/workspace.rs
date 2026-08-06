@@ -386,10 +386,16 @@ impl Workspace {
         if let Some(custom_cmds) = self.saved.get_custom_commands(&dir_string) {
             let mut mgr = manager.borrow_mut();
             for cmd in custom_cmds.clone() {
-                // Skip names already in the manager — freshly-persisted
-                // selections above are also in the custom list now.
+                // A custom command sharing a detected process's name is the
+                // user's edit of that process (the Edit dialog persists
+                // here) — its config must override the fresh detection, or
+                // toggles like open_in_browser reset on every app restart.
+                // Freshly-persisted selections above re-apply harmlessly.
                 if mgr.get_process(&cmd.name).is_none() {
                     mgr.add_process(cmd);
+                } else {
+                    let name = cmd.name.clone();
+                    mgr.update_process_config(&name, cmd);
                 }
             }
         }

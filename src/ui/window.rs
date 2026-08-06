@@ -1887,8 +1887,10 @@ impl TuxFlowWindow {
                         let qname_contents = qname_cell_cc.borrow().clone();
                         let row = terminal.cursor_position().1;
 
-                        // Capture new output lines into MCP log buffer
-                        {
+                        // Capture new output lines into the MCP log buffer.
+                        // The delta text is kept: the port scanner reuses it
+                        // after the badge locks (see below).
+                        let delta_text: Option<String> = {
                             let prev_row = last_row.get();
                             if row > prev_row {
                                 let cols = terminal.column_count();
@@ -1899,7 +1901,7 @@ impl TuxFlowWindow {
                                     row,
                                     cols,
                                 );
-                                if let Some(text) = text_opt
+                                if let Some(ref text) = text_opt
                                     && let Ok(mut buffers) = log_buffers.lock()
                                 {
                                     let buffer = buffers
@@ -1912,17 +1914,21 @@ impl TuxFlowWindow {
                                     }
                                 }
                                 last_row.set(row);
+                                text_opt.map(|t| t.to_string())
+                            } else {
+                                None
                             }
-                        }
+                        };
 
                         // Port detection — skip for agents and stopped processes.
-                        // Scans continue until a *local* port locks: a remote-URL
-                        // fallback (e.g. an OAuth link during `shopify theme dev`
-                        // login) is provisional and upgradeable. The tunnel
-                        // ensure() runs on every tick so a forward that died
-                        // gets respawned.
+                        // Scans continue until the badge is final: a *local* port
+                        // locks, or a labeled preview URL wins (`shopify app dev`).
+                        // A plain remote-URL fallback (e.g. an OAuth link during
+                        // `shopify theme dev` login) is provisional and
+                        // upgradeable. The tunnel ensure() runs on every tick so
+                        // a forward that died gets respawned.
                         if !skip_port_detection && sidebar_ref.is_process_running(&qname_contents) {
-                            if !detector_ref.borrow().has_local_port(&proc_name) {
+                            if !detector_ref.borrow().badge_final(&proc_name) {
                                 // Remote, once per run: also scan the tmux pane
                                 // *history*. After reattaching to a live session
                                 // the startup banner (ports, URLs) has usually
@@ -1945,7 +1951,14 @@ impl TuxFlowWindow {
                                             if text.is_empty() {
                                                 return;
                                             }
-                                            det_seed.borrow_mut().scan_output(&seed_name, &text);
+                                            // -J joins tmux's own wraps, but
+                                            // Ink-style CLIs hard-wrap at
+                                            // width-1 themselves — rejoin.
+                                            det_seed.borrow_mut().scan_output_wrapped(
+                                                &seed_name,
+                                                &text,
+                                                term_seed.column_count() as usize,
+                                            );
                                             // Re-fire the handler so the seeded
                                             // ports get applied (tunnels/badges)
                                             // immediately. An idle server emits
@@ -1961,17 +1974,58 @@ impl TuxFlowWindow {
                                 // pushed out of view by later log spam before
                                 // detection locks in.
                                 const PORT_SCAN_LOOKBACK_ROWS: i64 = 200;
-                                let start_row = (row - PORT_SCAN_LOOKBACK_ROWS).max(0);
+                                // Anchor at the end of the buffer content, NOT
+                                // the cursor: full-screen apps (shopify's Ink
+                                // panel in tmux) park the cursor above their
+                                // last lines, and a cursor-bounded scan then
+                                // never sees the rows below it — the wrapped
+                                // "Preview URL:" continuation row lives there.
+                                let content_end = terminal
+                                    .vadjustment()
+                                    .map(|adj| adj.upper() as i64)
+                                    .unwrap_or(row)
+                                    .max(row);
+                                let start_row = (content_end - PORT_SCAN_LOOKBACK_ROWS).max(0);
                                 let cols = terminal.column_count();
                                 let (text_opt, _len) = terminal.text_range_format(
                                     vte4::Format::Text,
                                     start_row,
                                     0,
-                                    row,
+                                    content_end,
                                     cols,
                                 );
                                 if let Some(text) = text_opt {
-                                    detector_ref.borrow_mut().scan_output(&proc_name, &text);
+                                    let mut det = detector_ref.borrow_mut();
+                                    if clip_host_cc.is_some() {
+                                        // Remote: tmux redraws long lines as
+                                        // separate hard rows, truncating
+                                        // wrapped URLs — re-join at the
+                                        // terminal width before scanning.
+                                        det.scan_output_wrapped(&proc_name, &text, cols as usize);
+                                    } else {
+                                        det.scan_output(&proc_name, &text);
+                                    }
+                                }
+                            } else if let Some(ref dt) = delta_text {
+                                // Badge locked, but secondary servers can boot
+                                // later — `php artisan dev` locks the badge on
+                                // artisan serve's :8000 seconds before vite
+                                // prints its :5174, and without a tunnel for
+                                // it every asset URL in the page is dead on a
+                                // remote project. The badge can't change
+                                // anymore (scan_output early-returns), but
+                                // port *harvesting* is monotonic — feed it the
+                                // already-extracted delta, which costs no
+                                // extra VTE work.
+                                let mut det = detector_ref.borrow_mut();
+                                if clip_host_cc.is_some() {
+                                    det.scan_output_wrapped(
+                                        &proc_name,
+                                        dt,
+                                        terminal.column_count() as usize,
+                                    );
+                                } else {
+                                    det.scan_output(&proc_name, dt);
                                 }
                             }
 
@@ -2006,7 +2060,12 @@ impl TuxFlowWindow {
                                     }
                                 }
                             }
-                            if let Some((_, local)) = ports {
+                            // Port badge only for genuinely local ports — a
+                            // public URL's :443 is noise (the URL button and
+                            // status-bar link still appear).
+                            if let Some((_, local)) = ports
+                                && det.has_local_port(&proc_name)
+                            {
                                 sidebar_ref.set_process_port(&qname_contents, Some(local));
                             }
                             let url = det.get_url(&proc_name).map(|u| u.to_string());
@@ -2024,25 +2083,84 @@ impl TuxFlowWindow {
                                     sb_ref.set_url(Some(url_str.as_str()));
                                 }
                                 // open_in_browser: one-shot armed by a
-                                // user-initiated start — fire on the first
-                                // detected URL (tunnel-remapped for remote).
-                                let armed = {
-                                    let mut m = mgr_cc.borrow_mut();
-                                    m.get_process_mut(&proc_name)
-                                        .map(|p| std::mem::take(&mut p.auto_open_armed))
-                                        .unwrap_or(false)
+                                // user-initiated start. The first URL in the
+                                // output isn't always the right one —
+                                // `shopify app dev` prints proxy/tunnel URLs
+                                // seconds before its "Preview URL:" panel —
+                                // so fire once the badge is final (local port
+                                // locked or labeled preview URL won). A badge
+                                // that never finalizes (e.g. only an OAuth
+                                // login link) still opens after a short grace.
+                                const AUTO_OPEN_GRACE: std::time::Duration =
+                                    std::time::Duration::from_secs(5);
+                                let (armed, first_seen) = {
+                                    let m = mgr_cc.borrow();
+                                    m.get_process(&proc_name)
+                                        .map(|p| (p.auto_open_armed, p.auto_open_first_url))
+                                        .unwrap_or((false, None))
                                 };
                                 if armed {
-                                    log::info!("Opening {url_str} for {proc_name}");
-                                    let launcher = gtk4::UriLauncher::new(&url_str);
-                                    let window = terminal
-                                        .root()
-                                        .and_then(|r| r.downcast::<gtk4::Window>().ok());
-                                    launcher.launch(
-                                        window.as_ref(),
-                                        gtk4::gio::Cancellable::NONE,
-                                        |_| {},
-                                    );
+                                    let fire = det.badge_final(&proc_name)
+                                        || first_seen
+                                            .is_some_and(|t| t.elapsed() >= AUTO_OPEN_GRACE);
+                                    if fire {
+                                        if let Some(p) =
+                                            mgr_cc.borrow_mut().get_process_mut(&proc_name)
+                                        {
+                                            p.auto_open_armed = false;
+                                        }
+                                        // Local URLs: wait until the server
+                                        // actually answers non-5xx before
+                                        // opening — `php artisan dev` serves
+                                        // :8000 seconds before vite writes
+                                        // the manifest, and the tab would
+                                        // show the 500 forever. Public URLs
+                                        // (admin preview, OAuth) open as-is.
+                                        let probe = det.has_local_port(&proc_name)
+                                            && url_str.starts_with("http://");
+                                        let term_open = terminal.clone();
+                                        let name_open = proc_name.clone();
+                                        let open = move |url: String| {
+                                            log::info!("Opening {url} for {name_open}");
+                                            let launcher = gtk4::UriLauncher::new(&url);
+                                            let window = term_open
+                                                .root()
+                                                .and_then(|r| r.downcast::<gtk4::Window>().ok());
+                                            launcher.launch(
+                                                window.as_ref(),
+                                                gtk4::gio::Cancellable::NONE,
+                                                |_| {},
+                                            );
+                                        };
+                                        if probe {
+                                            let url_probe = url_str.clone();
+                                            crate::util::worker::run(
+                                                move || {
+                                                    wait_http_ready(
+                                                        &url_probe,
+                                                        std::time::Duration::from_secs(20),
+                                                    );
+                                                    url_probe
+                                                },
+                                                open,
+                                            );
+                                        } else {
+                                            open(url_str.clone());
+                                        }
+                                    } else if first_seen.is_none() {
+                                        if let Some(p) =
+                                            mgr_cc.borrow_mut().get_process_mut(&proc_name)
+                                        {
+                                            p.auto_open_first_url = Some(std::time::Instant::now());
+                                        }
+                                        // Re-poke the handler when the grace
+                                        // expires — an idle process emits no
+                                        // further output to trigger it.
+                                        let term_poke = terminal.clone();
+                                        glib::timeout_add_local_once(AUTO_OPEN_GRACE, move || {
+                                            term_poke.emit_by_name::<()>("contents-changed", &[]);
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -4462,4 +4580,47 @@ fn find_monitor_by_connector(display: &gdk::Display, connector: &str) -> Option<
             .and_then(|m| m.downcast::<gdk::Monitor>().ok())
             .filter(|m| m.connector().as_deref() == Some(connector))
     })
+}
+
+/// Block until the HTTP server behind `url` answers with a non-5xx status,
+/// polling every 400 ms up to `timeout` (then give up and let the caller
+/// open the URL anyway — something visible beats nothing). Runs on a worker
+/// thread; keeps the auto-opened tab from capturing a mid-startup 500
+/// (artisan serve answers seconds before vite writes the manifest).
+fn wait_http_ready(url: &str, timeout: std::time::Duration) {
+    use std::io::{Read, Write};
+    let Some(rest) = url.strip_prefix("http://") else {
+        return;
+    };
+    let (host_port, path) = match rest.split_once('/') {
+        Some((hp, p)) => (hp.to_string(), format!("/{p}")),
+        None => (rest.to_string(), "/".to_string()),
+    };
+    let addr = if host_port.contains(':') {
+        host_port.clone()
+    } else {
+        format!("{host_port}:80")
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut stream) = std::net::TcpStream::connect(&addr) {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+            let req =
+                format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(req.as_bytes()).is_ok() {
+                let mut buf = [0u8; 32];
+                if let Ok(n) = stream.read(&mut buf)
+                    && let Some(code) = String::from_utf8_lossy(&buf[..n])
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|c| c.parse::<u16>().ok())
+                    && code < 500
+                {
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    log::info!("auto-open: {url} still not healthy after {timeout:?}, opening anyway");
 }

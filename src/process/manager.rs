@@ -66,6 +66,10 @@ pub struct ManagedProcess {
     /// `config.open_in_browser`; never by auto-restarts or reattaches.
     /// Consumed by the URL-detection handler in window.rs.
     pub auto_open_armed: bool,
+    /// When the first URL was detected while `auto_open_armed` — starts the
+    /// grace window in which a provisional URL may still be upgraded (e.g.
+    /// `shopify app dev` prints tunnel URLs before its "Preview URL:").
+    pub auto_open_first_url: Option<Instant>,
 }
 
 impl ManagedProcess {
@@ -90,6 +94,7 @@ impl ManagedProcess {
             remote_session: None,
             remote_fresh_next: false,
             auto_open_armed: false,
+            auto_open_first_url: None,
         }
     }
 
@@ -448,6 +453,7 @@ impl ProcessManager {
         // Arm the browser one-shot only for starts the user asked for —
         // an auto-restart or reconnect popping a tab would be noise.
         proc.auto_open_armed = user_initiated && !was_restarting && proc.config.open_in_browser;
+        proc.auto_open_first_url = None;
 
         let name_owned = name.to_string();
         if let Some(ref cb) = self.on_status_change {

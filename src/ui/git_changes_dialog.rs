@@ -420,6 +420,8 @@ fn build_file_row(file: &ChangedFile) -> gtk4::Box {
 
     let path_label = gtk4::Label::builder()
         .label(&file.path)
+        // Ellipsized — hover shows the full path.
+        .tooltip_text(&file.path)
         .ellipsize(gtk4::pango::EllipsizeMode::Start)
         .hexpand(true)
         .xalign(0.0)

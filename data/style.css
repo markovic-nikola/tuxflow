@@ -88,7 +88,10 @@
    so local vs remote reads at a glance. These rules sit below
    .project-has-running on purpose — remote yellow is the project's
    identity and wins over running green; the status dots still show
-   what's running. */
+   what's running.
+   Fallback only: ui/accent.rs redefines this at USER priority with a
+   light-mode variant, since #ffce5c measures 1.24:1 on a light sidebar.
+   This value covers the frame before the first accent::apply. */
 @define-color remote_accent #ffce5c;
 
 /* Title only lights up while something inside is running — idle remote

@@ -127,10 +127,20 @@ pub const TMUX_SOCKET: &str = "tuxflow";
 /// needed — tmux
 /// always runs shell-commands via /bin/sh, so the inner wrapper is POSIX-safe
 /// regardless of the user's login shell.
+///
+/// `window-size smallest` matters when the same project is open on two
+/// machines: session names are deterministic, so both attach to the *same*
+/// session, and tmux can only draw one window at one size. The default
+/// (`latest`) sizes to whichever client moved last, which clips the other
+/// client's view and pads the overhang with `·`. `smallest` fits the window
+/// inside every attached client instead — nothing is ever hidden, at the cost
+/// of unused margin on the larger screen. `aggressive-resize` re-fits as soon
+/// as a client detaches rather than waiting for the next window switch.
 /// (`\;` survives the remote shell as a literal `;`, chaining tmux commands.)
 const TMUX_OPTIONS: &str = "set -g exit-empty off \\; \
      set -g status off \\; set -g mouse on \\; set -g set-clipboard on \\; \
      set -g history-limit 50000 \\; set -g escape-time 10 \\; \
+     set -g window-size smallest \\; setw -g aggressive-resize on \\; \
      set -g set-titles on \\; set -g set-titles-string '#{pane_title}'";
 
 /// FNV-1a by hand — std's DefaultHasher isn't guaranteed stable across

@@ -137,7 +137,7 @@ fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
         auto_restart: false,
         open_in_browser: false,
         restart_when_changed: Vec::new(),
-        env: std::collections::HashMap::new(),
+        env: std::collections::BTreeMap::new(),
         category: ProcessCategory::Command,
         auto_named: false,
         display_name: None,

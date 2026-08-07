@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuxFlowConfig {
@@ -33,7 +33,7 @@ pub struct ProcessConfig {
     #[serde(default)]
     pub restart_when_changed: Vec<String>,
     #[serde(default)]
-    pub env: HashMap<String, String>,
+    pub env: BTreeMap<String, String>,
     #[serde(default = "default_category")]
     pub category: ProcessCategory,
     #[serde(default)]

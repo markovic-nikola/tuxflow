@@ -222,7 +222,7 @@ impl AddSshDialog {
                 auto_restart: auto_reconnect_row.is_active(),
                 open_in_browser: false,
                 restart_when_changed: Vec::new(),
-                env: std::collections::HashMap::new(),
+                env: std::collections::BTreeMap::new(),
                 category: ProcessCategory::SSH,
                 auto_named: false,
                 display_name: Some(display),

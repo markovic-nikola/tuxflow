@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,21 +11,21 @@ pub struct SavedProjects {
     #[serde(default)]
     pub directories: Vec<String>,
     #[serde(default)]
-    pub icons: HashMap<String, String>,
+    pub icons: BTreeMap<String, String>,
     #[serde(default)]
-    pub names: HashMap<String, String>,
+    pub names: BTreeMap<String, String>,
     #[serde(default)]
-    pub process_order: HashMap<String, Vec<String>>,
+    pub process_order: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub expanded: HashMap<String, bool>,
+    pub expanded: BTreeMap<String, bool>,
     #[serde(default)]
-    pub deleted_processes: HashMap<String, Vec<String>>,
+    pub deleted_processes: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub custom_commands: HashMap<String, Vec<ProcessConfig>>,
+    pub custom_commands: BTreeMap<String, Vec<ProcessConfig>>,
     /// Unix seconds of the last user-visible activity (a process starting)
     /// per project. Drives the sidebar's "recently used first" sort.
     #[serde(default)]
-    pub last_used: HashMap<String, u64>,
+    pub last_used: BTreeMap<String, u64>,
 }
 
 impl SavedProjects {

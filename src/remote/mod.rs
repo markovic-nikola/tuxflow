@@ -192,7 +192,7 @@ pub fn remote_session_name(project_key: &str, process_name: &str) -> String {
 pub fn wrap_remote_command(
     host: &str,
     remote_dir: &str,
-    env: &std::collections::HashMap<String, String>,
+    env: &std::collections::BTreeMap<String, String>,
     command: &str,
     pidfile: Option<&str>,
     session: &str,
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn wrap_remote_command_shape() {
-        let env = std::collections::HashMap::from([("PORT".to_string(), "3000".to_string())]);
+        let env = std::collections::BTreeMap::from([("PORT".to_string(), "3000".to_string())]);
         let cmd = wrap_remote_command(
             "box",
             "/srv/app",
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn wrap_remote_command_fresh_kills_stale_session() {
-        let env = std::collections::HashMap::new();
+        let env = std::collections::BTreeMap::new();
         let cmd = wrap_remote_command(
             "box",
             "/srv/app",
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn wrap_remote_command_with_pidfile() {
-        let env = std::collections::HashMap::new();
+        let env = std::collections::BTreeMap::new();
         let cmd = wrap_remote_command(
             "box",
             "/srv/app",

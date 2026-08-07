@@ -209,7 +209,7 @@ fn wrapped_remote_command_runs_in_cwd_with_env() {
     let root = project.path().to_string_lossy().to_string();
     let marker = project.path().join("it's a marker.txt"); // exercise quoting
 
-    let env = std::collections::HashMap::from([
+    let env = std::collections::BTreeMap::from([
         ("TUX_TEST_VAL".to_string(), "hello world".to_string()),
         ("OTHER".to_string(), "with'quote".to_string()),
     ]);
@@ -261,7 +261,7 @@ fn wrapped_remote_command_propagates_exit_code() {
     let project = TempDir::new().unwrap();
     let root = project.path().to_string_lossy().to_string();
     let session = format!("tf-test-exit-{}", std::process::id());
-    let env = std::collections::HashMap::new();
+    let env = std::collections::BTreeMap::new();
 
     // With tmux the code travels via the session exit-file; without it the
     // fallback execs directly — either way the ssh client must exit 7.
@@ -281,7 +281,7 @@ fn wrapped_remote_command_replays_output_after_exit() {
     let project = TempDir::new().unwrap();
     let root = project.path().to_string_lossy().to_string();
     let session = format!("tf-test-replay-{}", std::process::id());
-    let env = std::collections::HashMap::new();
+    let env = std::collections::BTreeMap::new();
 
     // tmux attaches on the alternate screen, so the live output vanishes
     // when the session ends — the wrap must replay the captured pane onto
@@ -316,7 +316,7 @@ fn tmux_session_survives_client_death_and_reattaches() {
     let project = TempDir::new().unwrap();
     let root = project.path().to_string_lossy().to_string();
     let session = format!("tf-test-persist-{}", std::process::id());
-    let env = std::collections::HashMap::new();
+    let env = std::collections::BTreeMap::new();
     // list_live_sessions runs tmux through the fake ssh with the *process*
     // env — point it at this test's isolated server. Concurrent tests set
     // TMUX_TMPDIR per-command, so this global doesn't affect them.

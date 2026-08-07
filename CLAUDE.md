@@ -105,6 +105,8 @@ data/
 - **Global settings:** `~/.config/tuxflow/settings.toml` (appearance, keybindings, notifications)
 - **Project state:** `~/.config/tuxflow/projects.toml` (open directories, custom commands, process order, UI state)
 
+Every map serialized into these files is a `BTreeMap`, never a `HashMap` — `HashMap` iteration order is randomised per process, so each save rewrote the whole file in a fresh order and a one-key change surfaced as a whole-file diff (these files get tracked in dotfiles repos). `Vec` fields like `directories` and `process` keep user-defined order. `tests/projects_roundtrip_test.rs` pins the invariant.
+
 ## Formatting
 
 Always run `cargo fmt --all` after changing Rust code, before committing.

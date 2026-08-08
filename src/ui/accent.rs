@@ -1,6 +1,5 @@
 use std::cell::{Cell, RefCell};
 
-use adw::prelude::*;
 use gtk4::gdk;
 use libadwaita as adw;
 

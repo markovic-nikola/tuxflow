@@ -304,18 +304,17 @@ impl StatusBar {
         }
     }
 
-    pub fn show_update(&self, version: &str, url: &str) {
+    pub fn show_update(&self, update: &crate::util::update_checker::UpdateInfo) {
         self.update_btn
-            .set_label(&format!("Update available: v{version}"));
+            .set_label(&format!("Update available: v{}", update.latest_version));
         self.update_btn
-            .set_tooltip_text(Some("Click to download the latest version"));
+            .set_tooltip_text(Some("See what changed and install"));
         self.update_btn.set_visible(true);
 
-        let release_url = url.to_string();
+        let info = update.clone();
         self.update_btn.connect_clicked(move |btn| {
-            let launcher = gtk4::UriLauncher::new(&release_url);
             let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
-            launcher.launch(window.as_ref(), gtk4::gio::Cancellable::NONE, |_| {});
+            crate::ui::update_dialog::present(window.as_ref(), &info);
         });
     }
 

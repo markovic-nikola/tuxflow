@@ -14,6 +14,7 @@ pub mod status_bar;
 pub mod terminal_search;
 pub mod terminal_theme;
 pub mod terminal_view;
+pub mod update_dialog;
 pub mod window;
 
 use gtk4::prelude::*;

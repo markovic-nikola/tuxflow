@@ -183,7 +183,7 @@ impl TuxFlowWindow {
                 crate::util::update_checker::check_for_update,
                 move |update| {
                     if let Some(update) = update {
-                        status_bar_ref.show_update(&update.latest_version, &update.release_url);
+                        status_bar_ref.show_update(&update);
                     }
                 },
             );

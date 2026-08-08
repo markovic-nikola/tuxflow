@@ -43,13 +43,25 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 
 ## Installation
 
-### Debian/Ubuntu (.deb)
+### Debian/Ubuntu (apt repository — recommended)
+
+Puts TuxFlow in your normal `apt upgrade`, so updates arrive with the rest of
+the system:
+
+```bash
+curl -fsSL https://markovic-nikola.github.io/tuxflow/KEY.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tuxflow.gpg
+echo "deb [signed-by=/usr/share/keyrings/tuxflow.gpg] https://markovic-nikola.github.io/tuxflow stable main" \
+  | sudo tee /etc/apt/sources.list.d/tuxflow.list
+sudo apt update && sudo apt install tuxflow
+```
+
+### Debian/Ubuntu (single .deb)
 
 Download the latest `.deb` from [GitHub Releases](https://github.com/markovic-nikola/tuxflow/releases):
 
 ```bash
-sudo dpkg -i tuxflow_*_amd64.deb
-sudo apt-get install -f  # install any missing dependencies
+sudo apt install ./tuxflow_*_amd64.deb  # resolves dependencies; dpkg -i does not
 ```
 
 ### Binary tarball

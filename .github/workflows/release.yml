@@ -69,3 +69,47 @@ jobs:
           files: |
             tuxflow-${{ steps.version.outputs.version }}-x86_64-linux.tar.gz
             target/debian/*.deb
+
+      # Publishes the landing page (from docs/) and a signed apt repository to
+      # gh-pages, so `apt upgrade` picks up releases. The branch is rebuilt as a
+      # single orphan commit every time: gh-pages lives in the same object store
+      # as main, so accumulating 3 MB of .deb per release would land on everyone
+      # who clones the repo. Only the newest few packages are kept.
+      - name: Publish apt repository
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          KEEP_RELEASES: "5"
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "::warning::APT_GPG_PRIVATE_KEY is not set — skipping apt repo publish"
+            exit 0
+          fi
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+
+          # Carry forward the previous pool so users can pin or downgrade.
+          rm -rf /tmp/prev /tmp/pool && mkdir -p /tmp/prev /tmp/pool
+          if git fetch --depth=1 origin gh-pages 2>/dev/null; then
+            git archive FETCH_HEAD -- pool 2>/dev/null | tar -x -C /tmp/prev || true
+          fi
+          find /tmp/prev -name '*.deb' -exec cp -f {} /tmp/pool/ \;
+          cp -f target/debian/*.deb /tmp/pool/
+
+          mapfile -t KEEP < <(ls /tmp/pool/*.deb | sort -V | tail -n "$KEEP_RELEASES")
+          echo "publishing ${#KEEP[@]} package(s): ${KEEP[*]##*/}"
+
+          rm -rf /tmp/site && mkdir -p /tmp/site
+          cp -r docs/. /tmp/site/
+          # Pages would otherwise run Jekyll over the archive and drop files.
+          touch /tmp/site/.nojekyll
+          scripts/build-apt-repo.sh /tmp/site "${KEEP[@]}"
+
+          cd /tmp/site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "Publish site and apt repo for ${GITHUB_REF_NAME}"
+          git push -q --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

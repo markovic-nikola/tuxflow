@@ -96,6 +96,11 @@ pub fn probe_remote(
     conservative: bool,
     fetch_icon: bool,
 ) -> Result<RemoteProbe, ProbeError> {
+    // Held for the whole probe (existence check, session list, config read,
+    // icon fetch), so a workspace load can't open more ssh channels than the
+    // host's MaxSessions allows. Dropped when the probe returns.
+    let _permit = crate::remote::ssh_permit();
+
     match crate::remote::fs::remote_dir_exists(host, dir) {
         Ok(true) => {}
         Ok(false) => {

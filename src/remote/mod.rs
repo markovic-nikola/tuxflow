@@ -112,6 +112,52 @@ pub fn ssh_mux_options_str() -> String {
         .join(" ")
 }
 
+/// How many short-lived ssh commands may run at once.
+///
+/// Loading a workspace fires one probe per project with nothing pacing them.
+/// Measured against a stock sshd, a burst of 29 simultaneous probes lost ~2 of
+/// them; the same 29 throttled to 4 lost none across repeated runs. The host
+/// refuses part of the burst (`MaxStartups` drops new connections past 10
+/// in-flight, `MaxSessions` caps channels per connection at 10), and a refused
+/// probe surfaces as "Can't reach <host>" for a host that is perfectly fine.
+///
+/// This bounds *probes* only. Long-lived process sessions are not throttled —
+/// 14 concurrent ones were verified fine, since ControlMaster=auto opens a
+/// fresh connection when it cannot multiplex.
+const MAX_CONCURRENT_SSH: usize = 4;
+
+static SSH_SLOTS: std::sync::LazyLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
+    std::sync::LazyLock::new(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+
+/// Held for the duration of one ssh command; releases the slot on drop.
+pub struct SshPermit;
+
+impl Drop for SshPermit {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*SSH_SLOTS;
+        if let Ok(mut n) = lock.lock() {
+            *n = n.saturating_sub(1);
+        }
+        cvar.notify_one();
+    }
+}
+
+/// Wait for a free ssh slot. **Blocking — worker threads only.** Blocking the
+/// GTK main thread here would freeze the UI; the alternative (polling from
+/// `idle_add_local`) busy-spins the main loop, which is why this parks a
+/// thread instead.
+pub fn ssh_permit() -> SshPermit {
+    let (lock, cvar) = &*SSH_SLOTS;
+    let mut n = lock.lock().unwrap_or_else(|e| e.into_inner());
+    while *n >= MAX_CONCURRENT_SSH {
+        n = cvar
+            .wait(n)
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+    }
+    *n += 1;
+    SshPermit
+}
+
 /// Name of the dedicated tmux server socket (`tmux -L`). A separate socket
 /// keeps TuxFlow's sessions and options away from the user's own tmux.
 pub const TMUX_SOCKET: &str = "tuxflow";
@@ -532,6 +578,42 @@ pub fn remote_kill(host: &str, pidfile: &str, tmux_session: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+
+    /// The cap is the whole point: without it a workspace load opened one ssh
+    /// channel per project and sshd refused everything past MaxSessions.
+    #[test]
+    fn ssh_permits_never_exceed_the_cap() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..29 {
+            let live = live.clone();
+            let peak = peak.clone();
+            handles.push(std::thread::spawn(move || {
+                let _permit = super::ssh_permit();
+                let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                live.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        assert_eq!(live.load(Ordering::SeqCst), 0, "permits leaked");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= super::MAX_CONCURRENT_SSH,
+            "{peak} concurrent ssh commands exceeded the cap of {}",
+            super::MAX_CONCURRENT_SSH
+        );
+        assert!(peak > 1, "throttle serialised everything (peak {peak})");
+    }
     use super::*;
 
     #[test]

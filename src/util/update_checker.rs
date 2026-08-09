@@ -14,10 +14,15 @@ pub struct UpdateInfo {
     pub deb_url: Option<String>,
 }
 
-/// Unauthenticated GitHub allows 60 requests/hour per IP — shared across
-/// everyone behind a NAT. Checking on every launch burned that for no reason,
-/// so the last answer is cached and re-used.
-const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+/// How long a check is reused before asking GitHub again.
+///
+/// Short on purpose. Restarting the app is what people do when they want to
+/// know about a new version, and a long window makes that silently do nothing
+/// — a release stayed invisible for hours with no way to ask for a re-check.
+/// The limit this guards against (60 anonymous requests/hour/IP) is nowhere
+/// near reachable at four checks an hour, so the earlier six-hour window cost
+/// real usefulness to save nothing.
+const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Cached {

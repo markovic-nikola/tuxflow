@@ -37,6 +37,12 @@ const CANDIDATES: &[&str] = &[
     "assets/icon.svg",
     "assets/icon.png",
     "assets/icon.webp",
+    // `public/` and `static/` both list favicons but `assets/` did not, so a
+    // project keeping its favicon there got no icon at all.
+    "assets/favicon.svg",
+    "assets/favicon.png",
+    "assets/favicon.webp",
+    "assets/favicon.ico",
     // Rust / Cargo
     "assets/icon.ico",
     // Electron / Tauri
@@ -99,4 +105,53 @@ pub fn detect_icon(project_dir: &Path) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A favicon under `assets/` used to be invisible to detection even though
+    /// the same name is checked under `public/` and `static/`.
+    #[test]
+    fn assets_favicon_is_a_candidate() {
+        for name in [
+            "assets/favicon.svg",
+            "assets/favicon.png",
+            "assets/favicon.webp",
+            "assets/favicon.ico",
+        ] {
+            assert!(CANDIDATES.contains(&name), "{name} missing from CANDIDATES");
+        }
+    }
+
+    #[test]
+    fn detects_an_assets_favicon_on_disk() {
+        let dir = std::env::temp_dir().join(format!("tuxflow-icon-test-{}", std::process::id()));
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).expect("temp dir");
+        std::fs::write(assets.join("favicon.svg"), b"<svg/>").expect("write icon");
+
+        let found = detect_icon(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            found,
+            Some(assets.join("favicon.svg").to_string_lossy().into_owned())
+        );
+    }
+
+    /// 0-byte placeholders must lose to nothing at all.
+    #[test]
+    fn ignores_empty_icon_files() {
+        let dir = std::env::temp_dir().join(format!("tuxflow-icon-empty-{}", std::process::id()));
+        let assets = dir.join("assets");
+        std::fs::create_dir_all(&assets).expect("temp dir");
+        std::fs::write(assets.join("favicon.svg"), b"").expect("write empty");
+
+        let found = detect_icon(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(found, None);
+    }
 }

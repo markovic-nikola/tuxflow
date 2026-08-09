@@ -145,9 +145,10 @@ fn offer_restart(parent: Option<&gtk4::Window>) {
 
     dialog.connect_response(None, |dlg, response| {
         if response == "restart" {
+            let parent = dlg.transient_for();
             match update_checker::restart() {
-                // Quit on an idle tick so the new process is spawned before
-                // this one tears its windows down.
+                // The relauncher waits for this process to exit before
+                // starting the new one, so quitting is what triggers it.
                 Ok(()) => {
                     glib::idle_add_local_once(|| {
                         if let Some(app) = gtk4::gio::Application::default() {
@@ -155,7 +156,25 @@ fn offer_restart(parent: Option<&gtk4::Window>) {
                         }
                     });
                 }
-                Err(msg) => log::error!("Restart failed: {msg}"),
+                // Surfaced, not just logged: a silent failure here reads as
+                // the button doing nothing at all.
+                Err(msg) => {
+                    log::error!("Restart failed: {msg}");
+                    let err = adw::MessageDialog::builder()
+                        .heading("Could not restart")
+                        .body(format!(
+                            "{msg}\n\nThe update is installed — quit and start \
+                             TuxFlow again to use it."
+                        ))
+                        .modal(true)
+                        .build();
+                    if let Some(p) = parent.as_ref() {
+                        err.set_transient_for(Some(p));
+                    }
+                    err.add_response("ok", "OK");
+                    err.connect_response(None, |d, _| d.close());
+                    err.present();
+                }
             }
         }
         dlg.close();

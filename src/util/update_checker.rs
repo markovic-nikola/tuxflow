@@ -138,7 +138,10 @@ pub enum InstallKind {
 }
 
 pub fn install_kind() -> InstallKind {
-    let Ok(exe) = std::env::current_exe() else {
+    // Same path cleaning as the relaunch: after an in-place upgrade the raw
+    // /proc/self/exe carries a " (deleted)" marker, and asking dpkg about that
+    // path fails — which used to hide the install button from then on.
+    let Ok(exe) = relaunch_path() else {
         return InstallKind::Other;
     };
     let owned = std::process::Command::new("dpkg")
@@ -210,10 +213,64 @@ pub fn install_deb(path: &Path) -> Result<(), String> {
     }
 }
 
-/// Re-exec the (now replaced) binary and let the caller quit.
+/// Strip the `" (deleted)"` marker the kernel appends to `/proc/self/exe`
+/// once the package upgrade has replaced the binary under us. Rust hands the
+/// link target back verbatim, so the path it returns does not exist and
+/// spawning it fails — the whole point of restarting is that the file changed.
+fn clean_exe_path(raw: &str) -> &str {
+    raw.strip_suffix(" (deleted)").unwrap_or(raw)
+}
+
+/// Absolute path of the binary to relaunch.
+fn relaunch_path() -> Result<PathBuf, String> {
+    let raw = std::env::current_exe().map_err(|e| format!("{e}"))?;
+    let cleaned = PathBuf::from(clean_exe_path(&raw.to_string_lossy()));
+    if cleaned.is_file() {
+        return Ok(cleaned);
+    }
+    // Upgraded to a different location, or an exotic /proc: fall back to PATH.
+    let name = cleaned.file_name().unwrap_or_default().to_owned();
+    std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join(&name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.is_file())
+        .ok_or_else(|| format!("Could not find {} to relaunch", cleaned.display()))
+}
+
+/// Relaunch after this process exits.
+///
+/// The app is single-instance (GtkApplication holds a D-Bus name), so a
+/// process started while we are still alive just activates *us* and exits —
+/// which looked exactly like the restart button doing nothing. Hand off to a
+/// detached shell that waits for our PID to disappear and then execs the new
+/// binary.
 pub fn restart() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("{e}"))?;
-    std::process::Command::new(exe)
+    use std::os::unix::process::CommandExt;
+
+    let exe = relaunch_path()?;
+    let pid = std::process::id();
+    let script = format!(
+        "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec {}",
+        crate::remote::sh_quote(&exe.to_string_lossy())
+    );
+
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        // Inherited, this makes stack detection treat every project as
+        // TuxFlow itself (see detect::detector).
+        .env_remove("TUXFLOW_CHILD")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // Own process group, so tearing this one down cannot take the
+        // relauncher with it.
+        .process_group(0)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("Could not restart: {e}"))
@@ -221,6 +278,27 @@ pub fn restart() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn strips_the_deleted_marker_from_a_replaced_binary() {
+        // What /proc/self/exe reads back after apt swaps the file underneath.
+        assert_eq!(
+            clean_exe_path("/usr/bin/tuxflow (deleted)"),
+            "/usr/bin/tuxflow"
+        );
+        assert_eq!(clean_exe_path("/usr/bin/tuxflow"), "/usr/bin/tuxflow");
+        // Only a trailing marker counts; a real path may contain the word.
+        assert_eq!(
+            clean_exe_path("/home/me/my (deleted) app/tuxflow"),
+            "/home/me/my (deleted) app/tuxflow"
+        );
+    }
+
+    #[test]
+    fn relaunch_path_resolves_to_a_real_file() {
+        let p = relaunch_path().expect("test binary must resolve");
+        assert!(p.is_file(), "{} is not a file", p.display());
+    }
     use super::*;
 
     #[test]

@@ -24,6 +24,7 @@ pub struct StatusBar {
     git_available: Cell<bool>,
     git_ahead: Cell<usize>,
     git_behind: Cell<usize>,
+    git_syncing: Cell<bool>,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
@@ -200,6 +201,7 @@ impl StatusBar {
             git_available: Cell::new(false),
             git_ahead: Cell::new(0),
             git_behind: Cell::new(0),
+            git_syncing: Cell::new(false),
             browser_btn,
             clear_btn,
             stop_btn,
@@ -359,7 +361,15 @@ impl StatusBar {
     pub fn set_git_sync(&self, ahead: usize, behind: usize) {
         self.git_ahead.set(ahead);
         self.git_behind.set(behind);
-        if ahead == 0 && behind == 0 {
+        self.apply_git_sync();
+    }
+
+    /// Render the stored counters onto the chip. While a sync runs they stay
+    /// hidden — the spinner stands in for them — so the pre-sync numbers can
+    /// never be seen next to (or, worse, outlive) the spinner.
+    fn apply_git_sync(&self) {
+        let (ahead, behind) = (self.git_ahead.get(), self.git_behind.get());
+        if self.git_syncing.get() || (ahead == 0 && behind == 0) {
             self.git_sync_label.set_visible(false);
         } else {
             let mut parts = Vec::new();
@@ -425,11 +435,16 @@ impl StatusBar {
         self.git_btn.set_tooltip_text(Some(&tip));
     }
 
-    /// Spinner + insensitive while the one-click sync runs.
+    /// Spinner + insensitive while the one-click sync runs. Stays on until
+    /// the follow-up counter refresh lands, not just until the sync itself
+    /// finishes — otherwise the chip shows the stale ↓↑ numbers for the
+    /// second or two the refresh takes, which reads as "the sync did nothing".
     pub fn set_git_syncing(&self, syncing: bool) {
+        self.git_syncing.set(syncing);
         self.git_sync_spinner.set_visible(syncing);
         self.git_sync_spinner.set_spinning(syncing);
         self.git_sync_btn.set_sensitive(!syncing);
+        self.apply_git_sync();
     }
 
     pub fn connect_git_sync(&self, cb: impl Fn(&gtk4::Button) + 'static) {

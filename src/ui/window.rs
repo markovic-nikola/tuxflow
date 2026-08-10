@@ -925,18 +925,19 @@ impl TuxFlowWindow {
         status_bar: Rc<StatusBar>,
         do_fetch: bool,
     ) {
-        Self::refresh_status_bar_git_guarded(location, status_bar, do_fetch, None)
+        Self::refresh_status_bar_git_then(location, status_bar, do_fetch, None)
     }
 
-    /// `in_flight` (when given) is cleared once the refresh lands — the
-    /// periodic poller uses it to skip ticks while a slow refresh (remote
-    /// project with the link down: up to 10 s per git call) is still running,
-    /// instead of stacking a new blocked worker thread every tick.
-    fn refresh_status_bar_git_guarded(
+    /// `on_done` (when given) runs once the refreshed numbers are on the chip.
+    /// The periodic poller uses it to clear an in-flight flag, so a slow
+    /// refresh (remote project with the link down: up to 10 s per git call)
+    /// makes it skip ticks instead of stacking a new blocked worker thread
+    /// every minute; the sync button uses it to drop its spinner.
+    fn refresh_status_bar_git_then(
         location: crate::remote::ProjectLocation,
         status_bar: Rc<StatusBar>,
         do_fetch: bool,
-        in_flight: Option<Rc<Cell<bool>>>,
+        on_done: Option<Box<dyn FnOnce()>>,
     ) {
         type GitPoll = (usize, usize, Option<String>, (usize, usize, usize), usize);
         let (tx, rx) = tokio::sync::oneshot::channel::<GitPoll>();
@@ -954,13 +955,15 @@ impl TuxFlowWindow {
         });
         glib::spawn_future_local(async move {
             let result = rx.await;
-            if let Some(flag) = in_flight {
-                flag.set(false);
-            }
             if let Ok((ahead, behind, branch, (files, added, removed), untracked)) = result {
                 status_bar.set_git_sync(ahead, behind);
                 status_bar.set_git_branch(branch.as_deref());
                 status_bar.set_git_diffstat(files, added, removed, untracked);
+            }
+            // After the chip is updated, never before — `on_done` is what
+            // hides the sync spinner, and the swap has to be same-frame.
+            if let Some(done) = on_done {
+                done();
             }
         });
     }
@@ -3208,10 +3211,17 @@ impl TuxFlowWindow {
             crate::util::worker::run(
                 move || sync_with_remote(&location),
                 move |result| {
-                    sb_done.set_git_syncing(false);
                     // Counters refresh regardless — even a failed sync may
-                    // have fetched, and a partial sync changed them.
-                    Self::refresh_status_bar_git(location_done, sb_done.clone(), false);
+                    // have fetched, and a partial sync changed them. The
+                    // spinner stays up across that refresh and hands straight
+                    // over to the new numbers.
+                    let sb_spinner = sb_done.clone();
+                    Self::refresh_status_bar_git_then(
+                        location_done,
+                        sb_done.clone(),
+                        false,
+                        Some(Box::new(move || sb_spinner.set_git_syncing(false))),
+                    );
                     if let Err(err) = result {
                         let dialog = adw::AlertDialog::builder()
                             .heading("Sync failed")
@@ -3346,11 +3356,12 @@ impl TuxFlowWindow {
                         };
                         if do_refresh {
                             in_flight.set(true);
-                            TuxFlowWindow::refresh_status_bar_git_guarded(
+                            let flag = in_flight.clone();
+                            TuxFlowWindow::refresh_status_bar_git_then(
                                 location,
                                 sb_poll.clone(),
                                 true,
-                                Some(in_flight.clone()),
+                                Some(Box::new(move || flag.set(false))),
                             );
                         }
                     }

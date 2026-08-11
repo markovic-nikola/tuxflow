@@ -129,7 +129,10 @@ fn install_flow(parent: Option<&gtk4::Window>, deb_url: String) {
     );
 }
 
-fn offer_restart(parent: Option<&gtk4::Window>) {
+/// Also the whole flow when the update arrived from outside the app (the
+/// system's software manager): the new version is already on disk, so there
+/// is nothing to download and the only thing left to ask for is the restart.
+pub fn offer_restart(parent: Option<&gtk4::Window>) {
     let dialog = adw::MessageDialog::builder()
         .heading("Update installed")
         .body("Restart TuxFlow to run the new version. Remote processes keep running while it restarts.")

@@ -4,6 +4,20 @@ use std::rc::Rc;
 use gtk4::prelude::*;
 
 use crate::ui::git_changes_dialog::GitSeed;
+use crate::util::update_checker::UpdateInfo;
+
+/// What the update chip in the status bar currently means, and so what
+/// clicking it should open. Held in a cell rather than re-wiring the button's
+/// `clicked` handler per state — connecting a second handler stacks them, and
+/// a chip that opens two dialogs is worse than one that opens the wrong one.
+enum UpdateBadge {
+    Hidden,
+    /// A newer release exists upstream; click to see notes and install.
+    Available(UpdateInfo),
+    /// The newer release is already installed — this window is just still
+    /// running the old code. Click goes straight to the restart prompt.
+    RestartRequired,
+}
 
 pub struct StatusBar {
     container: gtk4::Box,
@@ -30,6 +44,7 @@ pub struct StatusBar {
     stop_btn: gtk4::Button,
     restart_btn: gtk4::Button,
     url: Rc<RefCell<Option<String>>>,
+    update_badge: Rc<RefCell<UpdateBadge>>,
 }
 
 impl StatusBar {
@@ -182,6 +197,22 @@ impl StatusBar {
             }
         });
 
+        // Update chip: one handler, dispatching on the current badge state.
+        let update_badge = Rc::new(RefCell::new(UpdateBadge::Hidden));
+        let badge_ref = update_badge.clone();
+        update_btn.connect_clicked(move |btn| {
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            match &*badge_ref.borrow() {
+                UpdateBadge::Available(info) => {
+                    crate::ui::update_dialog::present(window.as_ref(), info)
+                }
+                UpdateBadge::RestartRequired => {
+                    crate::ui::update_dialog::offer_restart(window.as_ref())
+                }
+                UpdateBadge::Hidden => {}
+            }
+        });
+
         Self {
             container,
             remote_icon,
@@ -207,6 +238,7 @@ impl StatusBar {
             stop_btn,
             restart_btn,
             url,
+            update_badge,
         }
     }
 
@@ -306,18 +338,30 @@ impl StatusBar {
         }
     }
 
-    pub fn show_update(&self, update: &crate::util::update_checker::UpdateInfo) {
+    pub fn show_update(&self, update: &UpdateInfo) {
+        // A pending restart already has the new version on disk; offering to
+        // download it again would be a step backwards.
+        if matches!(*self.update_badge.borrow(), UpdateBadge::RestartRequired) {
+            return;
+        }
         self.update_btn
             .set_label(&format!("Update available: v{}", update.latest_version));
         self.update_btn
             .set_tooltip_text(Some("See what changed and install"));
         self.update_btn.set_visible(true);
+        *self.update_badge.borrow_mut() = UpdateBadge::Available(update.clone());
+    }
 
-        let info = update.clone();
-        self.update_btn.connect_clicked(move |btn| {
-            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
-            crate::ui::update_dialog::present(window.as_ref(), &info);
-        });
+    /// A newer version was installed underneath us — by the system's software
+    /// manager, or by our own install flow after the user chose "Later".
+    /// Supersedes any "update available" chip: the download already happened.
+    pub fn show_restart_required(&self) {
+        self.update_btn.set_label("Restart to finish updating");
+        self.update_btn.set_tooltip_text(Some(
+            "A newer TuxFlow is installed; this window is still running the old one",
+        ));
+        self.update_btn.set_visible(true);
+        *self.update_badge.borrow_mut() = UpdateBadge::RestartRequired;
     }
 
     /// Show the Stop button only when the selected process is running.

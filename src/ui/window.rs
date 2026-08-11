@@ -189,6 +189,27 @@ impl TuxFlowWindow {
             );
         }
 
+        // Watch for the binary being replaced underneath us. The update check
+        // above runs once per launch, so a release installed by the system's
+        // software manager while this window is open would otherwise be
+        // invisible — leaving the old code running with no hint, and any
+        // "update available" chip stale and pointing at a download we no
+        // longer need. Polling is a readlink; the source stops on first hit.
+        //
+        // Debug builds are exempt: `cargo run` replaces its own binary on
+        // every rebuild, which would leave the chip permanently lit.
+        if !cfg!(debug_assertions) {
+            let status_bar_ref = status_bar.clone();
+            glib::timeout_add_seconds_local(30, move || {
+                if !crate::util::update_checker::binary_replaced() {
+                    return glib::ControlFlow::Continue;
+                }
+                log::info!("binary replaced on disk; prompting for restart");
+                status_bar_ref.show_restart_required();
+                glib::ControlFlow::Break
+            });
+        }
+
         // Load projects progressively on idle ticks so the window paints first.
         // Each load_project call wires ~250 ms of GTK widget construction per
         // process row; serialising 15-20 projects on the main thread before

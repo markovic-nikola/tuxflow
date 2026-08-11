@@ -214,6 +214,107 @@ fn foreign_in_use_port_not_harvested() {
 }
 
 #[test]
+fn laravel_serve_retry_badges_the_port_it_landed_on() {
+    // `php artisan serve` walks --tries ports when the default is taken, and
+    // echoes PHP's bind failure verbatim before announcing the one it got.
+    // Latching the failed port is not a cosmetic slip on a remote project:
+    // 8000 there belongs to a *different* project's server, so the badge
+    // tunnels to it and opens someone else's app under this project's name.
+    let mut pd = PortDetector::new();
+    pd.scan_output(
+        "dev",
+        "\
+   Failed to listen on 127.0.0.1:8000 (reason: Address already in use)
+
+   INFO  Server running on [http://127.0.0.1:8001].
+",
+    );
+    assert_eq!(pd.get_port("dev"), Some(8001));
+    let all = pd.all_local_ports("dev");
+    assert!(
+        !all.contains(&8000),
+        "must not tunnel a foreign port: {all:?}"
+    );
+    assert!(all.contains(&8001), "{all:?}");
+}
+
+#[test]
+fn laravel_multiplex_tui_serve_retry() {
+    // The same failure as rendered by `php artisan dev`'s TUI
+    // (@laravel/multiplex), captured verbatim from a real run: box-drawing
+    // chrome around it, and the text clipped to the pane width — so the
+    // reason is elided to "Address already…" and only "Failed to listen"
+    // survives to mark the line. It has to, because the port it names is
+    // still right there on the same row.
+    let mut pd = PortDetector::new();
+    pd.scan_output(
+        "dev",
+        "\
+│ 3logs       ││   Failed to listen on 127.0.0.1:8000 (reason: Address already…│
+│             ││    INFO  Server running on [http://127.0.0.1:8001].           │
+",
+    );
+    assert_eq!(pd.get_port("dev"), Some(8001));
+    let all = pd.all_local_ports("dev");
+    assert!(
+        !all.contains(&8000),
+        "must not tunnel a foreign port: {all:?}"
+    );
+}
+
+#[test]
+fn laravel_serve_failure_line_alone_badges_nothing() {
+    // The failure can arrive in its own scan, before the retry has landed —
+    // it must not badge in the gap, or the lock makes it permanent.
+    let mut pd = PortDetector::new();
+    pd.scan_output(
+        "dev",
+        "   Failed to listen on localhost:8000 (reason: Address already in use)\n",
+    );
+    assert_eq!(pd.get_port("dev"), None);
+    assert!(pd.all_local_ports("dev").is_empty());
+
+    pd.scan_output(
+        "dev",
+        "   INFO  Server running on [http://localhost:8001].\n",
+    );
+    assert_eq!(pd.get_port("dev"), Some(8001));
+}
+
+#[test]
+fn multiplex_tui_frame_rows_are_not_wrap_fragments() {
+    // `php artisan dev`'s TUI borders the pane, so every row measures exactly
+    // the terminal width — indistinguishable from an Ink hard wrap by width
+    // alone. Joining them fuses the entire screen into one logical line, and
+    // there the "Failed to listen" marker swallows the port announced rows
+    // below it: badge empty, nothing tunnelled, no auto-open. Shape and
+    // widths taken from a real `php artisan dev` run at 84 columns.
+    const COLS: usize = 84;
+    let row = |content: &str| {
+        let inner = COLS - 2;
+        format!("│{content:<inner$}│")
+    };
+    let screen = [
+        row(" 3 logs      ││   Failed to listen on 127.0.0.1:8000 (reason: Address already in"),
+        row("             ││ use)"),
+        row("             ││"),
+        row("             ││    INFO  Server running on [http://127.0.0.1:8001]."),
+    ]
+    .join("\n")
+        + "\n";
+    for line in screen.lines() {
+        assert_eq!(line.chars().count(), COLS, "row not full width: {line}");
+    }
+
+    let mut pd = PortDetector::new();
+    pd.scan_output_wrapped("dev", &screen, COLS);
+    assert_eq!(pd.get_port("dev"), Some(8001));
+    let all = pd.all_local_ports("dev");
+    assert!(!all.contains(&8000), "{all:?}");
+    assert!(all.contains(&8001), "{all:?}");
+}
+
+#[test]
 fn clear_resets_for_new_run() {
     let mut pd = PortDetector::new();
     pd.scan_output("dev", "Server at http://localhost:3000");

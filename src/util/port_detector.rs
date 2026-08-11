@@ -19,13 +19,33 @@ const TOOL_PREFIXES: &[&str] = &[
 /// the localhost ports on the other lines still get harvested for tunnels.
 const PREFERRED_URL_LABELS: &[&str] = &["preview url"];
 
+/// Phrases marking a line whose port belongs to someone *else* — a neighbour
+/// already holding it, or one this process just failed to take. Such lines are
+/// skipped outright: they must not badge, and unlike tool lines their ports
+/// must not harvest for tunnelling either. Forwarding a port another project's
+/// server owns is worse than missing it — the badge opens, and silently serves
+/// the wrong app under this project's name.
+///
+/// Both dev servers announce the retry *and* the port they retried onto, so
+/// dropping the failure line loses nothing: the line that follows carries the
+/// real port.
+const FOREIGN_PORT_PHRASES: &[&str] = &[
+    // vite: "Port 5173 is in use, trying another one..."
+    "is in use",
+    // PHP's built-in server, as `php artisan serve` walks --tries ports:
+    // "Failed to listen on 127.0.0.1:8000 (reason: Address already in use)"
+    "failed to listen",
+    "address already in use",
+];
+
 /// Content phrases that identify a build-tool line even without a bracket prefix.
 /// Matched case-insensitively as substrings.
 const TOOL_CONTENT_PHRASES: &[&str] = &[
     "vite v",
     "[hmr]",
     "webpack-dev-server",
-    "is in use, trying another",
+    // (vite's "is in use, trying another" lives in FOREIGN_PORT_PHRASES —
+    // those lines are skipped before tool-line classification is consulted)
     "→ local:",
     "➜  local:",
     "➜ local:",
@@ -147,11 +167,8 @@ impl PortDetector {
         let mut remote: Vec<DetectedPort> = Vec::new();
 
         for line in text.lines() {
-            // "Port 5173 is in use, trying another one..." names a port
-            // that belongs to some OTHER process — harvesting it would
-            // tunnel a neighbour project's server. Skip the line entirely
-            // (it never badges either; it's already a tool line).
-            if line.to_ascii_lowercase().contains("is in use") {
+            let lower = line.to_ascii_lowercase();
+            if FOREIGN_PORT_PHRASES.iter().any(|p| lower.contains(p)) {
                 continue;
             }
 
@@ -232,6 +249,20 @@ impl PortDetector {
 /// words at the junction — every other word on both lines still scans
 /// normally. Lines *longer* than `cols` (already joined by `-J`) never
 /// continue.
+/// Whether a row ends on a box-drawing glyph — a frame edge, not a wrap.
+///
+/// Measuring width alone cannot tell the two apart, and full-screen TUIs make
+/// that fatal: `php artisan dev` runs `@laravel/multiplex`, which borders the
+/// pane, so *every* row is exactly full width. Joining them fuses the whole
+/// screen into one logical line, and a single "Failed to listen" there
+/// swallows the real port announced three rows below — the badge comes back
+/// empty and nothing is tunnelled. Ink's hard wraps break mid-token and never
+/// land on a border, so they still join.
+fn ends_on_frame_edge(line: &str) -> bool {
+    // Box Drawing (U+2500–U+257F) and Block Elements (U+2580–U+259F).
+    matches!(line.chars().next_back(), Some(c) if ('\u{2500}'..='\u{259F}').contains(&c))
+}
+
 fn join_hard_wraps(text: &str, cols: usize) -> std::borrow::Cow<'_, str> {
     if cols < 2 || cols == usize::MAX {
         return std::borrow::Cow::Borrowed(text);
@@ -279,7 +310,7 @@ fn join_hard_wraps(text: &str, cols: usize) -> std::borrow::Cow<'_, str> {
             out.push_str(line);
         }
         let width = line.chars().count();
-        continuation = width == cols || width == cols - 1;
+        continuation = (width == cols || width == cols - 1) && !ends_on_frame_edge(line);
     }
     if continuation {
         // The final logical line still ends in a full-width row — its
@@ -396,7 +427,7 @@ fn is_local_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0")
 }
 
-fn extract_host_port_from_url(url: &str) -> Option<(String, u16)> {
+pub(crate) fn extract_host_port_from_url(url: &str) -> Option<(String, u16)> {
     let (without_scheme, default_port) = if let Some(rest) = url.strip_prefix("http://") {
         (rest, 80u16)
     } else if let Some(rest) = url.strip_prefix("https://") {

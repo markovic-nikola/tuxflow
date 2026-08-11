@@ -1,6 +1,8 @@
 pub mod fs;
 pub mod mic;
+pub mod ports;
 pub mod tunnel;
+pub mod vite;
 
 use std::path::PathBuf;
 
@@ -540,29 +542,60 @@ fn ssh_stream_stdin(host: &str, script: &str, stdin_bytes: &[u8]) -> Result<Stri
     }
 }
 
-/// Explicitly kill the remote side of a process: the tmux session (when one
-/// was used) and the login session recorded in `pidfile` (TERM, then KILL
-/// after a grace second — covers the no-tmux fallback and SIGHUP-trappers).
-/// Runs fire-and-forget on a worker thread — never blocks the GTK main
-/// thread. (On the fallback path, processes that daemonize into a *new*
-/// session still escape; with tmux the session kill catches them.)
-pub fn remote_kill(host: &str, pidfile: &str, tmux_session: Option<&str>) {
+/// The remote half of an explicit stop, as a shell script. Split out from
+/// [`remote_kill`] so the escalation can be pinned by tests without a host.
+fn remote_kill_script(pidfile: &str, tmux_session: Option<&str>) -> String {
     let tmux_kill = tmux_session
         .map(|s| {
+            let s = sh_quote(s);
+            // Ask the foreground program to exit before killing the session
+            // out from under it: a tool only gets to run its cleanup if it
+            // sees the interrupt. Vite is the motivating case — on exit it
+            // removes the `public/hot` file naming its dev server, and an
+            // orphaned one leaves the app serving asset URLs that point at a
+            // port nothing listens on (a page of refused `@vite` requests,
+            // long after the run that wrote it). Poll rather than sleep a
+            // flat grace, so a program that exits promptly is stopped
+            // promptly; then kill whatever ignored the interrupt. Bounded at
+            // ~2 s: agents (claude &c.) treat C-c as "interrupt", not "quit",
+            // and are expected to reach the kill below.
+            // Resolve the session's unique id ($N) up front and operate on
+            // that, never the name: names are deterministic and reused, so a
+            // restart respawns *this* name within the grace window below —
+            // waiting on the name would then kill the fresh session we just
+            // started. An id is never reissued.
             format!(
-                "tmux -L {TMUX_SOCKET} kill-session -t {} 2>/dev/null; ",
-                sh_quote(s)
+                "tid=$(tmux -L {TMUX_SOCKET} display-message -p -t {s} '#{{session_id}}' 2>/dev/null); \
+                 if [ -n \"$tid\" ]; then \
+                   tmux -L {TMUX_SOCKET} send-keys -t \"$tid\" C-c 2>/dev/null; \
+                   i=0; while [ $i -lt 10 ]; do \
+                     tmux -L {TMUX_SOCKET} has-session -t \"$tid\" 2>/dev/null || break; \
+                     sleep 0.2; i=$((i+1)); \
+                   done; \
+                   tmux -L {TMUX_SOCKET} kill-session -t \"$tid\" 2>/dev/null; \
+                 fi; "
             )
         })
         .unwrap_or_default();
-    let script = format!(
+    format!(
         "{tmux_kill}sid=$(cat {p} 2>/dev/null); rm -f {p}; \
          if [ -n \"$sid\" ]; then \
            pkill -TERM -s \"$sid\" 2>/dev/null; sleep 1; \
            pkill -KILL -s \"$sid\" 2>/dev/null; \
          fi; true",
         p = sh_quote(pidfile)
-    );
+    )
+}
+
+/// Explicitly kill the remote side of a process: the tmux session (when one
+/// was used, interrupted first so it can clean up after itself) and the login
+/// session recorded in `pidfile` (TERM, then KILL after a grace second —
+/// covers the no-tmux fallback and SIGHUP-trappers).
+/// Runs fire-and-forget on a worker thread — never blocks the GTK main
+/// thread. (On the fallback path, processes that daemonize into a *new*
+/// session still escape; with tmux the session kill catches them.)
+pub fn remote_kill(host: &str, pidfile: &str, tmux_session: Option<&str>) {
+    let script = remote_kill_script(pidfile, tmux_session);
     let host = host.to_string();
     std::thread::spawn(move || {
         let result = std::process::Command::new("ssh")
@@ -672,6 +705,58 @@ mod tests {
         assert!(cmd.contains("tf-dev-1-$(id -u).exit"));
         // Not a fresh start — no stale-session kill
         assert!(!cmd.contains("kill-session"));
+    }
+
+    #[test]
+    fn remote_kill_interrupts_before_killing_the_session() {
+        let script = remote_kill_script("/tmp/.tuxflow-abc-0.pid", Some("tf-dev-1"));
+        let interrupt = script.find("send-keys").expect("sends an interrupt");
+        let wait = script.find("has-session").expect("waits for a clean exit");
+        let kill = script.find("kill-session").expect("still force-kills");
+        // Order is the whole point: a program that cleans up on C-c only gets
+        // to if the interrupt lands before the session is torn down.
+        assert!(
+            interrupt < wait && wait < kill,
+            "escalation out of order: {script}"
+        );
+        // The pidfile sweep still runs after the session is gone.
+        assert!(script.find("pkill -TERM").expect("sweeps pidfile") > kill);
+    }
+
+    #[test]
+    fn remote_kill_grace_targets_session_id_not_name() {
+        // Session names are deterministic and reused, so a restart recreates
+        // this very name inside the grace window — every operation after the
+        // initial lookup must target the resolved id, or the wait ends by
+        // killing the freshly spawned session instead of the old one.
+        let script = remote_kill_script("/tmp/p", Some("tf-dev-1"));
+        let lookup = script.find("display-message").expect("resolves session id");
+        assert!(script.contains("'#{session_id}'"));
+        for op in ["send-keys", "has-session", "kill-session"] {
+            let at = script.find(op).unwrap_or_else(|| panic!("{op} missing"));
+            assert!(at > lookup, "{op} runs before the id lookup");
+            let arg = &script[at..];
+            let arg = &arg[..arg.find(';').unwrap_or(arg.len())];
+            assert!(arg.contains("\"$tid\""), "{op} targets a name, not the id");
+        }
+    }
+
+    #[test]
+    fn remote_kill_without_tmux_has_nothing_to_interrupt() {
+        // The no-tmux fallback exec's the command directly — there is no
+        // session to send keys to, so it goes straight to the pidfile sweep.
+        let script = remote_kill_script("/tmp/.tuxflow-abc-0.pid", None);
+        assert!(!script.contains("send-keys"));
+        assert!(!script.contains("kill-session"));
+        assert!(script.contains("pkill -TERM"));
+        assert!(script.contains("pkill -KILL"));
+    }
+
+    #[test]
+    fn remote_kill_quotes_a_hostile_session_name() {
+        let script = remote_kill_script("/tmp/p'f", Some("tf-dev-1; rm -rf /"));
+        assert!(!script.contains("; rm -rf /;"));
+        assert!(script.contains(r"'tf-dev-1; rm -rf /'"));
     }
 
     #[test]

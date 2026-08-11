@@ -218,12 +218,31 @@ pub fn install_deb(path: &Path) -> Result<(), String> {
     }
 }
 
+/// What the kernel appends to `/proc/self/exe` once the inode we are running
+/// has lost its last name on disk.
+const DELETED_MARKER: &str = " (deleted)";
+
 /// Strip the `" (deleted)"` marker the kernel appends to `/proc/self/exe`
 /// once the package upgrade has replaced the binary under us. Rust hands the
 /// link target back verbatim, so the path it returns does not exist and
 /// spawning it fails — the whole point of restarting is that the file changed.
 fn clean_exe_path(raw: &str) -> &str {
-    raw.strip_suffix(" (deleted)").unwrap_or(raw)
+    raw.strip_suffix(DELETED_MARKER).unwrap_or(raw)
+}
+
+/// True once the binary this process was exec'd from has been replaced or
+/// removed — an apt/dpkg upgrade landing under a running window, typically
+/// from the system's software manager.
+///
+/// dpkg unpacks to `<path>.dpkg-new` and renames over the original, so our
+/// inode loses its last name and the kernel starts marking the link deleted.
+/// The old code stays mapped and the window keeps working, which is exactly
+/// the problem: without this there is nothing to tell the user that the
+/// version on disk has moved on. A `readlink` per call, so it is fine to poll.
+pub fn binary_replaced() -> bool {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().ends_with(DELETED_MARKER))
+        .unwrap_or(false)
 }
 
 /// Absolute path of the binary to relaunch.
@@ -297,6 +316,12 @@ mod tests {
             clean_exe_path("/home/me/my (deleted) app/tuxflow"),
             "/home/me/my (deleted) app/tuxflow"
         );
+    }
+
+    #[test]
+    fn an_intact_binary_is_not_reported_as_replaced() {
+        // The test runner's own exe is still linked, so nothing to flag.
+        assert!(!binary_replaced());
     }
 
     #[test]

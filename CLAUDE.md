@@ -118,4 +118,4 @@ Always run `cargo fmt --all` after changing Rust code, before committing.
 - **Split terminal view** — Currently `gtk4::Stack` (one at a time). Would need `gtk4::Paned` for side-by-side
 - **Composer inline images** — Composer delivers attachments first, then text. Nicer: `insert_paintable` thumbnails at the cursor, send walks the buffer and interleaves text chunks with Ctrl+V per image so `[Image #N]` lands where it was placed. Replaces the chip row; needs thumbnail scaling, upload-in-flight gating on send, identity-based (not order) texture→path matching
 - **Tests** — Core modules covered (config, detector, port detector, log buffer). UI and process management untested (require GTK runtime)
-- **CI** — No GitHub Actions or verified packaging builds yet
+- **CI** — `.github/workflows/ci.yml` (fmt/clippy/test on push + PR) and `release.yml` (on `v*` tags: builds the .deb + tarball, publishes the GitHub Release, force-pushes the signed apt repo to gh-pages). `scripts/release.sh` only bumps, tags and pushes — the artifacts come from the tag, so they land a few minutes later; a release checked too early looks half-published when it is just mid-run

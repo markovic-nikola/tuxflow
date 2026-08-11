@@ -13,16 +13,22 @@ echo "Current version: $CURRENT"
 echo "New version:     $NEW_VERSION"
 echo ""
 
-# Check for staged changes
-if ! git diff --cached --quiet; then
-    echo "Error: Staged changes found. Commit or unstage them first."
+# Refuse to release from a dirty tree. The cargo fmt step below commits
+# whatever it finds as "cargo fmt", so any unrelated work left uncommitted
+# gets swallowed under that message — and tagged and pushed seconds later,
+# where fixing the message costs a force-push. Covers staged, unstaged and
+# untracked in one check.
+if [ -n "$(git status --porcelain)" ]; then
+    echo "Error: uncommitted changes. Commit or stash them before releasing."
+    git status --short
     exit 1
 fi
 
 # Run checks before releasing
 echo "Running checks..."
 cargo fmt --all
-# Auto-commit formatting changes if any
+# The tree was clean above, so anything dirty now is cargo fmt's own doing
+# and the message is honest.
 if ! git diff --quiet; then
     git add -A
     git commit -m "cargo fmt"

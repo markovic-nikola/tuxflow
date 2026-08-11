@@ -46,24 +46,49 @@ impl TunnelManager {
     /// `local == port` and remapping to a free ephemeral port when it's taken.
     /// Returns the local port to use, or None if the tunnel could not spawn.
     pub fn ensure(&mut self, port: u16) -> Option<u16> {
-        // Reap a dead tunnel (e.g. the local port got taken mid-run)
-        if let Some(tunnel) = self.tunnels.get_mut(&port) {
-            match tunnel.child.try_wait() {
-                Ok(None) => return Some(tunnel.local_port), // still running
-                _ => {
-                    self.tunnels.remove(&port);
+        self.ensure_with(port, true)
+    }
+
+    /// Like [`Self::ensure`], but never remaps: the forward either listens on
+    /// `port` itself or does not come up. For a port the *remote* side has
+    /// already baked into a URL it serves — Vite writes its dev-server address
+    /// into `public/hot`, and the page tells this machine's browser to fetch
+    /// assets from exactly that port — a remapped forward would be listening
+    /// where nothing ever knocks.
+    pub fn ensure_exact(&mut self, port: u16) -> Option<u16> {
+        self.ensure_with(port, false)
+    }
+
+    fn ensure_with(&mut self, port: u16, remap: bool) -> Option<u16> {
+        // Reap a dead tunnel (e.g. the local port got taken mid-run), and
+        // replace a remapped one when an exact forward is required: output
+        // scanning may already have opened this same remote port off on some
+        // ephemeral local port, which an exact caller cannot use.
+        let stale = match self.tunnels.get_mut(&port) {
+            Some(tunnel) => match tunnel.child.try_wait() {
+                Ok(None) if remap || tunnel.local_port == port => {
+                    return Some(tunnel.local_port); // still running, usable
                 }
-            }
+                Ok(None) => true,
+                _ => true,
+            },
+            None => false,
+        };
+        if stale {
+            self.close(port);
         }
         let local_port = if local_port_available(port) {
             port
-        } else {
+        } else if remap {
             let Some(free) = free_ephemeral_port() else {
                 log::error!("No free local port to forward remote port {port}");
                 return None;
             };
             log::info!("Local port {port} is taken — remapping to {free}");
             free
+        } else {
+            log::warn!("Local port {port} is taken — cannot forward remote port {port} 1:1");
+            return None;
         };
         let mut cmd = Command::new("ssh");
         cmd.args([

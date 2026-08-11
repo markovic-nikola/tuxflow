@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -1641,6 +1641,120 @@ impl TuxFlowWindow {
                     .host()
                     .map(crate::remote::tunnel::TunnelManager::new),
             ));
+
+        // A remote run's ports often never reach the terminal at all:
+        // `php artisan dev` draws `@laravel/multiplex`, a tabbed TUI that
+        // renders only the selected tab, so a project parked on `vite` never
+        // shows its server URL and one parked on `server` never shows Vite's.
+        // Output scanning cannot recover what was never printed, so ask the
+        // host what the run is *listening* on instead — true whichever tab is
+        // drawn, and whatever runner started it. Everything found is forwarded
+        // 1:1: a remote dev server hands the browser its own address (Vite
+        // bakes its port into `public/hot`), so a remapped forward listens
+        // where nothing knocks. Scanning still decides the badge URL; this
+        // only decides what gets tunnelled.
+        if let (Some(host), dir) = (
+            manager.borrow().location().host().map(str::to_owned),
+            manager.borrow().location().dir_str(),
+        ) {
+            let manager_probe = manager.clone();
+            let tunnels_probe = tunnels.clone();
+            // Ports we forwarded, so they can be dropped when the project goes
+            // idle and rediscovered on the next run.
+            let forwarded: Rc<RefCell<HashSet<u16>>> = Rc::new(RefCell::new(HashSet::new()));
+            let in_flight = Rc::new(Cell::new(false));
+            // Ticks to skip before the next probe. A project can sit with
+            // agents running and no dev server for hours; back off so that
+            // costs one ssh round trip a minute rather than one every 2 s.
+            let cooldown: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+            let was_idle = Rc::new(Cell::new(true));
+            glib::timeout_add_local(Duration::from_secs(2), move || {
+                // Sessions of everything currently running: the probe needs a
+                // live tmux pane to walk down from.
+                let sessions: Vec<String> = {
+                    let mgr = manager_probe.borrow();
+                    mgr.process_names()
+                        .iter()
+                        .filter_map(|n| mgr.get_process(n))
+                        .filter(|p| p.status == ProcessStatus::Running)
+                        .filter_map(|p| p.remote_session.clone())
+                        .collect()
+                };
+                if sessions.is_empty() {
+                    // The servers died with the run; drop the forwards so the
+                    // next one rediscovers instead of inheriting stale ports.
+                    if let Some(tm) = tunnels_probe.borrow_mut().as_mut() {
+                        for port in forwarded.borrow_mut().drain() {
+                            tm.close(port);
+                        }
+                    }
+                    was_idle.set(true);
+                    return glib::ControlFlow::Continue;
+                }
+                // Something just started — probe promptly however long the
+                // project idled before it.
+                if was_idle.replace(false) {
+                    cooldown.set(0);
+                }
+                if in_flight.get() {
+                    return glib::ControlFlow::Continue;
+                }
+                if let Some(remaining) = cooldown.get().checked_sub(1) {
+                    cooldown.set(remaining);
+                    return glib::ControlFlow::Continue;
+                }
+                in_flight.set(true);
+                let host_probe = host.clone();
+                let fs = crate::remote::fs::SshFs::new(host.clone(), dir.clone());
+                let tunnels_done = tunnels_probe.clone();
+                let forwarded_done = forwarded.clone();
+                let in_flight_done = in_flight.clone();
+                let cooldown_done = cooldown.clone();
+                crate::util::worker::run(
+                    move || {
+                        let by_session =
+                            crate::remote::ports::session_ports(&host_probe, &sessions);
+                        let mut ports: Vec<u16> = by_session.into_values().flatten().collect();
+                        // No live pane means no tmux on the host (the fallback
+                        // exec's the command directly), so there is no tree to
+                        // walk — Vite's hot file still names its port.
+                        if ports.is_empty() {
+                            ports.extend(crate::remote::vite::hot_port(&fs));
+                        }
+                        ports.sort_unstable();
+                        ports.dedup();
+                        ports
+                    },
+                    move |ports| {
+                        in_flight_done.set(false);
+                        let mut guard = tunnels_done.borrow_mut();
+                        let Some(tm) = guard.as_mut() else {
+                            return;
+                        };
+                        let mut open = forwarded_done.borrow_mut();
+                        let mut changed = false;
+                        for port in ports {
+                            if open.contains(&port) {
+                                continue;
+                            }
+                            if tm.ensure_exact(port).is_some() {
+                                open.insert(port);
+                                changed = true;
+                            }
+                        }
+                        // Stay responsive while a run is still opening ports,
+                        // go quiet once it has settled. Cap at 30 s: 1, 3, 7,
+                        // 15 ticks.
+                        if changed {
+                            cooldown_done.set(0);
+                        } else {
+                            cooldown_done.set((cooldown_done.get() * 2 + 1).min(15));
+                        }
+                    },
+                );
+                glib::ControlFlow::Continue
+            });
+        }
 
         // Microphone bridge: headless hosts have no capture device, so an
         // agent's voice input (Claude Code's hold-to-talk) records through a

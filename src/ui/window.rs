@@ -41,6 +41,9 @@ impl TuxFlowWindow {
     pub fn new(app: &adw::Application, project_dir: Option<&Path>) -> adw::ApplicationWindow {
         // Load persisted settings
         let settings = Rc::new(RefCell::new(AppSettings::load()));
+        // Must reach the mic module before any project registers its host,
+        // or the first load would skip bridging.
+        crate::remote::mic::set_enabled(settings.borrow().tools.remote_microphone);
 
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -631,6 +634,10 @@ impl TuxFlowWindow {
                 }
             }
             pid_file_shutdown.borrow_mut().clear();
+            // Remote processes deliberately outlive us, but the microphone
+            // bridge must not: it is the one thing that stays pointed at this
+            // machine's hardware.
+            crate::remote::mic::shutdown();
             glib::Propagation::Proceed
         });
 
@@ -1205,16 +1212,43 @@ impl TuxFlowWindow {
                         // no-op for anything already Running.
                         if !live_sessions.is_empty() {
                             let key = location.key();
-                            let mut mgr = manager.borrow_mut();
-                            let names: Vec<String> = mgr.process_names().to_vec();
-                            for pname in names {
-                                let session = crate::remote::remote_session_name(&key, &pname);
-                                if live_sessions.contains(&session) {
-                                    log::info!(
-                                        "Reattaching {pname}: session {session} alive on host"
-                                    );
-                                    mgr.spawn_quiet(&pname);
+                            let manager = manager.clone();
+                            let reattach = move || {
+                                let mut mgr = manager.borrow_mut();
+                                let names: Vec<String> = mgr.process_names().to_vec();
+                                for pname in names {
+                                    let session = crate::remote::remote_session_name(&key, &pname);
+                                    if live_sessions.contains(&session) {
+                                        log::info!(
+                                            "Reattaching {pname}: session {session} alive on host"
+                                        );
+                                        mgr.spawn_quiet(&pname);
+                                    }
                                 }
+                            };
+                            // Claude Code probes for a microphone once and
+                            // caches the answer for the life of the agent
+                            // process, so an agent started before the bridge
+                            // is up can never see it — and the user has no
+                            // way to tell that from a broken bridge. Wait for
+                            // it (bounded), then reattach either way.
+                            if crate::remote::mic::is_enabled() {
+                                let host_for_wait = host.clone();
+                                let host_for_notify = host.clone();
+                                crate::util::worker::run(
+                                    move || crate::remote::mic::wait_ready(&host_for_wait),
+                                    move |ready| {
+                                        if let Err(e) = ready {
+                                            crate::util::notifications::notify_mic_bridge_failed(
+                                                &host_for_notify,
+                                                &e,
+                                            );
+                                        }
+                                        reattach();
+                                    },
+                                );
+                            } else {
+                                reattach();
                             }
                         }
                     }
@@ -1607,6 +1641,15 @@ impl TuxFlowWindow {
                     .host()
                     .map(crate::remote::tunnel::TunnelManager::new),
             ));
+
+        // Microphone bridge: headless hosts have no capture device, so an
+        // agent's voice input (Claude Code's hold-to-talk) records through a
+        // fake `arecord` that reads this machine's mic over an ssh -R socket.
+        // Registered unconditionally — `mic` decides whether to bridge based
+        // on the setting, so toggling it later can reach already-open projects.
+        if let Some(host) = manager.borrow().location().host() {
+            crate::remote::mic::register_host(host);
+        }
 
         // Clipboard bridge for tmux mouse-selections (no released VTE
         // implements OSC 52): after a mouse-up on a remote terminal, fetch

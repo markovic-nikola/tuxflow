@@ -1031,6 +1031,33 @@ impl SettingsWindow {
             }
         });
         agents_group.add(&composer_row);
+
+        let mic_row = adw::SwitchRow::builder()
+            .title("Remote Microphone")
+            .subtitle(
+                "Let agents on remote hosts record voice input through this machine's \
+                 microphone \u{2014} while a remote project is open, the host can listen",
+            )
+            .active(settings.borrow().tools.remote_microphone)
+            .build();
+        let settings_ref = settings.clone();
+        mic_row.connect_active_notify(move |row| {
+            settings_ref.borrow_mut().tools.remote_microphone = row.is_active();
+            settings_ref.borrow().save();
+            // Applies live, to projects that are already open in both
+            // directions — on bridges them, off tears every bridge down.
+            crate::remote::mic::set_enabled(row.is_active());
+            // Flipping this on is the one moment the user is actually looking
+            // for a result, so report failures instead of only logging them.
+            if row.is_active() {
+                crate::util::worker::run(crate::remote::mic::wait_ready_all, |failures| {
+                    for (host, reason) in failures {
+                        crate::util::notifications::notify_mic_bridge_failed(&host, &reason);
+                    }
+                });
+            }
+        });
+        agents_group.add(&mic_row);
         page.add(&agents_group);
 
         let group = adw::PreferencesGroup::builder()

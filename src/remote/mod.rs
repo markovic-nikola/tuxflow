@@ -1,4 +1,5 @@
 pub mod fs;
+pub mod mic;
 pub mod tunnel;
 
 use std::path::PathBuf;

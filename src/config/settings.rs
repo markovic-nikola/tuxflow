@@ -88,6 +88,11 @@ pub struct ToolSettings {
     /// local, the message is sent to the PTY in one write — avoids
     /// per-keystroke ssh lag on remote projects).
     pub agent_composer: bool,
+    /// Bridge this machine's microphone to remote hosts, so agents running
+    /// there can record voice input (Claude Code's hold-to-talk). While a
+    /// remote project is open, the host can open the microphone — hence
+    /// off by default. See `remote::mic`.
+    pub remote_microphone: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +157,8 @@ impl Default for ToolSettings {
             default_terminal: "xdg-open".to_string(),
             // Off by default — opt in via Settings → Tools → Agents.
             agent_composer: false,
+            // Off by default: it exposes the microphone to the remote host.
+            remote_microphone: false,
         }
     }
 }

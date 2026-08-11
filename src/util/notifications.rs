@@ -328,6 +328,18 @@ pub fn notify_remote_unreachable(project_name: &str, host: &str) {
     );
 }
 
+/// The microphone bridge to a remote host couldn't be brought up. Worth
+/// interrupting for: every downstream symptom (agents reporting no
+/// microphone, voice "failing repeatedly") points nowhere near the cause.
+pub fn notify_mic_bridge_failed(host: &str, reason: &str) {
+    send(
+        "Microphone bridge unavailable",
+        &format!("Voice input won't work on {host} — {reason}"),
+        None,
+        None,
+    );
+}
+
 pub fn notify_finish(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
     send(
         project_name,

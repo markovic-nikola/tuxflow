@@ -1,8 +1,26 @@
 /* TuxFlow — Dark-first design */
 
-/* Status dot colors */
+/* Sidebar project accents: local and remote projects each get their own
+   hue, so where a project lives reads at a glance. Both are user-picked
+   (Settings → Appearance → Theme).
+   Fallback only: ui/accent.rs redefines these at USER priority with the
+   chosen colors and their light-mode variants — needed because the dark
+   values below measure 1.2-1.9:1 on a light sidebar. These cover the
+   frame before the first accent::apply, and must stay at the top of the
+   file: GTK resolves @color references at parse time, so a use above the
+   definition drops the whole declaration. */
+@define-color local_accent #73c991;
+@define-color remote_accent #ffce5c;
+
+/* Same story for the two amber status dots: fixed meanings, but they
+   need a darker twin on a light sidebar (see STATUS_COLORS). */
+@define-color status_working #e0a030;
+@define-color status_restarting #cca700;
+
+/* Status dot colors. Running takes the project's accent (the remote
+   override lives further down); the rest are semantic and fixed. */
 .status-running {
-    color: #73c991;
+    color: @local_accent;
 }
 
 .status-stopped {
@@ -14,7 +32,7 @@
 }
 
 .status-restarting {
-    color: #cca700;
+    color: @status_restarting;
 }
 
 /* Agent actively producing output: the dot morphs into a spinning square
@@ -26,7 +44,7 @@
    comma-separated selectors ("0%, 100% { }") — use from/50%/to. Verify
    with `cargo run --example css_check` after editing this file. */
 .status-working {
-    color: #e0a030;
+    color: @status_working;
 }
 
 /* Sidebar */
@@ -45,11 +63,11 @@
 }
 
 .project-row:hover {
-    background: alpha(@accent_bg_color, 0.1);
+    background: alpha(@local_accent, 0.1);
 }
 
 .project-row.project-active {
-    background: alpha(@accent_bg_color, 0.10);
+    background: alpha(@local_accent, 0.10);
 }
 
 .project-icon-area {
@@ -58,7 +76,7 @@
 }
 
 .project-icon {
-    background: alpha(@accent_bg_color, 0.2);
+    background: alpha(@local_accent, 0.2);
     border-radius: 5px;
     font-size: 9px;
     font-weight: 700;
@@ -73,26 +91,21 @@
 }
 
 .project-expanded {
-    border-left: 2px solid alpha(@accent_bg_color, 0.2);
+    border-left: 2px solid alpha(@local_accent, 0.2);
 }
 
 .project-container.project-has-running {
-    border-left: 2px solid #73c991;
+    border-left: 2px solid @local_accent;
 }
 
 .project-has-running .project-name {
-    color: #73c991;
+    color: @local_accent;
 }
 
-/* Remote projects: sidebar accent shifts to TuxFlow yellow (logo color)
-   so local vs remote reads at a glance. These rules sit below
-   .project-has-running on purpose — remote yellow is the project's
-   identity and wins over running green; the status dots still show
-   what's running.
-   Fallback only: ui/accent.rs redefines this at USER priority with a
-   light-mode variant, since #ffce5c measures 1.24:1 on a light sidebar.
-   This value covers the frame before the first accent::apply. */
-@define-color remote_accent #ffce5c;
+/* Remote projects swap in their own accent (gold by default, the logo
+   color). These rules sit below .project-has-running on purpose — where
+   a project lives is its identity and wins over the running tint; the
+   status dots still show what's running. */
 
 /* Title only lights up while something inside is running — idle remote
    projects keep the default title color (the icon tint and dim border
@@ -159,15 +172,15 @@
 }
 
 .process-row:hover {
-    background: alpha(@accent_bg_color, 0.08);
+    background: alpha(@local_accent, 0.08);
 }
 
 .process-row-selected {
-    background: alpha(@accent_bg_color, 0.15);
+    background: alpha(@local_accent, 0.15);
 }
 
 .process-row-selected:hover {
-    background: alpha(@accent_bg_color, 0.20);
+    background: alpha(@local_accent, 0.20);
 }
 
 .process-play-btn {

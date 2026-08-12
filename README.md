@@ -32,7 +32,7 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **Desktop notifications** — Per-project title/icon, focus-aware suppression, bundled notification sounds with picker and preview
 - **Session restore** — Window position, open projects, and process order persist across sessions
 - **TOML config** — Simple, human-readable project configuration
-- **Theming** — Dark/light/system theme with accent colors and terminal color schemes
+- **Theming** — Dark/light/system theme, accent colors (local and remote projects get their own sidebar accent) and terminal color schemes
 
 ## Requirements
 

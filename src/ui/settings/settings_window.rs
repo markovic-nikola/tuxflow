@@ -10,7 +10,7 @@ use crate::config::keybindings::{
     self, KeybindingMap, ShortcutAction, action_metadata, is_modifier_key, keybinding_from_event,
     keybinding_to_string,
 };
-use crate::config::settings::AppSettings;
+use crate::config::settings::{AppSettings, AppearanceSettings};
 
 pub type SettingsRef = Rc<RefCell<AppSettings>>;
 pub type KeybindingMapRef = Rc<RefCell<KeybindingMap>>;
@@ -102,6 +102,37 @@ impl SettingsWindow {
         dialog.present(Some(parent));
     }
 
+    /// A picker over the shared accent palette. The app accent and the two
+    /// sidebar accents differ only in which settings field they read and
+    /// write, so `field` is the whole difference between them.
+    fn accent_combo(
+        title: &str,
+        subtitle: &str,
+        settings: &SettingsRef,
+        field: fn(&mut AppearanceSettings) -> &mut String,
+    ) -> adw::ComboRow {
+        let choices = crate::ui::accent::color_choices();
+        let row = adw::ComboRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .model(&gtk4::StringList::new(&choices))
+            .build();
+        row.set_selected(crate::ui::accent::color_index(field(
+            &mut settings.borrow_mut().appearance,
+        )));
+
+        let settings_ref = settings.clone();
+        row.connect_selected_notify(move |row| {
+            let name = crate::ui::accent::color_name(row.selected());
+            let mut s = settings_ref.borrow_mut();
+            name.clone_into(field(&mut s.appearance));
+            // Every choice re-renders all three: they share one provider.
+            crate::ui::accent::apply(&s.appearance);
+            s.save();
+        });
+        row
+    }
+
     fn build_appearance_page(
         settings: &SettingsRef,
         on_terminal_theme_changed: Option<Rc<dyn Fn(&str)>>,
@@ -154,26 +185,24 @@ impl SettingsWindow {
 
         theme_group.add(&theme_row);
 
-        let choices = crate::ui::accent::color_choices();
-        let choices_strs: Vec<&str> = choices.to_vec();
-        let accent_row = adw::ComboRow::builder()
-            .title("Accent Color")
-            .subtitle("Customize the accent color throughout the UI")
-            .model(&gtk4::StringList::new(&choices_strs))
-            .build();
-        accent_row.set_selected(crate::ui::accent::color_index(
-            &settings.borrow().appearance.accent_color,
+        theme_group.add(&Self::accent_combo(
+            "Accent Color",
+            "Customize the accent color throughout the UI",
+            settings,
+            |a| &mut a.accent_color,
         ));
-
-        let settings_ref = settings.clone();
-        accent_row.connect_selected_notify(move |row| {
-            let name = crate::ui::accent::color_name(row.selected());
-            crate::ui::accent::apply(name);
-            settings_ref.borrow_mut().appearance.accent_color = name.to_string();
-            settings_ref.borrow().save();
-        });
-
-        theme_group.add(&accent_row);
+        theme_group.add(&Self::accent_combo(
+            "Local Project Accent",
+            "Sidebar color for projects on this machine",
+            settings,
+            |a| &mut a.local_accent_color,
+        ));
+        theme_group.add(&Self::accent_combo(
+            "Remote Project Accent",
+            "Sidebar color for projects opened over SSH",
+            settings,
+            |a| &mut a.remote_accent_color,
+        ));
         page.add(&theme_group);
 
         // Terminal font group

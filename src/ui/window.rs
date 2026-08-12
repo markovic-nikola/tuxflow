@@ -2467,7 +2467,7 @@ impl TuxFlowWindow {
         );
 
         let settings = AppSettings::load();
-        crate::ui::accent::apply(&settings.appearance.accent_color);
+        crate::ui::accent::apply(&settings.appearance);
     }
 
     fn build_content(

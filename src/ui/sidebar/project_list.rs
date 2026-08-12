@@ -201,10 +201,12 @@ impl ProjectList {
     /// with something running on top, then stopped ones. The running tier
     /// keeps start order (a newly started project appends BELOW already-
     /// running ones, so their positions stay stable); the stopped tier is
-    /// most-recently-used first, so a project you just stopped slips in
-    /// right below the running tier instead of sinking to its manual
-    /// position. Never-used projects keep the manual (drag & drop) order at
-    /// the bottom, which is also the whole order when the setting is off.
+    /// most-recently-used first — "used" being the last start *or* stop, so
+    /// the project you just stopped slips in right below the running tier
+    /// instead of sinking to its manual position or below projects you
+    /// stopped earlier. Never-used projects keep the manual (drag & drop)
+    /// order at the bottom, which is also the whole order when the setting
+    /// is off.
     fn sort_project_rows(
         container: &gtk4::Box,
         workspace: &Rc<RefCell<Option<WorkspaceRef>>>,
@@ -600,17 +602,24 @@ impl ProjectList {
         if let Some(row) = self.project_rows.borrow().get(project_name) {
             row.set_has_running(has_running);
         }
-        let flipped = self
+        let was_running = self
             .project_running
             .borrow_mut()
-            .insert(project_name.to_string(), has_running)
-            != Some(has_running);
-        // Tier change: started projects stamp their last-used time and float
-        // to the top; stopped ones just re-sort (slipping below the running
-        // tier but keeping their recency rank). Deferred to idle because this
-        // runs from status-change callbacks that can fire while the workspace
-        // is already borrowed (e.g. "stop all" iterates ws.projects()) — the
-        // stamp needs borrow_mut.
+            .insert(project_name.to_string(), has_running);
+        let flipped = was_running != Some(has_running);
+        // Both edges of the tier change stamp the last-used time: starting
+        // floats the project to the bottom of the running tier, stopping puts
+        // it at the TOP of the stopped tier. Stamping only on start would
+        // order stopped projects by when they were last *started*, so stopping
+        // the one you started first would drop it below projects you had
+        // already stopped. `was_running == Some(true)` is what makes the stop
+        // edge a real transition — on the initial insert it is None, and
+        // stamping there would re-date every project at launch and wipe the
+        // saved recency order. Deferred to idle because this runs from
+        // status-change callbacks that can fire while the workspace is already
+        // borrowed (e.g. "stop all" iterates ws.projects()) — the stamp needs
+        // borrow_mut.
+        let stamp = has_running || was_running == Some(true);
         if flipped {
             let ws_ref = self.workspace.clone();
             let container = self.container.clone();
@@ -619,7 +628,7 @@ impl ProjectList {
             let recent_first = self.recent_first.clone();
             let name = project_name.to_string();
             glib::idle_add_local_once(move || {
-                if has_running && let Some(ws) = ws_ref.borrow().clone() {
+                if stamp && let Some(ws) = ws_ref.borrow().clone() {
                     ws.borrow_mut().touch_project_last_used(&name);
                 }
                 if recent_first.get() {

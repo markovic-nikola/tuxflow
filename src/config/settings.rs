@@ -34,6 +34,11 @@ pub struct WindowSettings {
 pub struct AppearanceSettings {
     pub theme: String,
     pub accent_color: String,
+    /// Sidebar accent for local projects, and for remote (SSH) ones — the
+    /// pair is what makes the two read apart at a glance. Palette names
+    /// from `ui::accent` (unknown names fall back there).
+    pub local_accent_color: String,
+    pub remote_accent_color: String,
     pub font_family: String,
     pub font_size: u32,
     pub font_weight: u32,
@@ -106,6 +111,8 @@ impl Default for AppearanceSettings {
         Self {
             theme: "dark".to_string(),
             accent_color: "green".to_string(),
+            local_accent_color: "green".to_string(),
+            remote_accent_color: "yellow".to_string(),
             font_family: "Monospace".to_string(),
             font_size: 12,
             font_weight: 400,

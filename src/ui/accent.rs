@@ -3,12 +3,17 @@ use std::cell::{Cell, RefCell};
 use gtk4::gdk;
 use libadwaita as adw;
 
+use crate::config::settings::AppearanceSettings;
+
 struct AccentColor {
     name: &'static str,
     label: &'static str,
     bg: &'static str,
     fg: &'static str,
-    /// Text-weight accent, used against dark surfaces.
+    /// Text-weight accent, used against dark surfaces. Doubles as the
+    /// sidebar hue for local/remote projects, which is why a few entries
+    /// are tuned brighter than their `bg`: the sidebar reads them as text
+    /// and thin borders, not as filled buttons.
     accent: &'static str,
     /// Same hue darkened for light surfaces. `accent` is tuned for dark mode
     /// and lands at 2-3:1 against libadwaita's light sidebar (#ebebeb) — these
@@ -20,10 +25,12 @@ struct AccentColor {
 const ACCENT_COLORS: &[AccentColor] = &[
     AccentColor {
         name: "green",
-        label: "Green (Default)",
+        label: "Green",
         bg: "#2ea043",
         fg: "#ffffff",
-        accent: "#3fb950",
+        // The sidebar's running-green since day one, and 6.7:1 on the dark
+        // sidebar where a button-weight #3fb950 only manages 4.2:1.
+        accent: "#73c991",
         accent_light: "#1a7f37",
     },
     AccentColor {
@@ -79,8 +86,10 @@ const ACCENT_COLORS: &[AccentColor] = &[
         label: "Yellow",
         bg: "#c88800",
         fg: "#ffffff",
-        accent: "#c88800",
-        accent_light: "#956500",
+        // TuxFlow's logo gold — the default remote-project accent. On light
+        // surfaces it measures 1.24:1, hence the very different companion.
+        accent: "#ffce5c",
+        accent_light: "#9a6700",
     },
     AccentColor {
         name: "slate",
@@ -92,23 +101,52 @@ const ACCENT_COLORS: &[AccentColor] = &[
     },
 ];
 
-/// Remote-project accent (the logo yellow). Defined here rather than in
-/// style.css so it can follow the colour scheme; style.css keeps the dark
-/// value as the pre-`apply` fallback. On light surfaces #ffce5c measures
-/// 1.24:1 — near-invisible — so light mode drops to a dark gold that still
-/// reads as "remote" instead of turning into another green.
-const REMOTE_ACCENT: &str = "#ffce5c";
-const REMOTE_ACCENT_LIGHT: &str = "#9a6700";
+/// Palette names used when a settings file omits or misspells a choice.
+/// `AppearanceSettings::default` carries the same names — it cannot reach
+/// them from here, since `config` builds without `ui` (see src/lib.rs).
+const FALLBACK_LOCAL: &str = "green";
+const FALLBACK_REMOTE: &str = "yellow";
+
+/// Status-dot hues that carry a fixed meaning rather than a chosen one,
+/// as (name, dark, light). They still need the light twin: both ambers
+/// measure ~2.2:1 on the light sidebar, under even the 3:1 that a dot has
+/// to clear. Running/stopped/crashed aren't here — running follows the
+/// project's accent, and the other two read in both schemes as they are.
+const STATUS_COLORS: &[(&str, &str, &str)] = &[
+    ("status_working", "#e0a030", "#b06a00"),
+    ("status_restarting", "#cca700", "#8a6f00"),
+];
+
+/// The three accent choices in play: the app-wide accent plus the two
+/// sidebar hues that tell local and remote projects apart.
+#[derive(Clone)]
+struct Accents {
+    app: String,
+    local: String,
+    remote: String,
+}
 
 thread_local! {
     static PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
-    /// Last accent name passed to `apply`, replayed when the scheme flips.
-    static CURRENT: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Last accents passed to `apply`, replayed when the scheme flips.
+    static CURRENT: RefCell<Accents> = const {
+        RefCell::new(Accents {
+            app: String::new(),
+            local: String::new(),
+            remote: String::new(),
+        })
+    };
     static WATCHING: Cell<bool> = const { Cell::new(false) };
 }
 
-pub fn apply(name: &str) {
-    CURRENT.with(|c| name.clone_into(&mut c.borrow_mut()));
+pub fn apply(appearance: &AppearanceSettings) {
+    CURRENT.with(|c| {
+        *c.borrow_mut() = Accents {
+            app: appearance.accent_color.clone(),
+            local: appearance.local_accent_color.clone(),
+            remote: appearance.remote_accent_color.clone(),
+        }
+    });
     watch_color_scheme();
     render();
 }
@@ -124,19 +162,34 @@ fn watch_color_scheme() {
     adw::StyleManager::default().connect_dark_notify(|_| render());
 }
 
-/// The colour definitions for one accent under one scheme. Split out from
-/// `render` so it can be tested without a display.
-fn css_for(name: &str, dark: bool) -> String {
+/// A sidebar hue under one scheme. The sidebar reads these as text and as
+/// alpha-blended tints, so it takes the text-weight `accent`, never `bg`.
+/// An unknown name (hand-edited settings, a palette entry we dropped)
+/// falls back to the shipped default rather than to nothing — the CSS
+/// colour has to be defined or the whole rule is skipped by GTK.
+fn sidebar_color(name: &str, fallback: &str, dark: bool) -> &'static str {
+    let by_name = |n: &str| ACCENT_COLORS.iter().find(|c| c.name == n);
+    let c = by_name(name)
+        .or_else(|| by_name(fallback))
+        .expect("fallback accent is in the palette");
+    if dark { c.accent } else { c.accent_light }
+}
+
+/// The colour definitions for one set of accents under one scheme. Split
+/// out from `render` so it can be tested without a display.
+fn css_for(a: &Accents, dark: bool) -> String {
     let mut css = format!(
-        "@define-color remote_accent {};\n",
-        if dark {
-            REMOTE_ACCENT
-        } else {
-            REMOTE_ACCENT_LIGHT
-        }
+        "@define-color local_accent {};\n@define-color remote_accent {};\n",
+        sidebar_color(&a.local, FALLBACK_LOCAL, dark),
+        sidebar_color(&a.remote, FALLBACK_REMOTE, dark),
     );
 
-    if let Some(c) = ACCENT_COLORS.iter().find(|c| c.name == name)
+    for (name, dark_hex, light_hex) in STATUS_COLORS {
+        let hex = if dark { dark_hex } else { light_hex };
+        css.push_str(&format!("@define-color {name} {hex};\n"));
+    }
+
+    if let Some(c) = ACCENT_COLORS.iter().find(|c| c.name == a.app)
         && !c.bg.is_empty()
     {
         let accent = if dark { c.accent } else { c.accent_light };
@@ -152,7 +205,7 @@ fn css_for(name: &str, dark: bool) -> String {
 
 fn render() {
     let dark = adw::StyleManager::default().is_dark();
-    let css = CURRENT.with(|n| css_for(&n.borrow(), dark));
+    let css = CURRENT.with(|a| css_for(&a.borrow(), dark));
 
     PROVIDER.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -212,11 +265,16 @@ mod tests {
         (hi + 0.05) / (lo + 0.05)
     }
 
-    /// libadwaita's sidebar backgrounds, the surface these are read against.
+    /// The surface these are read against. `.sidebar` is
+    /// `alpha(@window_bg_color, 0.97)`, which screenshots measure as
+    /// #fafafa light / #222226 dark — both further from the foreground
+    /// than the values below, so asserting against these keeps a margin.
     const LIGHT_SIDEBAR: &str = "#ebebeb";
     const DARK_SIDEBAR: &str = "#303030";
     /// Text-sized UI needs 4.5:1; allow a hair under for the derived hues.
     const MIN_CONTRAST: f64 = 4.0;
+    /// A status dot is a graphic, not text — WCAG asks 3:1 of it.
+    const MIN_DOT_CONTRAST: f64 = 3.0;
 
     #[test]
     fn every_accent_is_readable_in_both_schemes() {
@@ -238,31 +296,83 @@ mod tests {
         }
     }
 
+    /// The fixed status hues have no picker to escape a bad scheme with,
+    /// so they carry the same burden of proof as the palette.
     #[test]
-    fn remote_accent_is_readable_in_both_schemes() {
-        assert!(contrast(REMOTE_ACCENT, DARK_SIDEBAR) >= MIN_CONTRAST);
-        assert!(contrast(REMOTE_ACCENT_LIGHT, LIGHT_SIDEBAR) >= MIN_CONTRAST);
+    fn status_dots_are_visible_in_both_schemes() {
+        for (name, dark_hex, light_hex) in STATUS_COLORS {
+            let dark = contrast(dark_hex, DARK_SIDEBAR);
+            let light = contrast(light_hex, LIGHT_SIDEBAR);
+            assert!(
+                dark >= MIN_DOT_CONTRAST,
+                "{name} dark {dark_hex} is {dark:.2}:1 on {DARK_SIDEBAR}"
+            );
+            assert!(
+                light >= MIN_DOT_CONTRAST,
+                "{name} light {light_hex} is {light:.2}:1 on {LIGHT_SIDEBAR}"
+            );
+        }
+    }
+
+    fn accents(app: &str, local: &str, remote: &str) -> Accents {
+        Accents {
+            app: app.to_string(),
+            local: local.to_string(),
+            remote: remote.to_string(),
+        }
     }
 
     #[test]
     fn css_switches_with_the_scheme() {
-        let dark = css_for("green", true);
-        let light = css_for("green", false);
-        assert!(dark.contains("@define-color accent_color #3fb950;"));
+        let a = accents("green", "green", "yellow");
+        let dark = css_for(&a, true);
+        let light = css_for(&a, false);
+        assert!(dark.contains("@define-color accent_color #73c991;"));
         assert!(light.contains("@define-color accent_color #1a7f37;"));
-        assert!(dark.contains(&format!("remote_accent {REMOTE_ACCENT};")));
-        assert!(light.contains(&format!("remote_accent {REMOTE_ACCENT_LIGHT};")));
+        assert!(dark.contains("remote_accent #ffce5c;"));
+        assert!(light.contains("remote_accent #9a6700;"));
+        assert!(dark.contains("status_working #e0a030;"));
+        assert!(light.contains("status_working #b06a00;"));
         // The filled-button pair is scheme-independent by design.
         assert!(dark.contains("accent_bg_color #2ea043;"));
         assert!(light.contains("accent_bg_color #2ea043;"));
     }
 
-    /// An unknown name still has to define remote_accent, or remote projects
-    /// fall back to the stale dark yellow from style.css.
+    /// The shipped defaults are what the sidebar has always looked like:
+    /// running green for local, logo gold for remote. A palette edit that
+    /// moves either hue should have to say so here.
     #[test]
-    fn unknown_accent_still_defines_remote() {
-        let css = css_for("chartreuse", false);
-        assert!(css.contains(&format!("remote_accent {REMOTE_ACCENT_LIGHT};")));
+    fn defaults_keep_the_sidebar_identity_colors() {
+        let d = AppearanceSettings::default();
+        let css = css_for(
+            &accents(
+                &d.accent_color,
+                &d.local_accent_color,
+                &d.remote_accent_color,
+            ),
+            true,
+        );
+        assert!(css.contains("@define-color local_accent #73c991;"));
+        assert!(css.contains("@define-color remote_accent #ffce5c;"));
+    }
+
+    /// The three choices are independent — picking a sidebar hue must not
+    /// drag the app accent (or the other side) along with it.
+    #[test]
+    fn sidebar_accents_are_independent() {
+        let css = css_for(&accents("blue", "purple", "red"), true);
+        assert!(css.contains("@define-color local_accent #bd83d0;"));
+        assert!(css.contains("@define-color remote_accent #ee7379;"));
+        assert!(css.contains("@define-color accent_color #5d9de9;"));
+    }
+
+    /// An unknown name still has to define both sidebar colours, or the
+    /// rules using them are dropped and the sidebar loses its accents.
+    #[test]
+    fn unknown_names_fall_back_to_the_defaults() {
+        let css = css_for(&accents("chartreuse", "chartreuse", "chartreuse"), false);
+        assert!(css.contains("@define-color local_accent #1a7f37;"));
+        assert!(css.contains("@define-color remote_accent #9a6700;"));
         assert!(!css.contains("accent_color"));
     }
 }

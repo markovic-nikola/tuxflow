@@ -139,8 +139,10 @@ auto_restart = true
 | `Ctrl+Shift+F` | Terminal search |
 | `Ctrl+Up/Down` | Previous/Next process |
 | `Ctrl+Shift+Up/Down` | Previous/Next project |
+| `Ctrl+1`…`9` | Jump to Nth process |
+| `Alt+1`…`9` | Jump to Nth project |
 | `Ctrl+G` | Quick jump |
-| `Ctrl+W` | Close agent/terminal |
+| `Ctrl+Shift+W` | Close agent/terminal |
 | `Ctrl+Left/Right` | Focus sidebar/terminal |
 | `Ctrl+\` | Toggle sidebar |
 | `Ctrl+Alt+S` | Start/Stop process |
@@ -148,8 +150,9 @@ auto_restart = true
 | `Ctrl+Alt+C` | Clear output |
 | `Ctrl+=/-` | Increase/Decrease font size |
 | `Ctrl+Shift+C/V` | Copy/Paste |
+| `Ctrl+Enter` | Commit (in the git dialog) |
 
-All shortcuts are configurable via Settings > Hotkeys.
+Configurable via Settings > Hotkeys, except `Ctrl+1-9` and `Alt+1-9`, which are fixed.
 
 ## MCP Server
 

@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TuxFlow — Linux-Native Dev Environment Manager</title>
-  <meta name="description" content="Manage dev servers, AI coding agents, SSH connections, and terminals from a single GTK4 window. Built with Rust for Linux.">
+  <meta name="description" content="Manage dev servers, AI coding agents, SSH connections, and terminals from a single GTK4 window — on this machine or on a server. Built with Rust for Linux.">
   <meta property="og:title" content="TuxFlow — Linux-Native Dev Environment Manager">
-  <meta property="og:description" content="Processes, AI agents, SSH, and terminals — managed together. Native Linux desktop app built with Rust + GTK4.">
+  <meta property="og:description" content="Processes, AI agents, and terminals — local or on a remote host over SSH, managed together. Native Linux desktop app built with Rust + GTK4.">
   <meta property="og:image" content="hero.png">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
@@ -39,7 +39,7 @@
 <section class="hero" id="top">
   <div class="hero-badge"><span class="dot"></span> Built with Rust + GTK4</div>
   <h1>One window for<br>your <span class="gold">dev environment</span></h1>
-  <p class="tagline">Processes, AI agents, SSH, and terminals &mdash; managed together. A native Linux desktop app for the way you actually work.</p>
+  <p class="tagline">Processes, AI agents, and terminals &mdash; on this machine or on a server over SSH, managed together. A native Linux desktop app for the way you actually work.</p>
   <div class="cta">
     <a href="#install" class="btn btn-primary">Get Started</a>
     <a href="https://github.com/markovic-nikola/tuxflow" class="btn btn-secondary">
@@ -91,6 +91,14 @@
       </span>
       <h3>Agent Idle Alerts</h3>
       <p>Notified the moment an agent finishes its turn — terminal BEL detection plus an optional silence-based fallback, with per-agent sounds.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"></path></svg>
+      </span>
+      <h3>Message Composer</h3>
+      <p>Write to an agent in a local box under the terminal — <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line. No per-keystroke lag when the agent is on a remote host.</p>
     </div>
 
     <div class="feature-card">
@@ -162,7 +170,31 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
       </span>
       <h3>Remote Projects</h3>
-      <p>Host a project on a server over SSH. Processes run in persistent tmux sessions that survive disconnects, ports auto-tunnel to localhost, and clipboard bridges both ways.</p>
+      <p>Host a project on a server over SSH. Processes run in persistent tmux sessions, so a dropped connection or an app restart only detaches — your dev server keeps running.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
+      </span>
+      <h3>Port Tunnelling</h3>
+      <p>Every port a remote run opens is forwarded to localhost automatically — found by asking the host what is listening, not by guessing from output. The browser button just works.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+      </span>
+      <h3>Clipboard Bridge</h3>
+      <p>Select text in a remote terminal and it lands on your local clipboard. Paste a screenshot and it uploads to the host, handing the agent a path it can read.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"></path><path d="M19 10v2a7 7 0 01-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+      </span>
+      <h3>Voice Input</h3>
+      <p>Hold to talk to your coding agent — including one running on a server. Your microphone is bridged over the same SSH connection, so the remote agent records through this machine.</p>
     </div>
 
     <div class="feature-card">
@@ -170,7 +202,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"></path></svg>
       </span>
       <h3>Port &amp; URL Detection</h3>
-      <p>Smart detection scans terminal output for ports and URLs and ignores build-tool noise. <kbd>Ctrl</kbd>+click to open.</p>
+      <p>Smart detection scans terminal output for ports and URLs and ignores build-tool noise. <kbd>Ctrl</kbd>+click to open, or let a process open its URL on start.</p>
     </div>
 
     <div class="feature-card">
@@ -194,7 +226,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
       </span>
       <h3>Theming</h3>
-      <p>Dark, light, and system themes with accent colors, terminal color schemes, and font size controls.</p>
+      <p>Dark, light, and system themes with accent colors, terminal color schemes, and font size controls. Local and remote projects each get their own sidebar accent, so you always know where a project lives.</p>
     </div>
 
     <div class="feature-card">
@@ -213,6 +245,22 @@
       <p>Optional <code>tuxflow.toml</code> in your project root. Simple, human-readable, and version-controllable.</p>
     </div>
 
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+      </span>
+      <h3>Editor Handoff</h3>
+      <p>Open a project in your editor, a terminal, or your file manager. Remote projects hand off over SSH, so VS Code and friends open them on the host.</p>
+    </div>
+
+    <div class="feature-card">
+      <span class="feature-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+      </span>
+      <h3>Stays Updated</h3>
+      <p>Install from the apt repository and TuxFlow upgrades with the rest of your system. Either way, the status bar offers new releases and installs them without leaving the app.</p>
+    </div>
+
   </div>
 </section>
 
@@ -226,25 +274,43 @@
 
   <div class="install-wrap">
     <div class="install-tabs">
-      <input type="radio" name="distro" id="tab-deb" checked>
-      <label for="tab-deb">Ubuntu / Debian</label>
+      <input type="radio" name="distro" id="tab-apt" checked>
+      <label for="tab-apt">apt repository</label>
+      <input type="radio" name="distro" id="tab-deb">
+      <label for="tab-deb">Single .deb</label>
       <input type="radio" name="distro" id="tab-tarball">
       <label for="tab-tarball">Binary tarball</label>
       <input type="radio" name="distro" id="tab-source">
       <label for="tab-source">From source</label>
     </div>
 
-    <div class="install-block active" id="block-deb">
+    <div class="install-block active" id="block-apt">
+      <div class="code-block">
+        <div class="code-block-header">
+          <span class="code-block-dots"><span></span><span></span><span></span></span>
+          <span>shell</span>
+        </div>
+<pre><code>curl -fsSL https://markovic-nikola.github.io/tuxflow/KEY.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tuxflow.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/tuxflow.gpg] https://markovic-nikola.github.io/tuxflow stable main" \
+  | sudo tee /etc/apt/sources.list.d/tuxflow.list
+
+sudo apt update &amp;&amp; sudo apt install tuxflow</code></pre>
+      </div>
+      <p class="install-note">Recommended on Debian and Ubuntu. Puts TuxFlow in your normal <code>apt upgrade</code>, so new releases arrive with the rest of your system.</p>
+    </div>
+
+    <div class="install-block" id="block-deb">
       <div class="code-block">
         <div class="code-block-header">
           <span class="code-block-dots"><span></span><span></span><span></span></span>
           <span>shell</span>
         </div>
 <pre><code># Download the latest .deb from GitHub Releases
-sudo dpkg -i tuxflow_*_amd64.deb
-sudo apt-get install -f</code></pre>
+sudo apt install ./tuxflow_*_amd64.deb</code></pre>
       </div>
-      <p class="install-note">Grab the latest <code>.deb</code> from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a>.</p>
+      <p class="install-note">Grab the latest <code>.deb</code> from <a href="https://github.com/markovic-nikola/tuxflow/releases">GitHub Releases</a>. Use <code>apt install</code> rather than <code>dpkg -i</code> — it pulls in the GTK and VTE dependencies for you.</p>
     </div>
 
     <div class="install-block" id="block-tarball">

@@ -15,6 +15,8 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **Process management** — Start, stop, restart dev servers and background tasks from one place
 - **AI agent support** — Run Claude Code, Codex, Gemini CLI, OpenCode, and other AI agents side-by-side
 - **Agent idle notifications** — Get notified when an agent finishes its turn (terminal BEL + optional silence fallback), with per-agent sound overrides
+- **Message composer** — Write to an agent in a local box under the terminal (Enter sends, Shift+Enter adds a line) instead of typing into the PTY — no per-keystroke round trip when the agent runs on a remote host. Pasted images attach as chips and are delivered to the agent on send
+- **Voice input for remote agents** — Optional microphone bridge so an agent running on a server records through this machine's mic over the same SSH connection (Settings → Tools → Agents)
 - **Multi-project workspace** — Open multiple projects in one window with expandable sidebar sections, optional recently-used-first sorting, and a filter that narrows both projects and processes
 - **Remote projects (SSH)** — Open a project that lives on another machine: processes run on the host inside persistent tmux sessions, so dropped connections and app restarts just detach and reattach — dev servers keep running. Detected ports auto-tunnel to localhost, clipboard and image paste bridge both ways, and git, stack detection, and project icons all work over the same shared connection
 - **SSH connections** — Connect to remote hosts from `~/.ssh/config`, managed like any other process
@@ -23,6 +25,7 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **File watching** — Restart processes when source files change (glob patterns)
 - **Git integration** — Status, diff, commit, push, and pull from a built-in dialog; status bar shows the branch with one-click sync (fetch + pull + push) and live working-tree `+/−` line counts
 - **Stack detection** — Auto-detects your tech stack (Node.js, Rust, Go, Python, PHP/Laravel, Docker) and suggests commands
+- **Editor & terminal handoff** — Open a project in your editor (sidebar right-click), or in a terminal or file manager (Edit Project); remote projects open over SSH (`code --remote`) for code-family editors
 - **Port/URL detection** — Detects ports and URLs in terminal output, Ctrl+click to open in browser, optional per-process auto-open on start
 - **MCP server** — Exposes tools over Unix socket so AI agents can observe and control processes
 - **Command palette** — Ctrl+Shift+P fuzzy search for quick actions
@@ -31,6 +34,7 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **Keyboard-driven** — Fully configurable keyboard shortcuts
 - **Desktop notifications** — Per-project title/icon, focus-aware suppression, bundled notification sounds with picker and preview
 - **Session restore** — Window position, open projects, and process order persist across sessions
+- **In-app updates** — The status bar surfaces new releases with their notes and installs them without leaving the app, then prompts to restart. It also notices when the system's software manager upgraded TuxFlow underneath a running window
 - **TOML config** — Simple, human-readable project configuration
 - **Theming** — Dark/light/system theme, accent colors (local and remote projects get their own sidebar accent) and terminal color schemes
 

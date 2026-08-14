@@ -39,6 +39,7 @@ pub struct StatusBar {
     git_ahead: Cell<usize>,
     git_behind: Cell<usize>,
     git_syncing: Cell<bool>,
+    git_token: Cell<u64>,
     browser_btn: gtk4::Button,
     clear_btn: gtk4::Button,
     stop_btn: gtk4::Button,
@@ -233,6 +234,7 @@ impl StatusBar {
             git_ahead: Cell::new(0),
             git_behind: Cell::new(0),
             git_syncing: Cell::new(false),
+            git_token: Cell::new(0),
             browser_btn,
             clear_btn,
             stop_btn,
@@ -386,6 +388,23 @@ impl StatusBar {
                     .to_string()
             }),
         }
+    }
+
+    /// Git counters come off worker threads, and the ones that matter most
+    /// are the ones triggered right after a commit/push — where two refreshes
+    /// overlap and the older one (a `git fetch` still in flight, seconds long
+    /// on a remote project) would otherwise land last and repaint the numbers
+    /// the push just retired. Every refresh takes a token here; only the
+    /// newest holder is allowed to paint. Call it with the token dropped to
+    /// simply retire whatever is in flight (leaving a project).
+    pub fn begin_git_refresh(&self) -> u64 {
+        let token = self.git_token.get().wrapping_add(1);
+        self.git_token.set(token);
+        token
+    }
+
+    pub fn git_refresh_current(&self, token: u64) -> bool {
+        self.git_token.get() == token
     }
 
     pub fn set_git_available(&self, available: bool) {

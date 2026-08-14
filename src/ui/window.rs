@@ -961,6 +961,12 @@ impl TuxFlowWindow {
     /// refresh (remote project with the link down: up to 10 s per git call)
     /// makes it skip ticks instead of stacking a new blocked worker thread
     /// every minute; the sync button uses it to drop its spinner.
+    ///
+    /// A fetching refresh reports twice: local counts first, then again after
+    /// the fetch. Only `behind` needs the network, and the fetch is the whole
+    /// cost of the call (seconds against a remote host) — reporting after it
+    /// alone would leave the chip claiming "1 to push" for those seconds
+    /// after a push already cleared it.
     fn refresh_status_bar_git_then(
         location: crate::remote::ProjectLocation,
         status_bar: Rc<StatusBar>,
@@ -968,22 +974,34 @@ impl TuxFlowWindow {
         on_done: Option<Box<dyn FnOnce()>>,
     ) {
         type GitPoll = (usize, usize, Option<String>, (usize, usize, usize), usize);
-        let (tx, rx) = tokio::sync::oneshot::channel::<GitPoll>();
+        let token = status_bar.begin_git_refresh();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<GitPoll>();
         std::thread::spawn(move || {
+            let read = |location: &crate::remote::ProjectLocation| {
+                (
+                    commits_ahead(location),
+                    commits_behind(location),
+                    current_branch(location),
+                    diff_shortstat(location),
+                    untracked_count(location),
+                )
+            };
+            let _ = tx.send(read(&location));
             if do_fetch {
                 git_fetch(&location);
+                let _ = tx.send(read(&location));
             }
-            let _ = tx.send((
-                commits_ahead(&location),
-                commits_behind(&location),
-                current_branch(&location),
-                diff_shortstat(&location),
-                untracked_count(&location),
-            ));
         });
         glib::spawn_future_local(async move {
-            let result = rx.await;
-            if let Ok((ahead, behind, branch, (files, added, removed), untracked)) = result {
+            // Drain to the end even once superseded, so `on_done` still marks
+            // the *worker* as finished — that's what the poller's in-flight
+            // flag is counting, not who owns the chip.
+            while let Some((ahead, behind, branch, (files, added, removed), untracked)) =
+                rx.recv().await
+            {
+                if !status_bar.git_refresh_current(token) {
+                    continue;
+                }
                 status_bar.set_git_sync(ahead, behind);
                 status_bar.set_git_branch(branch.as_deref());
                 status_bar.set_git_diffstat(files, added, removed, untracked);
@@ -3427,6 +3445,11 @@ impl TuxFlowWindow {
             {
                 search_ref.set_terminal(&terminal);
             }
+            // Whatever git refresh is in flight belongs to the terminal we're
+            // leaving; retire it so it can't paint its project's counters onto
+            // the chip after the switch. Every branch below either starts its
+            // own refresh (which takes a fresh token) or clears the chip.
+            sb_vis.begin_git_refresh();
             if let Some(name) = stack.visible_child_name() {
                 if let Some((proj, _)) = name.split_once("::") {
                     title_ref.set_label(proj);

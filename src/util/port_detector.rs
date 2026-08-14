@@ -30,12 +30,21 @@ const PREFERRED_URL_LABELS: &[&str] = &["preview url"];
 /// dropping the failure line loses nothing: the line that follows carries the
 /// real port.
 const FOREIGN_PORT_PHRASES: &[&str] = &[
-    // vite: "Port 5173 is in use, trying another one..."
-    "is in use",
+    // Covers every phrasing of "someone already holds this port":
+    //   vite:  "Port 5173 is in use, trying another one..."
+    //   bun:   "error: Failed to start server. Is port 3000 in use?"
+    //   PHP:   "... (reason: Address already in use)"
+    // Match the bare phrase, not each dev server's sentence around it —
+    // "is in use" missed bun's, whose word order puts the port in between.
+    "in use",
     // PHP's built-in server, as `php artisan serve` walks --tries ports:
-    // "Failed to listen on 127.0.0.1:8000 (reason: Address already in use)"
+    // "Failed to listen on 127.0.0.1:8000 (reason: Address already in use)".
+    // Needed on its own: the multiplex TUI clips the line before the reason.
     "failed to listen",
-    "address already in use",
+    // bun/node again, for phrasings that name the port without "in use".
+    // A server that failed to start owns no port, whatever the reason.
+    "failed to start server",
+    "eaddrinuse",
 ];
 
 /// Content phrases that identify a build-tool line even without a bracket prefix.
@@ -46,9 +55,8 @@ const TOOL_CONTENT_PHRASES: &[&str] = &[
     "webpack-dev-server",
     // (vite's "is in use, trying another" lives in FOREIGN_PORT_PHRASES —
     // those lines are skipped before tool-line classification is consulted)
-    "→ local:",
-    "➜  local:",
-    "➜ local:",
+    // (vite's arrowed "➜  Local:" is matched by `is_arrowed_label`, which
+    // doesn't care which arrow glyph or how much padding vite chose)
     // `shopify app dev` infra lines: its proxy/graphiql servers start
     // seconds before the "Preview URL:" panel prints, and must not lock
     // the badge (their ports are still harvested for tunnelling).
@@ -78,6 +86,10 @@ pub struct DetectedPort {
     /// Whether the URL came from a line labeled as the primary page
     /// (see PREFERRED_URL_LABELS) — beats local detections for the badge.
     pub preferred: bool,
+    /// Whether this came off a build-tool line (vite's `➜ Local:` &c.). Such a
+    /// port badges only as a last resort, and never locks the badge — the app's
+    /// own port, printed later, still replaces it.
+    pub tool: bool,
 }
 
 impl Default for PortDetector {
@@ -112,12 +124,13 @@ impl PortDetector {
     /// Returns true once the badge is final — a local port locked, or a
     /// labeled preferred URL won. Callers can stop scanning. A plain
     /// remote-URL fallback doesn't count: it stays provisional so a later
-    /// local URL can replace it.
+    /// local URL can replace it, and neither does a build-tool port: vite
+    /// prints its address before the app server prints its own.
     pub fn badge_final(&self, process_name: &str) -> bool {
         self.ports
             .get(process_name)
             .and_then(|v| v.first())
-            .is_some_and(|p| p.local || p.preferred)
+            .is_some_and(|p| p.preferred || (p.local && !p.tool))
     }
 
     /// All distinct local ports seen in this process's output, in first-seen
@@ -164,6 +177,7 @@ impl PortDetector {
 
         let mut preferred: Vec<DetectedPort> = Vec::new();
         let mut local: Vec<DetectedPort> = Vec::new();
+        let mut tool: Vec<DetectedPort> = Vec::new();
         let mut remote: Vec<DetectedPort> = Vec::new();
 
         for line in text.lines() {
@@ -201,7 +215,25 @@ impl PortDetector {
                 }
             }
 
-            if !is_tool_line(line) {
+            if is_tool_line(line) {
+                // Last-resort tier: when the app never announces a port of its
+                // own, vite's is the only address the user can open. It stays
+                // upgradeable (see `badge_final`), so the app port still wins
+                // whenever it does arrive.
+                //
+                // Only *address* lines qualify — a dev server saying where to
+                // point a browser. The rest of the tool class is plumbing
+                // (`shopify app dev`'s proxy/graphiql servers, HMR chatter),
+                // and auto-opening those is the exact bug this tier must not
+                // reintroduce.
+                if is_local_address_line(line) {
+                    tool.extend(
+                        line_local
+                            .into_iter()
+                            .map(|d| DetectedPort { tool: true, ..d }),
+                    );
+                }
+            } else {
                 local.extend(line_local);
                 remote.extend(line_remote);
             }
@@ -215,6 +247,8 @@ impl PortDetector {
             preferred
         } else if !local.is_empty() {
             local
+        } else if !tool.is_empty() {
+            tool
         } else if !remote.is_empty() && !self.has_port(process_name) {
             remote
         } else {
@@ -328,6 +362,27 @@ fn is_preferred_line(line: &str) -> bool {
     PREFERRED_URL_LABELS.iter().any(|l| lower.contains(l))
 }
 
+/// A line's content with a leading concurrently-style `[tag]` removed, so the
+/// same shape matches whether a dev server runs alone or under a multiplexer
+/// (`  ➜  Local: …` vs `[vite]   ➜  Local: …`).
+fn without_tag(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    match trimmed
+        .strip_prefix('[')
+        .and_then(|r| r.find(']').map(|i| i + 1))
+    {
+        Some(end) => trimmed[end..].trim_start(),
+        None => trimmed,
+    }
+}
+
+/// Whether a line advertises the address a browser should open — vite's
+/// `➜  Local:   http://localhost:5173/`. Tool lines don't win the badge, but
+/// this subset of them is the fallback when nothing else claims it.
+pub(crate) fn is_local_address_line(line: &str) -> bool {
+    is_arrowed_label(without_tag(line), "local:")
+}
+
 fn is_tool_line(line: &str) -> bool {
     let trimmed = line.trim_start();
 
@@ -340,6 +395,10 @@ fn is_tool_line(line: &str) -> bool {
         }
     }
 
+    if is_local_address_line(trimmed) {
+        return true;
+    }
+
     let lower = trimmed.to_ascii_lowercase();
     for phrase in TOOL_CONTENT_PHRASES {
         if lower.contains(phrase) {
@@ -348,6 +407,29 @@ fn is_tool_line(line: &str) -> bool {
     }
 
     false
+}
+
+/// Whether a line is a dev-server summary row — an arrow glyph, padding, then
+/// `label` (`  ➜  Local:   http://localhost:5173/`).
+///
+/// Spelling these as literal phrases meant carrying one per arrow-and-padding
+/// combination, and the set was never complete: vite prints `➜` under a
+/// Unicode-capable font and `→` otherwise, so the same project badged 5173 or
+/// nothing depending on a glyph. Match the shape instead.
+fn is_arrowed_label(trimmed: &str, label: &str) -> bool {
+    // Arrows (U+2190–U+21FF), dingbat arrows (U+2794–U+27BF), plus ASCII `->`.
+    let rest = match trimmed.chars().next() {
+        Some(c)
+            if ('\u{2190}'..='\u{21FF}').contains(&c) || ('\u{2794}'..='\u{27BF}').contains(&c) =>
+        {
+            &trimmed[c.len_utf8()..]
+        }
+        _ => match trimmed.strip_prefix("->") {
+            Some(r) => r,
+            None => return false,
+        },
+    };
+    rest.trim_start().to_ascii_lowercase().starts_with(label)
 }
 
 fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<DetectedPort>) {
@@ -362,6 +444,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
                     url: Some(word.to_string()),
                     local: is_local,
                     preferred: false,
+                    tool: false,
                 };
                 if is_local {
                     local.push(detected);
@@ -382,6 +465,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
                 url: Some(format!("http://localhost:{port}")),
                 local: true,
                 preferred: false,
+                tool: false,
             });
             continue;
         }
@@ -398,6 +482,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
                     url: Some(format!("http://localhost:{port}")),
                     local: true,
                     preferred: false,
+                    tool: false,
                 });
             }
             continue;
@@ -418,6 +503,7 @@ fn scan_line(line: &str, local: &mut Vec<DetectedPort>, remote: &mut Vec<Detecte
                 url: Some(format!("http://localhost:{port}")),
                 local: true,
                 preferred: false,
+                tool: false,
             });
         }
     }

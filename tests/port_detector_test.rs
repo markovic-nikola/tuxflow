@@ -62,17 +62,37 @@ fn multiple_processes_tracked() {
 }
 
 #[test]
-fn vite_branded_output_skipped_as_tool() {
+fn vite_port_badges_but_stays_upgradeable() {
     // Vite's banner ("VITE v…") and the "→ Local:" line are tool-line markers,
-    // so port detection deliberately ignores them. This avoids picking Vite's
-    // port over the real app port in concurrently-style setups. Plain Vite
-    // projects rely on VTE's built-in URL hyperlinking instead.
+    // so they never *win* the badge over a real app port. But when nothing else
+    // claims one they're the only address the user can open, so they badge as a
+    // fallback — and stay non-final, so the app port still takes over later.
     let mut pd = PortDetector::new();
     pd.scan_output(
         "vite",
         "  VITE v7.3.1  ready in 2286ms\n\n  → Local:   http://localhost:5174/\n  → Network: use --host to expose",
     );
-    assert_eq!(pd.get_port("vite"), None);
+    assert_eq!(pd.get_port("vite"), Some(5174));
+    assert!(
+        !pd.badge_final("vite"),
+        "a tool port must not lock the badge"
+    );
+
+    pd.scan_output("vite", "Server running on http://localhost:8000\n");
+    assert_eq!(pd.get_port("vite"), Some(8000));
+    assert!(pd.badge_final("vite"));
+}
+
+#[test]
+fn vite_local_line_badges_whichever_arrow_it_prints() {
+    // vite picks `➜` or `→` by font capability, and pads to taste. Matching
+    // literal phrases made the badge depend on that glyph — same project, same
+    // port, badge or no badge.
+    for arrow in ["➜  Local:", "→  Local:", "→ Local:", "->  Local:"] {
+        let mut pd = PortDetector::new();
+        pd.scan_output("vite", &format!("  {arrow}   http://localhost:5173/\n"));
+        assert_eq!(pd.get_port("vite"), Some(5173), "arrow: {arrow:?}");
+    }
 }
 
 #[test]
@@ -148,11 +168,12 @@ fn port_is_sticky_after_buffer_scrolls() {
 }
 
 #[test]
-fn plain_vite_output_skipped() {
-    // Tool-line skipping is intentionally aggressive: even when Vite is the
-    // only thing running, its banner and "→ Local:" line are filtered out, so
-    // no port is detected. Plain-Vite users rely on VTE's built-in URL
-    // hyperlinking. Relax `is_tool_line` if this proves too aggressive.
+fn plain_vite_output_badges_as_fallback() {
+    // Vite alone: no other port will ever arrive, so its own has to badge —
+    // otherwise the row shows no port, the status bar no URL, and
+    // open-in-browser has nothing to open. (This is the "relax `is_tool_line`
+    // if it proves too aggressive" case; a bun API dying on EADDRINUSE next to
+    // vite left the project with no badge at all.)
     let mut pd = PortDetector::new();
     let output = "\
   VITE v7.3.1  ready in 2286ms
@@ -161,7 +182,8 @@ fn plain_vite_output_skipped() {
   → Network: use --host to expose
 ";
     pd.scan_output("vite", output);
-    assert_eq!(pd.get_port("vite"), None);
+    assert_eq!(pd.get_port("vite"), Some(5174));
+    assert_eq!(pd.get_url("vite"), Some("http://localhost:5174/"));
 }
 
 #[test]
@@ -279,6 +301,42 @@ fn laravel_serve_failure_line_alone_badges_nothing() {
         "   INFO  Server running on [http://localhost:8001].\n",
     );
     assert_eq!(pd.get_port("dev"), Some(8001));
+}
+
+#[test]
+fn bun_eaddrinuse_port_is_foreign() {
+    // `bun server/index.js & cd client && bun run dev`, verbatim from a real
+    // remote run: the API failed to bind because 3000 belongs to a *different*
+    // project on the same VPS, and bun — unlike vite — doesn't retry, so
+    // nothing later corrects a badge that latched 3000. It would tunnel to,
+    // and open, the neighbour's app. Only vite's 5173 is really ours here.
+    let mut pd = PortDetector::new();
+    pd.scan_output(
+        "dev",
+        "\
+  VITE v8.0.8  ready in 4219 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+
+error: Failed to start server. Is port 3000 in use?
+ syscall: \"listen\",
+   errno: 0,
+    code: \"EADDRINUSE\"
+
+      at /home/deployer/Projects/pdf_invoice/server/index.js:125:1
+",
+    );
+    let all = pd.all_local_ports("dev");
+    assert!(
+        !all.contains(&3000),
+        "must not tunnel a foreign port: {all:?}"
+    );
+    assert!(all.contains(&5173), "{all:?}");
+    // …and with the API dead, vite's port is the only thing left to badge,
+    // tunnel and open. Dropping 3000 must not leave the project blank.
+    assert_eq!(pd.get_port("dev"), Some(5173));
+    assert_eq!(pd.get_url("dev"), Some("http://localhost:5173/"));
 }
 
 #[test]

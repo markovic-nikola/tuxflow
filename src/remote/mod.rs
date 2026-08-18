@@ -170,12 +170,9 @@ pub const TMUX_SOCKET: &str = "tuxflow";
 /// the option-setting invocation exits immediately (no sessions yet) and
 /// `new-session` would boot a fresh server that never saw these options.
 /// The rest: no status bar so the pane looks like a plain terminal, mouse so
-/// the wheel scrolls tmux history, set-clipboard for terminals that honour
-/// OSC 52 (VTE doesn't — see `fetch_tmux_buffer` for the bridge we use
-/// instead), deep history for long-running dev servers. No default-shell
-/// needed — tmux
-/// always runs shell-commands via /bin/sh, so the inner wrapper is POSIX-safe
-/// regardless of the user's login shell.
+/// the wheel scrolls tmux history, deep history for long-running dev servers.
+/// No default-shell needed — tmux always runs shell-commands via /bin/sh, so
+/// the inner wrapper is POSIX-safe regardless of the user's login shell.
 ///
 /// `window-size smallest` matters when the same project is open on two
 /// machines: session names are deterministic, so both attach to the *same*
@@ -186,6 +183,19 @@ pub const TMUX_SOCKET: &str = "tuxflow";
 /// of unused margin on the larger screen. `aggressive-resize` re-fits as soon
 /// as a client detaches rather than waiting for the next window switch.
 /// (`\;` survives the remote shell as a literal `;`, chaining tmux commands.)
+///
+/// `set-clipboard on` is what makes an application's copy reachable at all.
+/// Claude Code and friends copy by emitting OSC 52 and telling the user it
+/// worked; VTE implements no OSC 52 (through 0.84), so the sequence would
+/// die at the terminal. `on` makes tmux *accept* it into a paste buffer,
+/// which is the one place the clipboard bridge can find it — with `off`
+/// tmux discards it and the agent's "copied!" is a lie. The cost is that
+/// tmux also re-emits OSC 52 outward to every attached client, so a session
+/// attached from a terminal that honours it (kitty, foot on another
+/// machine — session names are deterministic) sees copies made here. That
+/// is tolerable; publishing someone's *old* buffer as a fresh selection is
+/// not, and that is guarded by buffer age in `fetch_tmux_buffer` rather
+/// than by throwing this option away.
 const TMUX_OPTIONS: &str = "set -g exit-empty off \\; \
      set -g status off \\; set -g mouse on \\; set -g set-clipboard on \\; \
      set -g history-limit 50000 \\; set -g escape-time 10 \\; \
@@ -323,6 +333,17 @@ pub fn wrap_remote_command(
     // with), putting the finished command's output back on screen. The
     // wrapper removes its pidfile and the read exit-file on the way out so
     // /tmp doesn't accumulate a file per spawn.
+    //
+    // The gsub strips OSC 52 out of that replay. `capture-pane -e` re-emits
+    // the pane's escape sequences so colours survive, and replayed bytes are
+    // parsed by the terminal exactly like live output — a clipboard-set
+    // sequence in there would be *re-executed* at session exit, silently
+    // republishing whatever some program copied during the run over whatever
+    // the user has copied since. Nothing should put one in the capture today
+    // (tmux consumes OSC 52 rather than storing it, and `off` above means it
+    // no longer even accepts one), so this is the belt to that braces: a
+    // replay must never be able to touch the clipboard, whatever ends up in
+    // the scrollback. Both terminators are covered — BEL and ESC-backslash.
     let remote = format!(
         "cd {dir_q} && {pid_capture}\
          if command -v tmux >/dev/null 2>&1; then \
@@ -330,7 +351,8 @@ pub fn wrap_remote_command(
          tmux -L {TMUX_SOCKET} -f /dev/null start-server \\; {TMUX_OPTIONS}; \
          tmux -L {TMUX_SOCKET} new-session -A -s {session_q} -c {dir_q} {inner}; tst=$?; \
          if [ -f \"$of\" ]; then \
-         awk 'NF{{n=NR}} {{l[NR]=$0}} END{{for(i=1;i<=n;i++) print l[i]}}' \"$of\"; \
+         awk '{{gsub(/\\033\\]52;[^\\007\\033]*(\\007|\\033\\\\)/,\"\")}} \
+         NF{{n=NR}} {{l[NR]=$0}} END{{for(i=1;i<=n;i++) print l[i]}}' \"$of\"; \
          rm -f \"$of\"; fi; \
          {pid_cleanup}\
          if [ -f \"$ef\" ]; then s=\"$(cat \"$ef\")\"; rm -f \"$ef\"; exit \"$s\"; \
@@ -347,25 +369,67 @@ pub fn wrap_remote_command(
     )
 }
 
+/// The newest tmux paste buffer on a host, and how long ago tmux made it.
+pub struct TmuxBuffer {
+    pub text: String,
+    /// Age at the moment the host answered. Measured entirely on the host,
+    /// so a local clock that disagrees can't make an old buffer look new.
+    pub age: std::time::Duration,
+}
+
 /// Newest tmux paste buffer on `host` — the mouse-selection clipboard
 /// bridge. tmux stores mouse selections in its paste buffers, but no
 /// released VTE implements OSC 52 (checked through 0.84), so the selection
 /// can't reach the local clipboard through the terminal. TuxFlow fetches it
-/// after a mouse-up instead. Blocking (one ssh round trip over the warm
-/// mux) — call from a worker thread.
-pub fn fetch_tmux_buffer(host: &str) -> Option<String> {
+/// after a selection gesture instead.
+///
+/// The age comes back with it because "newest buffer" is *not* the same
+/// question as "what did the user just select". tmux keeps a stack of them:
+/// the newest may be the drag we're responding to, or it may be an OSC 52
+/// an agent sent twenty minutes ago that nothing has displaced since.
+/// Publishing the second as if it were the first is what made the clipboard
+/// revert to text nobody had selected — so the caller gets the age and
+/// decides. `#{buffer_created}` is a unix timestamp; the host's own `date`
+/// comes back in the same round trip to subtract it from.
+///
+/// Blocking (one ssh round trip over the warm mux) — worker thread only.
+pub fn fetch_tmux_buffer(host: &str) -> Option<TmuxBuffer> {
     let out = std::process::Command::new("ssh")
         .args(ssh_mux_options())
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         .arg(host)
         .arg("--")
+        // Newest first by creation time rather than by name: names are
+        // recycled (buffer0 reappears once the stack drains), so sorting
+        // them would eventually pick the wrong one.
         .arg(format!(
-            "tmux -L {TMUX_SOCKET} show-buffer 2>/dev/null; true"
+            "tmux -L {TMUX_SOCKET} list-buffers -F '#{{buffer_created}} #{{buffer_name}}' \
+             2>/dev/null | sort -rn | head -1 | \
+             {{ read -r c n || exit 0; echo \"$(date +%s) $c\"; \
+             tmux -L {TMUX_SOCKET} show-buffer -b \"$n\" 2>/dev/null; }}"
         ))
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if text.is_empty() { None } else { Some(text) }
+    parse_tmux_buffer(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Split the reply above into its `<now> <created>` header and the buffer
+/// body. Separate from the ssh call so the parsing is testable.
+fn parse_tmux_buffer(reply: &str) -> Option<TmuxBuffer> {
+    let (header, text) = reply.split_once('\n')?;
+    let (now, created) = header.split_once(' ')?;
+    let now: i64 = now.trim().parse().ok()?;
+    let created: i64 = created.trim().parse().ok()?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(TmuxBuffer {
+        text: text.to_string(),
+        // A buffer created "in the future" means the host's clock moved
+        // between the two reads; treat it as brand new rather than panic
+        // on the negative.
+        age: std::time::Duration::from_secs(now.saturating_sub(created).max(0) as u64),
+    })
 }
 
 /// Scrollback of a tmux pane on `host` (joined wrapped lines, last ~2000
@@ -809,5 +873,108 @@ mod tests {
     #[test]
     fn remote_pidfiles_are_unique() {
         assert_ne!(new_remote_pidfile(), new_remote_pidfile());
+    }
+
+    /// An agent copies by emitting OSC 52 and reporting success. VTE has no
+    /// OSC 52, so `set-clipboard on` — tmux accepting it into a paste buffer
+    /// — is the only thing standing between that and the copy vanishing.
+    /// Mouse mode matters for the same reason: it is what puts a drag's
+    /// selection into a buffer for the bridge to find.
+    #[test]
+    fn tmux_bootstrap_keeps_copies_reachable() {
+        let env = std::collections::BTreeMap::new();
+        let cmd = wrap_remote_command("box", "/srv/app", &env, "npm run dev", None, "tf-a", false);
+        assert!(cmd.contains("set-clipboard on"));
+        assert!(cmd.contains("set -g mouse on"));
+    }
+
+    /// The reply carries the host's clock and the buffer's creation time so
+    /// the caller can tell a selection just made from a buffer some program
+    /// left lying around — publishing the latter as the former is what made
+    /// the clipboard revert to text nobody selected.
+    #[test]
+    fn buffer_age_comes_from_the_hosts_own_clock() {
+        let fresh = parse_tmux_buffer("1787016638 1787016638\njust selected this").expect("parses");
+        assert_eq!(fresh.text, "just selected this");
+        assert_eq!(fresh.age.as_secs(), 0);
+
+        let stale =
+            parse_tmux_buffer("1787016638 1787015000\nan agent copied this").expect("parses");
+        assert_eq!(stale.age.as_secs(), 1638);
+    }
+
+    #[test]
+    fn buffer_text_keeps_its_own_newlines() {
+        let buf = parse_tmux_buffer("100 90\nfirst line\nsecond line\n").expect("parses");
+        assert_eq!(buf.text, "first line\nsecond line\n");
+        assert_eq!(buf.age.as_secs(), 10);
+    }
+
+    /// No buffers on the server: the reply is empty and there is nothing to
+    /// publish — not an empty string to overwrite the clipboard with.
+    #[test]
+    fn an_empty_buffer_list_yields_nothing() {
+        assert!(parse_tmux_buffer("").is_none());
+        assert!(
+            parse_tmux_buffer("100 90\n").is_none(),
+            "header but no text"
+        );
+        assert!(parse_tmux_buffer("garbage\ntext").is_none());
+    }
+
+    /// A host whose clock stepped between the two reads would otherwise
+    /// produce a negative age, and an age that underflows into "ancient"
+    /// silently disables the selection bridge.
+    #[test]
+    fn a_backwards_clock_reads_as_brand_new() {
+        let buf = parse_tmux_buffer("100 140\nselected").expect("parses");
+        assert_eq!(buf.age.as_secs(), 0);
+    }
+
+    /// Replayed scrollback is parsed exactly like live output, so an OSC 52
+    /// surviving in the capture would be *re-executed* when a session exits,
+    /// overwriting whatever the user copied since. This runs the wrapper's
+    /// real awk program — quoting and all, as the remote shell would see it
+    /// — over a capture fixture, so a regression in those escape levels
+    /// fails here rather than silently letting the sequence through.
+    #[test]
+    fn replayed_capture_cannot_set_the_clipboard() {
+        let env = std::collections::BTreeMap::new();
+        let cmd = wrap_remote_command("box", "/srv/app", &env, "npm run dev", None, "tf-a", false);
+        // Unwrap one level of sh_quote: the whole remote script is single
+        // quoted for ssh, so its own quotes arrive as '\''.
+        let start = cmd.find(r"awk '\''").expect("replay runs through awk") + r"awk '\''".len();
+        let prog = &cmd[start..];
+        let prog = &prog[..prog.find(r#"'\'' "$of""#).expect("awk program ends")];
+        assert!(!prog.contains('\''), "program can't be re-quoted safely");
+
+        let fixture = std::env::temp_dir().join(format!("tuxflow-capture-{}", std::process::id()));
+        std::fs::write(
+            &fixture,
+            "plain \x1b[31mred\x1b[0m line\n\
+             \x1b]52;c;aGVsbG8=\x07after-bel\n\
+             \x1b]52;c;d29ybGQ=\x1b\\after-st\n\n\n",
+        )
+        .expect("write capture fixture");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "awk '{prog}' {}",
+                sh_quote(&fixture.to_string_lossy())
+            ))
+            .output()
+            .expect("run the replay filter");
+        let _ = std::fs::remove_file(&fixture);
+        let replayed = String::from_utf8_lossy(&out.stdout);
+
+        assert!(!replayed.contains("]52;"), "OSC 52 survived: {replayed:?}");
+        // Everything else is untouched: colours still render, the text that
+        // followed the stripped sequence stays, blank tail rows still go.
+        assert!(replayed.contains("\x1b[31mred\x1b[0m"));
+        assert!(replayed.contains("after-bel") && replayed.contains("after-st"));
+        assert!(
+            replayed.ends_with("after-st\n"),
+            "tail rows kept: {replayed:?}"
+        );
     }
 }

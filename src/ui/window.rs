@@ -35,6 +35,82 @@ use crate::workspace::{self, Workspace, WorkspaceRef};
 /// contents and rekeying this registry.
 type ProjectNameCells = Rc<RefCell<HashMap<String, Rc<RefCell<String>>>>>;
 
+/// Decides which terminal mouse gestures may publish a tmux selection.
+///
+/// tmux only stores a paste buffer for a drag (`MouseDragEnd1Pane`) or a
+/// double/triple click (its word and line copies). Every other button release
+/// — a click to focus a pane, a right-click, the click that dismisses a menu
+/// — leaves tmux's buffer exactly as it was, so treating one as a selection
+/// republishes text the user chose minutes ago over whatever they have
+/// selected *now*. That is the whole bug: the gesture that overwrote the
+/// selection wasn't a selection.
+///
+/// GTK4 dropped the multi-press event types, and GtkGestureClick (where the
+/// click counting moved) is unusable here — VTE claims mouse sequences for
+/// mouse-tracking apps and a claimed sequence cancels other gestures. So a
+/// click sequence is recognised the way GTK recognises one: same spot, within
+/// the double-click interval.
+/// Why the bridge is fetching a tmux buffer, which decides what it may do
+/// with it — see `tmux_buffer_to_clipboard`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClipRoute {
+    /// A selection gesture just finished in a remote pane. Publishes only a
+    /// buffer tmux made for it, to CLIPBOARD and PRIMARY both.
+    Selection,
+    /// The user pressed copy. Takes the newest buffer at any age — a
+    /// copy-mode `y`, or an OSC 52 the agent in the pane sent.
+    ExplicitCopy,
+}
+
+#[derive(Debug)]
+struct SelectionGesture {
+    /// Where and when the last button press landed.
+    press: Option<(f64, f64, u32)>,
+    /// That press hasn't been released yet.
+    armed: bool,
+    /// ...and it continued a click sequence (double/triple click).
+    multi: bool,
+    double_click_ms: u32,
+    double_click_px: f64,
+}
+
+impl SelectionGesture {
+    /// Pointer travel that separates a drag from a click that wobbled. Mouse
+    /// reporting is per cell, so tmux cannot have begun a selection below one
+    /// cell of movement — this only has to clear jitter.
+    const DRAG_PX: f64 = 4.0;
+
+    fn new(double_click_ms: u32, double_click_px: f64) -> Self {
+        Self {
+            press: None,
+            armed: false,
+            multi: false,
+            double_click_ms,
+            double_click_px,
+        }
+    }
+
+    fn press(&mut self, x: f64, y: f64, time: u32) {
+        let previous = self.press.replace((x, y, time));
+        self.multi = previous.is_some_and(|(px, py, pt)| {
+            time.wrapping_sub(pt) <= self.double_click_ms
+                && (x - px).abs() <= self.double_click_px
+                && (y - py).abs() <= self.double_click_px
+        });
+        self.armed = true;
+    }
+
+    /// Whether the gesture ending here could have left a new tmux selection.
+    /// Consumes the press, so one press publishes at most once.
+    fn release(&mut self, x: f64, y: f64) -> bool {
+        let Some((px, py, _)) = self.press else {
+            return false;
+        };
+        std::mem::replace(&mut self.armed, false)
+            && (self.multi || (x - px).abs() > Self::DRAG_PX || (y - py).abs() > Self::DRAG_PX)
+    }
+}
+
 pub struct TuxFlowWindow;
 
 impl TuxFlowWindow {
@@ -844,6 +920,66 @@ impl TuxFlowWindow {
             },
         );
         true
+    }
+
+    /// Hand the newest tmux paste buffer on `host` to the local clipboard.
+    ///
+    /// The hard part isn't fetching it, it's knowing whether it's *ours*.
+    /// `tmux show-buffer` always answers, and answers with the newest buffer
+    /// on that server — which might be the drag that just finished, or might
+    /// be an OSC 52 an agent sent half an hour ago that nothing has
+    /// displaced since. The old bridge couldn't tell, so it published the
+    /// second as if it were the first, and the user's clipboard reverted to
+    /// scrollback they never selected. Hence `route`.
+    fn tmux_buffer_to_clipboard(host: &str, route: ClipRoute, seen: Option<Rc<Cell<u64>>>) {
+        /// How recently tmux must have made a buffer for a selection gesture
+        /// to claim it. Generous next to the ~0.5 s the gesture's own delay
+        /// and ssh round trip cost, but far below the minutes-old buffers
+        /// this exists to reject.
+        const SELECTION_MAX_AGE: Duration = Duration::from_secs(5);
+
+        let host = host.to_string();
+        crate::util::worker::run(
+            move || crate::remote::fetch_tmux_buffer(&host),
+            move |buf| {
+                let Some(buf) = buf else {
+                    log::debug!("clipboard bridge: no tmux buffer");
+                    return;
+                };
+                // A gesture only gets to publish a buffer tmux made *for
+                // that gesture*. An explicit copy asks for the newest buffer
+                // whatever its age — that is also how an agent's OSC 52 copy
+                // is collected, since nothing else knows it happened.
+                if route == ClipRoute::Selection && buf.age > SELECTION_MAX_AGE {
+                    log::debug!(
+                        "clipboard bridge: newest buffer is {}s old, not this selection",
+                        buf.age.as_secs()
+                    );
+                    return;
+                }
+                let hash = Self::tmux_buffer_hash(&buf.text);
+                if let Some(seen) = seen
+                    && seen.replace(hash) == hash
+                {
+                    log::debug!("clipboard bridge: buffer unchanged");
+                    return;
+                }
+                let Some(display) = gtk4::gdk::Display::default() else {
+                    return;
+                };
+                log::debug!(
+                    "clipboard bridge: copied {} bytes ({route:?})",
+                    buf.text.len()
+                );
+                display.clipboard().set_text(&buf.text);
+                // A selection belongs in PRIMARY too — that's where a local
+                // VTE drag puts it, so middle-click paste behaves the same
+                // on a remote pane as on a local one.
+                if route == ClipRoute::Selection {
+                    display.primary_clipboard().set_text(&buf.text);
+                }
+            },
+        );
     }
 
     /// Change-detection hash for the tmux clipboard bridge — only stability
@@ -1784,10 +1920,10 @@ impl TuxFlowWindow {
         }
 
         // Clipboard bridge for tmux mouse-selections (no released VTE
-        // implements OSC 52): after a mouse-up on a remote terminal, fetch
-        // the newest tmux paste buffer and put it in the local clipboard if
-        // it changed. Primed at load so a stale buffer from a previous
-        // session doesn't clobber the clipboard on startup.
+        // implements OSC 52): after a selection gesture on a remote terminal,
+        // fetch the newest tmux paste buffer and copy it locally if it is
+        // both new and this gesture's. Primed at load so a buffer left over
+        // from a previous session can't be published as a fresh selection.
         let clip_host: Option<String> = manager.borrow().location().host().map(str::to_string);
         let clip_hash: Rc<Cell<u64>> = Rc::new(Cell::new(0));
         if let Some(host) = clip_host.clone() {
@@ -1795,8 +1931,8 @@ impl TuxFlowWindow {
             crate::util::worker::run(
                 move || crate::remote::fetch_tmux_buffer(&host),
                 move |buf| {
-                    if let Some(text) = buf {
-                        clip_hash.set(Self::tmux_buffer_hash(&text));
+                    if let Some(buf) = buf {
+                        clip_hash.set(Self::tmux_buffer_hash(&buf.text));
                     }
                 },
             );
@@ -2020,8 +2156,11 @@ impl TuxFlowWindow {
                     }
 
                     // Remote: bridge tmux mouse-selections to the local
-                    // clipboard. A drag-selection always ends with a button
-                    // release; shortly after, pull the newest tmux buffer.
+                    // PRIMARY selection, where a local terminal's drag-
+                    // selection also lands (see `tmux_buffer_to_selection`
+                    // for why it must stay off CLIPBOARD), and only for
+                    // gestures that could have made one (`SelectionGesture`).
+                    //
                     // EventControllerLegacy, not a gesture: VTE claims mouse
                     // sequences (always, for tmux/mouse-tracking apps) and a
                     // claimed sequence cancels other gestures — their
@@ -2029,39 +2168,46 @@ impl TuxFlowWindow {
                     // raw events without joining gesture claiming.
                     if let Some(host) = clip_host_mat.clone() {
                         let clip_hash = clip_hash_mat.clone();
+                        let gesture = Rc::new(RefCell::new(SelectionGesture::new(
+                            gtk4::Settings::default()
+                                .map(|s| s.gtk_double_click_time() as u32)
+                                .unwrap_or(400),
+                            gtk4::Settings::default()
+                                .map(|s| s.gtk_double_click_distance() as f64)
+                                .unwrap_or(5.0),
+                        )));
                         let ctrl = gtk4::EventControllerLegacy::new();
                         ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
                         ctrl.connect_event(move |_, event| {
-                            if event.event_type() != gtk4::gdk::EventType::ButtonRelease {
+                            let Some((x, y)) = event.position() else {
                                 return glib::Propagation::Proceed;
-                            }
-                            log::debug!("clipboard bridge: button release, fetching tmux buffer");
-                            let host = host.clone();
-                            let clip_hash = clip_hash.clone();
-                            // Give tmux a beat to store the buffer on drag-end
-                            glib::timeout_add_local_once(Duration::from_millis(150), move || {
-                                let fetch_host = host.clone();
-                                crate::util::worker::run(
-                                    move || crate::remote::fetch_tmux_buffer(&fetch_host),
-                                    move |buf| {
-                                        let Some(text) = buf else {
-                                            log::debug!("clipboard bridge: no tmux buffer");
-                                            return;
-                                        };
-                                        let hash = Self::tmux_buffer_hash(&text);
-                                        if clip_hash.replace(hash) == hash {
-                                            log::debug!("clipboard bridge: buffer unchanged");
-                                        } else if let Some(display) = gtk4::gdk::Display::default()
-                                        {
-                                            log::debug!(
-                                                "clipboard bridge: copied {} bytes",
-                                                text.len()
+                            };
+                            match event.event_type() {
+                                gdk::EventType::ButtonPress => {
+                                    gesture.borrow_mut().press(x, y, event.time());
+                                }
+                                gdk::EventType::ButtonRelease
+                                    if gesture.borrow_mut().release(x, y) =>
+                                {
+                                    log::debug!(
+                                        "clipboard bridge: selection gesture, fetching tmux buffer"
+                                    );
+                                    let host = host.clone();
+                                    let clip_hash = clip_hash.clone();
+                                    // Give tmux a beat to store the buffer
+                                    glib::timeout_add_local_once(
+                                        Duration::from_millis(150),
+                                        move || {
+                                            Self::tmux_buffer_to_clipboard(
+                                                &host,
+                                                ClipRoute::Selection,
+                                                Some(clip_hash),
                                             );
-                                            display.clipboard().set_text(&text);
-                                        }
-                                    },
-                                );
-                            });
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
                             glib::Propagation::Proceed
                         });
                         terminal.add_controller(ctrl);
@@ -3725,7 +3871,27 @@ impl TuxFlowWindow {
                         if let Some(child) = stack_ref.visible_child()
                             && let Ok(terminal) = child.downcast::<vte4::Terminal>()
                         {
-                            terminal.copy_clipboard_format(vte4::Format::Text);
+                            // In a remote pane tmux owns the mouse, so the
+                            // selection the user is looking at lives in a
+                            // tmux paste buffer and VTE has none of its own
+                            // — which is why this asks VTE first: a
+                            // Shift-drag bypasses mouse reporting and does
+                            // select locally. Being explicit, this route
+                            // accepts a buffer of any age, so it collects a
+                            // copy-mode `y` (no mouse gesture to hang off)
+                            // and an agent's OSC 52 copy alike.
+                            if !terminal.has_selection()
+                                && let Some((host, _)) =
+                                    Self::remote_paste_target(&ws_ref, &stack_ref)
+                            {
+                                Self::tmux_buffer_to_clipboard(
+                                    &host,
+                                    ClipRoute::ExplicitCopy,
+                                    None,
+                                );
+                            } else {
+                                terminal.copy_clipboard_format(vte4::Format::Text);
+                            }
                         }
                     }
                     ShortcutAction::Paste => {
@@ -4835,4 +5001,91 @@ fn wait_http_ready(url: &str, timeout: std::time::Duration) {
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
     log::info!("auto-open: {url} still not healthy after {timeout:?}, opening anyway");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SelectionGesture;
+
+    /// GTK defaults, so the numbers below read like real interactions.
+    fn gesture() -> SelectionGesture {
+        SelectionGesture::new(400, 5.0)
+    }
+
+    /// The regression that started all this: a click that merely focuses a
+    /// pane changes nothing in tmux, so publishing on it re-asserts an old
+    /// selection over whatever the user has selected since.
+    #[test]
+    fn a_plain_click_publishes_nothing() {
+        let mut g = gesture();
+        g.press(100.0, 100.0, 1_000);
+        assert!(!g.release(100.0, 100.0));
+        // Even with the hand shaking a little.
+        g.press(100.0, 100.0, 5_000);
+        assert!(!g.release(102.0, 97.0));
+    }
+
+    #[test]
+    fn a_drag_publishes() {
+        let mut g = gesture();
+        g.press(100.0, 100.0, 1_000);
+        assert!(g.release(240.0, 100.0), "horizontal drag");
+        g.press(100.0, 100.0, 5_000);
+        assert!(g.release(100.0, 134.0), "drag down a few rows");
+    }
+
+    /// tmux copies a word on double-click and a line on triple-click, both
+    /// without moving the pointer — the gate has to let those through or
+    /// they'd never reach the local selection.
+    #[test]
+    fn a_click_sequence_publishes_from_the_second_click() {
+        let mut g = gesture();
+        g.press(100.0, 100.0, 1_000);
+        assert!(!g.release(100.0, 100.0), "first click of the pair");
+        g.press(101.0, 100.0, 1_200);
+        assert!(g.release(101.0, 100.0), "double click");
+        g.press(101.0, 100.0, 1_400);
+        assert!(g.release(101.0, 100.0), "triple click");
+    }
+
+    /// Two separate clicks in the same spot are not a double click, however
+    /// patient the user is — nor are two quick clicks in different spots.
+    #[test]
+    fn clicks_far_apart_in_time_or_space_stay_clicks() {
+        let mut g = gesture();
+        g.press(100.0, 100.0, 1_000);
+        assert!(!g.release(100.0, 100.0));
+        g.press(100.0, 100.0, 1_401);
+        assert!(!g.release(100.0, 100.0), "past the double-click interval");
+
+        let mut g = gesture();
+        g.press(100.0, 100.0, 1_000);
+        assert!(!g.release(100.0, 100.0));
+        g.press(140.0, 100.0, 1_100);
+        assert!(!g.release(140.0, 100.0), "past the double-click distance");
+    }
+
+    /// A release the press of which we never saw — pointer pressed in another
+    /// window and dragged in, or a grab broken mid-gesture — decides nothing.
+    /// Nor does a second release for one press.
+    #[test]
+    fn a_release_needs_its_own_press() {
+        let mut g = gesture();
+        assert!(!g.release(400.0, 400.0), "no press at all");
+        g.press(100.0, 100.0, 1_000);
+        assert!(g.release(300.0, 100.0));
+        assert!(!g.release(300.0, 100.0), "press already consumed");
+    }
+
+    /// X server timestamps are milliseconds in a u32 and do wrap (~49 days of
+    /// uptime). A wrap must not turn every click into a double click.
+    #[test]
+    fn timestamps_may_wrap() {
+        let mut g = gesture();
+        g.press(100.0, 100.0, u32::MAX - 100);
+        assert!(!g.release(100.0, 100.0));
+        // 200ms later, on the other side of the wrap: still a double click.
+        g.press(100.0, 100.0, 99);
+        assert!(g.release(100.0, 100.0));
+    }
 }

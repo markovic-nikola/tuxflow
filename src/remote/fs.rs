@@ -92,9 +92,11 @@ pub fn list_remote_dirs(host: &str, prefix: &str) -> Vec<String> {
 }
 
 /// Directories (for descending) plus image files — the completion set for
-/// the remote icon picker in Edit Project.
+/// the remote icon picker. The cap is generous because that picker is a
+/// scrolling dialog rather than a dropdown: a cap tuned to what fits on
+/// screen would hide entries in any directory bigger than the viewport.
 pub fn list_remote_icon_paths(host: &str, prefix: &str) -> Vec<String> {
-    list_remote_raw(host, prefix, Some(r"(/|\.(svg|png|webp|ico|jpe?g))$"), 20)
+    list_remote_raw(host, prefix, Some(r"(/|\.(svg|png|webp|ico|jpe?g))$"), 100)
 }
 
 /// Fetch a remote file's bytes (capped at `max_bytes`) over the shared

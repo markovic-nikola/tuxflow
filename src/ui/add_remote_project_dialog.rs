@@ -1,14 +1,14 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
-use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
 use crate::config::ssh::parse_ssh_config;
 use crate::remote::fs::list_remote_dirs;
+use crate::ui::path_completion;
 
 /// Debounce for path autocompletion — long enough to skip probing on every
 /// keystroke, short enough to feel live over a warm ControlMaster connection.
@@ -131,73 +131,33 @@ impl AddRemoteProjectDialog {
         let v = validate.clone();
         path_row.connect_changed(move |_| v());
 
-        // Path autocompletion: debounce keystrokes, list matching remote
-        // directories on a worker thread, drop stale results by generation.
-        // Only fires once the host field is filled — over the warm
-        // ControlMaster connection each probe is a few tens of ms.
-        let suggest_gen: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+        // Path autocompletion. Only fires once the host field is filled —
+        // over the warm ControlMaster connection each probe is a few tens
+        // of ms.
         {
             let host_row = host_row.clone();
-            let suggestions_list = suggestions_list.clone();
-            let suggestions_scroll = suggestions_scroll.clone();
-            let suggest_gen = suggest_gen.clone();
+            let scroll = suggestions_scroll.clone();
             let dialog = dialog.clone();
-            path_row.connect_changed(move |row| {
-                let my_gen = suggest_gen.get() + 1;
-                suggest_gen.set(my_gen);
-
-                let prefix = row.text().to_string();
-                let host = host_row.text().trim().to_string();
-                if host.is_empty() || !prefix.starts_with('/') {
-                    suggestions_scroll.set_visible(false);
-                    dialog.set_content_height(COMPACT_HEIGHT);
-                    return;
-                }
-
-                let gen_at_fire = suggest_gen.clone();
-                let list = suggestions_list.clone();
-                let scroll = suggestions_scroll.clone();
-                let dialog = dialog.clone();
-                glib::timeout_add_local_once(
-                    Duration::from_millis(SUGGEST_DEBOUNCE_MS),
-                    move || {
-                        if gen_at_fire.get() != my_gen {
-                            return; // superseded by a newer keystroke
-                        }
-                        crate::util::worker::run(
-                            move || list_remote_dirs(&host, &prefix),
-                            move |dirs| {
-                                if gen_at_fire.get() != my_gen {
-                                    return; // superseded while probing
-                                }
-                                while let Some(child) = list.first_child() {
-                                    list.remove(&child);
-                                }
-                                for dir in &dirs {
-                                    let label = gtk4::Label::builder()
-                                        .label(dir)
-                                        .xalign(0.0)
-                                        .ellipsize(gtk4::pango::EllipsizeMode::Start)
-                                        .margin_start(12)
-                                        .margin_end(12)
-                                        .margin_top(8)
-                                        .margin_bottom(8)
-                                        .build();
-                                    let row = gtk4::ListBoxRow::new();
-                                    row.set_child(Some(&label));
-                                    list.append(&row);
-                                }
-                                scroll.set_visible(!dirs.is_empty());
-                                dialog.set_content_height(if dirs.is_empty() {
-                                    COMPACT_HEIGHT
-                                } else {
-                                    EXPANDED_HEIGHT
-                                });
-                            },
-                        );
-                    },
-                );
-            });
+            path_completion::attach(
+                &path_row,
+                &suggestions_list,
+                Duration::from_millis(SUGGEST_DEBOUNCE_MS),
+                move |prefix| {
+                    let host = host_row.text().trim().to_string();
+                    if host.is_empty() || !prefix.starts_with('/') {
+                        return None;
+                    }
+                    Some(move || list_remote_dirs(&host, &prefix))
+                },
+                move |dirs| {
+                    scroll.set_visible(!dirs.is_empty());
+                    dialog.set_content_height(if dirs.is_empty() {
+                        COMPACT_HEIGHT
+                    } else {
+                        EXPANDED_HEIGHT
+                    });
+                },
+            );
         }
 
         // Clicking a suggestion fills the path field (which re-triggers the
@@ -205,8 +165,7 @@ impl AddRemoteProjectDialog {
         {
             let path_row = path_row.clone();
             suggestions_list.connect_row_activated(move |_, row| {
-                if let Some(label) = row.child().and_downcast::<gtk4::Label>() {
-                    let dir = label.text().to_string();
+                if let Some(dir) = path_completion::row_path(row) {
                     path_row.set_text(&dir);
                     path_row.set_position(-1);
                     path_row.grab_focus();

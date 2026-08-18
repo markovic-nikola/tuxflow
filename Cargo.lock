@@ -2184,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "tuxflow"
-version = "0.1.68"
+version = "0.1.69"
 dependencies = [
  "anyhow",
  "dirs",

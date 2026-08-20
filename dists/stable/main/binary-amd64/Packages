@@ -1,0 +1,105 @@
+Package: tuxflow
+Architecture: amd64
+Version: 0.1.66-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 11535
+Depends: libadwaita-1-0 (>= 1.5), libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.34), libc6 (>= 2.39), libcairo2 (>= 1.2.4), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.12.0), libgtk-4-1 (>= 4.14), libpango-1.0-0 (>= 1.14.0), libvte-2.91-gtk4-0, libvte-2.91-gtk4-0 (>= 0.71.92), libx11-6
+Filename: pool/main/t/tuxflow/tuxflow_0.1.66-1_amd64.deb
+Size: 3606460
+MD5sum: 8ee22fb33835c480f31023baa4f793dc
+SHA1: 7873eef5acd823de91262e2d4ba32c674aec6f2e
+SHA256: af83e5563d8925f214c9b53d8b46df3bf4cfbd5ec8b021cfe7399f0dd40e36de
+SHA512: 657e891b83602daafde5b8bc3aaeaae76084d92155a11970778ddbba98acbe16419b3f430c4f13b2608c8e24cfe976eb11afd7b123d2eceb97dd261a5461aaae
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ monitor process status and resource usage, and expose an MCP server so AI
+ agents can observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.1.67-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 11547
+Depends: libadwaita-1-0 (>= 1.5), libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.34), libc6 (>= 2.39), libcairo2 (>= 1.2.4), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.12.0), libgtk-4-1 (>= 4.14), libpango-1.0-0 (>= 1.14.0), libvte-2.91-gtk4-0, libvte-2.91-gtk4-0 (>= 0.71.92), libx11-6
+Filename: pool/main/t/tuxflow/tuxflow_0.1.67-1_amd64.deb
+Size: 3607340
+MD5sum: 83895d3f727afaba6ae080587c880c00
+SHA1: f04079ac300e5598730ff716bfe343f31c1b830b
+SHA256: 588673dafaacf4011bc93a7b0f61aa5eaea7b42e2fd79fd926cb8c629f5f40ec
+SHA512: 2c917bdc66cc06365219d7aa608c9e7e05c81b1d623107f89edcff812bd6867be5dd7940cde4b658e9e9b4e404076943a56593caa226982e0ad6663f15971585
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ monitor process status and resource usage, and expose an MCP server so AI
+ agents can observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.1.68-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 11544
+Depends: libadwaita-1-0 (>= 1.5), libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.34), libc6 (>= 2.39), libcairo2 (>= 1.2.4), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.12.0), libgtk-4-1 (>= 4.14), libpango-1.0-0 (>= 1.14.0), libvte-2.91-gtk4-0, libvte-2.91-gtk4-0 (>= 0.71.92), libx11-6
+Filename: pool/main/t/tuxflow/tuxflow_0.1.68-1_amd64.deb
+Size: 3608896
+MD5sum: 752a52581c0036933dcf47502dc44d86
+SHA1: d964eb3a2e2141609b5a78e367e21bd999e18c20
+SHA256: 197d6f8a399c752c70fd145d73bc831bf9a5b6322f51e03d92fd29d8663155c9
+SHA512: 7ceb8114d3eb07cfa08fa17dad2a3e79b6592ac94b6cba4e4f6b7f767d2dc30873aec84f82276eca73c6e1971f35cb5d9dd763deb7fe6631e29ddf103ea2ff36
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ monitor process status and resource usage, and expose an MCP server so AI
+ agents can observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.1.69-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 11548
+Depends: libadwaita-1-0 (>= 1.5), libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.34), libc6 (>= 2.39), libcairo2 (>= 1.2.4), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.12.0), libgtk-4-1 (>= 4.14), libpango-1.0-0 (>= 1.14.0), libvte-2.91-gtk4-0, libvte-2.91-gtk4-0 (>= 0.71.92), libx11-6
+Filename: pool/main/t/tuxflow/tuxflow_0.1.69-1_amd64.deb
+Size: 3611388
+MD5sum: 45d0a71d62609664ac4ab48fd79984f9
+SHA1: 799d111e2153db7d0c64e12e675aaa56c74b1aee
+SHA256: 88c1475843816a0aebfeeee1fc278db5fbc4105be1f89ad9a6fa12848c053497
+SHA512: 80e1373e8f59b43172b7bf07ba5ced3ee3d18773fa641f0b47d02e5ad9fa8f4b21efc5a8760cb0fbafe2c0dc4e7f727b33c78cc4fe0ca86916fdde326074dfea
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ monitor process status and resource usage, and expose an MCP server so AI
+ agents can observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.1.70-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 11627
+Depends: libadwaita-1-0 (>= 1.5), libadwaita-1-0 (>= 1.5~beta), libc6 (>= 2.34), libc6 (>= 2.39), libcairo2 (>= 1.2.4), libglib2.0-0t64 (>= 2.54.0), libgraphene-1.0-0 (>= 1.5.4), libgtk-4-1 (>= 4.12.0), libgtk-4-1 (>= 4.14), libpango-1.0-0 (>= 1.14.0), libvte-2.91-gtk4-0, libvte-2.91-gtk4-0 (>= 0.71.92), libx11-6
+Filename: pool/main/t/tuxflow/tuxflow_0.1.70-1_amd64.deb
+Size: 3631136
+MD5sum: dbff88b4149b35c8108e09341565a723
+SHA1: ffa42637c744c623576f5e5687f011318513a5ca
+SHA256: ec3b9d61b0d1eee07c91ea5338ccb6d4f04fb7251747f5bbc07089ab613e5158
+SHA512: 1d73fc82ac9d56f27ca73f6ed1add98342009ee585ecab12f3cd18867b3ad63047f9b3b58da5b8b8ea9ddd34721e33f6c1af68217ff49d7063cebfcde05e3aa9
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ monitor process status and resource usage, and expose an MCP server so AI
+ agents can observe and control neighboring processes.
+

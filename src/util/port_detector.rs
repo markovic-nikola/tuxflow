@@ -534,6 +534,37 @@ pub(crate) fn extract_host_port_from_url(url: &str) -> Option<(String, u16)> {
     }
 }
 
+/// Rewrite a Ctrl+clicked URL through a remote project's tunnel map. A URL
+/// a remote process prints names a port on the *ssh host* — opened verbatim
+/// it hits whatever happens to sit on that local port (typically another
+/// project's forward, since a collision is exactly what makes the tunnel
+/// remap). `lookup` maps the remote port to the local end of its forward
+/// and may create one on demand. Non-local hosts pass through untouched
+/// (public URLs mean what they say), as do URLs without an explicit port:
+/// `http://localhost/` parses to :80, but there is no ":80" in the text to
+/// rewrite, so a forward for it could never be reached by this URL anyway.
+pub fn rewrite_clicked_url(url: &str, lookup: impl FnOnce(u16) -> Option<u16>) -> String {
+    let owned;
+    // VTE's second match pattern is a bare `localhost:\d+` — give it a
+    // scheme so one parser serves both.
+    let target = if url.contains("://") {
+        url
+    } else {
+        owned = format!("http://{url}");
+        &owned
+    };
+    let Some((host, port)) = extract_host_port_from_url(target) else {
+        return url.to_string();
+    };
+    if !is_local_host(&host) || !url.contains(&format!(":{port}")) {
+        return url.to_string();
+    }
+    match lookup(port) {
+        Some(local) if local != port => remap_url_port(url, port, local),
+        _ => url.to_string(),
+    }
+}
+
 /// Rewrite `:{from}` to `:{to}` in a URL, but only where the port number
 /// actually ends there — a plain string replace would corrupt
 /// `http://localhost:8080` when remapping port 80. Used when a remote

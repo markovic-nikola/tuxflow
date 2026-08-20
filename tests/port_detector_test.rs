@@ -422,6 +422,63 @@ fn remap_url_port_replaces_exact_port_only() {
 }
 
 #[test]
+fn clicked_url_rewrites_through_tunnel_map() {
+    use tuxflow::util::port_detector::rewrite_clicked_url;
+    // Remapped forward: the printed port must become the local end.
+    assert_eq!(
+        rewrite_clicked_url("http://localhost:8000/login", |p| {
+            assert_eq!(p, 8000);
+            Some(42345)
+        }),
+        "http://localhost:42345/login"
+    );
+    // 1:1 forward: nothing to rewrite.
+    assert_eq!(
+        rewrite_clicked_url("http://localhost:5173/", |_| Some(5173)),
+        "http://localhost:5173/"
+    );
+    // Tunnel failed to come up: open verbatim rather than not at all.
+    assert_eq!(
+        rewrite_clicked_url("http://localhost:5173/", |_| None),
+        "http://localhost:5173/"
+    );
+    // All three local spellings route through the map.
+    assert_eq!(
+        rewrite_clicked_url("http://127.0.0.1:9292", |_| Some(9293)),
+        "http://127.0.0.1:9293"
+    );
+    assert_eq!(
+        rewrite_clicked_url("http://0.0.0.0:4000/x", |_| Some(4001)),
+        "http://0.0.0.0:4001/x"
+    );
+    // VTE's bare `localhost:\d+` match form (no scheme).
+    assert_eq!(
+        rewrite_clicked_url("localhost:3000", |_| Some(3001)),
+        "localhost:3001"
+    );
+}
+
+#[test]
+fn clicked_url_leaves_foreign_and_portless_urls_alone() {
+    use tuxflow::util::port_detector::rewrite_clicked_url;
+    // Public URLs mean what they say — the lookup must not even run,
+    // or the click would spawn a tunnel to a port nothing local needs.
+    assert_eq!(
+        rewrite_clicked_url("https://x.trycloudflare.com/admin", |_| panic!(
+            "lookup ran for a public URL"
+        )),
+        "https://x.trycloudflare.com/admin"
+    );
+    // Implicit :80 has no ":80" text to rewrite — pass through untouched.
+    assert_eq!(
+        rewrite_clicked_url("http://localhost/status", |_| panic!(
+            "lookup ran for a portless URL"
+        )),
+        "http://localhost/status"
+    );
+}
+
+#[test]
 fn oauth_link_does_not_lock_out_later_local_url() {
     // Regression: `shopify theme dev` prints its login URL before the dev
     // server URL. The public auth link must stay provisional so the real

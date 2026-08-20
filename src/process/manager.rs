@@ -11,6 +11,12 @@ use crate::config::schema::{ProcessCategory, ProcessConfig};
 use crate::config::settings::AppSettings;
 use crate::remote::ProjectLocation;
 
+/// Rewrites a matched URL just before Ctrl+click opens it. Remote projects
+/// install one in the wiring factory (window.rs) that routes localhost URLs
+/// through the tunnel map — the printed port is the ssh host's, not ours.
+/// Local projects leave it unset.
+pub type UrlRewriter = Rc<dyn Fn(&str) -> String>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStatus {
     Stopped,
@@ -70,6 +76,9 @@ pub struct ManagedProcess {
     /// grace window in which a provisional URL may still be upgraded (e.g.
     /// `shopify app dev` prints tunnel URLs before its "Preview URL:").
     pub auto_open_first_url: Option<Instant>,
+    /// See [`UrlRewriter`]. Set by the wiring factory before the terminal
+    /// materializes; captured by the Ctrl+click gesture at creation.
+    pub url_rewriter: Option<UrlRewriter>,
 }
 
 impl ManagedProcess {
@@ -95,6 +104,7 @@ impl ManagedProcess {
             remote_fresh_next: false,
             auto_open_armed: false,
             auto_open_first_url: None,
+            url_rewriter: None,
         }
     }
 
@@ -102,7 +112,7 @@ impl ManagedProcess {
     /// Fires the `on_materialized` callback on first creation.
     pub fn ensure_terminal(&mut self, settings: &AppSettings) -> &vte4::Terminal {
         if self.terminal.is_none() {
-            let terminal = Self::create_terminal(&self.config, settings);
+            let terminal = Self::create_terminal(&self.config, settings, self.url_rewriter.clone());
             if let Some(cb) = self.on_materialized.take() {
                 cb(&terminal);
             }
@@ -111,7 +121,11 @@ impl ManagedProcess {
         self.terminal.as_ref().unwrap()
     }
 
-    fn create_terminal(config: &ProcessConfig, settings: &AppSettings) -> vte4::Terminal {
+    fn create_terminal(
+        config: &ProcessConfig,
+        settings: &AppSettings,
+        url_rewriter: Option<UrlRewriter>,
+    ) -> vte4::Terminal {
         let terminal = vte4::Terminal::new();
         terminal.set_scroll_on_output(false);
         terminal.set_scroll_on_keystroke(true);
@@ -146,9 +160,13 @@ impl ManagedProcess {
             {
                 let (url_opt, _tag) = term_ref.check_match_at(x, y);
                 if let Some(url) = url_opt {
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(url.as_str())
-                        .spawn();
+                    // Remote projects: the printed port is the ssh host's —
+                    // reroute through the tunnel map (see `UrlRewriter`).
+                    let url = match url_rewriter.as_ref() {
+                        Some(rewrite) => rewrite(url.as_str()),
+                        None => url.to_string(),
+                    };
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                     gesture.set_state(gtk4::EventSequenceState::Claimed);
                     return;
                 }

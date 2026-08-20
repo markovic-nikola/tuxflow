@@ -2139,6 +2139,25 @@ impl TuxFlowWindow {
                 proc.last_activity = last_activity_cell;
                 proc.activity_burst = activity_burst_cell;
                 proc.is_idle = is_idle_cell;
+                // Remote: Ctrl+click on a localhost URL must open the local
+                // end of its tunnel, not the literal port — the badge shows
+                // the remapped port but the terminal text can't be edited.
+                // ensure() rather than a bare lookup, so a click also
+                // revives a dead forward or creates a missing one (the
+                // detector normally has it up already; this is the miss
+                // path, and ssh may still be binding when the browser
+                // fires — a reload later is the cost of the race).
+                if clip_host.is_some() {
+                    let tunnels_url = tunnels.clone();
+                    proc.url_rewriter = Some(Rc::new(move |url: &str| {
+                        crate::util::port_detector::rewrite_clicked_url(url, |port| {
+                            tunnels_url
+                                .borrow_mut()
+                                .as_mut()
+                                .and_then(|tm| tm.ensure(port))
+                        })
+                    }));
+                }
                 proc.on_materialized = Some(Box::new(move |terminal: &vte4::Terminal| {
                     // Replace placeholder in stack with real terminal
                     let current_qname = qname_cell_mat.borrow().clone();

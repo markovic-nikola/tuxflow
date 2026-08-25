@@ -45,7 +45,7 @@ those needs.
 1. **Scrollback search UI/API** (VTE `search_set_regex`/`find_next`) — alacritty ships the regex engine (it powers the URL test above); the search overlay and iteration API must be built. Bounded, not researchy.
 2. **IME** — zero `Ime` handling in the widget (grep-verified). Dead keys/CJK/compose input in terminals is broken until built. iced 0.14 itself has IME support (text_input uses it), so this is widget work, not framework work.
 3. **Image clipboard** — iced's clipboard tasks are text-only. TuxFlow's paste-PNG-to-remote path needs raw clipboard access (e.g. `window_clipboard`/arboard directly). GTK wins here today.
-4. **Perf smell** — the backend clones the entire `Grid` (incl. scrollback) on every sync. Fine for a spike, wants fixing for 10+ live terminals (Zed/cosmic-term render without cloning).
+4. **Perf** — ~~the backend clones the entire `Grid` (incl. scrollback) on every sync~~ **hit for real during manual testing** (scrollback scrolling froze, fans spun up) and **fixed in the fork**: viewport-only snapshots, event-classified syncs, clipped drawing — see `vendor/iced_term/VENDOR.md` patch 3. Still open above the spike bar: glyphs are re-shaped every frame; production wants cosmic-term-style per-line shaping caches.
 5. **Scrollback length config, cursor styles, bold-is-bright etc.** — alacritty `term::Config` is used at `Default`; wiring TuxFlow's terminal_theme settings through is mechanical.
 6. **Accessibility** — iced has none yet (roadmap). GTK regression, not terminal-specific.
 

@@ -84,19 +84,32 @@ impl Terminal {
         match cmd {
             Command::ChangeTheme(color_pallete) => {
                 self.theme = Theme::new(ThemeSettings::new(color_pallete));
+                self.redraw();
             },
             Command::ChangeFont(font_settings) => {
                 self.font = TermFont::new(font_settings);
+                self.sync_and_redraw();
             },
             Command::AddBindings(bindings) => {
                 self.bindings.add_bindings(bindings);
             },
             Command::ProxyToBackend(cmd) => {
+                // Snapshotting the viewport and clearing the canvas cache on
+                // every event is wasted work for commands that cannot change
+                // what is displayed (mouse reports, hover) — classify first.
+                let needs_sync = proxied_cmd_changes_content(&cmd);
+                let needs_redraw = needs_sync
+                    || matches!(cmd, backend::Command::ProcessLink(..));
                 action = self.backend.handle(cmd);
+                if needs_sync {
+                    self.backend.sync();
+                }
+                if needs_redraw {
+                    self.redraw();
+                }
             },
         };
 
-        self.sync_and_redraw();
         action
     }
 
@@ -114,6 +127,21 @@ impl Terminal {
 
     fn redraw(&mut self) {
         self.cache.clear();
+    }
+}
+
+fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
+    match cmd {
+        backend::Command::Write(_)
+        | backend::Command::Scroll(_)
+        | backend::Command::Resize(..)
+        | backend::Command::SelectStart(..)
+        | backend::Command::SelectUpdate(_) => true,
+        backend::Command::ProcessAlacrittyEvent(event) => {
+            matches!(event, AlacrittyEvent::Wakeup | AlacrittyEvent::Exit)
+        },
+        backend::Command::ProcessLink(..)
+        | backend::Command::MouseReport(..) => false,
     }
 }
 

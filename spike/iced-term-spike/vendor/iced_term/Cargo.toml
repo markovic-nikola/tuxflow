@@ -1,0 +1,15 @@
+[package]
+name = "iced_term"
+version = "0.8.0"
+edition = "2021"
+license = "MIT"
+description = "Vendored fork of iced_term 0.8.0 (github.com/Harzu/iced_term @ e0e90be) for the TuxFlow GTK-replacement spike. See VENDOR.md for the diff against upstream."
+
+[dependencies]
+alacritty_terminal = "0.25.1"
+iced = { version = "0.14.0", features = ["canvas", "lazy", "advanced"] }
+tokio = { version = "1.50.0", features = ["full"] }
+iced_graphics = { version = "0.14.0", default-features = false }
+iced_core = "0.14.0"
+open = "5.3.3"
+anyhow = "1.0.102"

@@ -16,6 +16,14 @@ use iced_term::{BackendCommand, TerminalView};
 use std::collections::{HashMap, VecDeque};
 
 fn main() -> iced::Result {
+    // What Alacritty's own main() does before spawning PTYs — neither
+    // alacritty_terminal nor iced_term calls it. Pins TERM to an installed
+    // terminfo (alacritty if present, else xterm-256color) and advertises
+    // COLORTERM=truecolor. Without it children inherit the launcher's TERM,
+    // and a missing terminfo leaves full-screen apps (top/less/htop) unable
+    // to enter the alternate screen.
+    alacritty_terminal::tty::setup_env();
+
     iced::application(App::new, App::update, App::view)
         .title(|_: &App| String::from("TuxFlow spike — iced_term"))
         .window_size(Size {

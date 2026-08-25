@@ -39,6 +39,7 @@ those needs.
 - **Selection** — drag/word/line selection implemented in the widget; copy writes the Standard clipboard.
 - **PRIMARY selection** — iced 0.14 has `clipboard::write_primary`/`read_primary` tasks; the demo app routes OSC 52 `Selection`-type copies there. Auto-publishing *drag selections* to PRIMARY (VTE does this) needs a small fork addition — the plumbing exists.
 - **Exit caveat** — a signal-killed child yields `Exit` without a code (VTE reports a waitpid status). Auto-restart logic would treat "no code" as abnormal exit; workable.
+- **TERM is the embedder's job** — found live when `top` couldn't enter the alternate screen: nothing in the stack sets `TERM` for the PTY children (VTE does this for you). The demo app now calls `alacritty_terminal::tty::setup_env()` like Alacritty's `main()` does.
 
 ### Known gaps (= the real migration work list)
 

@@ -1,0 +1,18 @@
+[package]
+name = "iced-term-spike"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "TuxFlow spike: can iced + iced_term (alacritty_terminal) replace GTK4 + VTE?"
+
+[dependencies]
+iced_term = { path = "vendor/iced_term" }
+iced = "0.14.0"
+alacritty_terminal = "0.25.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync"] }
+
+# Standalone: keep cargo from looking for a workspace above this directory.
+[workspace]

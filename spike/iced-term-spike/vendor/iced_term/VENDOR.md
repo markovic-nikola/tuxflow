@@ -52,3 +52,14 @@ marks something VTE gives TuxFlow that stock iced_term does not.
      standard escape hatch for a widget-side selection under tmux.
    - A drag is routed for its whole lifetime the way it started
      (`drag_is_mouse_report`), so releases only report for report-drags.
+5. **Event-flood coalescing** (found live in step 8: two `yes` panes froze
+   the UI until the desktop's not-responding watchdog fired). The
+   subscription stream forwarded every alacritty event as an app message —
+   a flooding PTY generates Wakeups far faster than a sync+redraw cycle can
+   drain them, wedging PTY reader → bounded channel → forwarding task → UI
+   thread. `terminal.rs`: the stream now drains each burst, forwards
+   non-Wakeup events in order and collapses all Wakeups into one trailing
+   event, so content syncs at the app's pace (what Zed/Alacritty do by
+   syncing per frame). Also fixed upstream's post-exit hot spin: after the
+   channel closed, the stream looped on `recv() == None` forever, burning a
+   core per exited terminal.

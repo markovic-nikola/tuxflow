@@ -142,7 +142,7 @@ pub struct Backend {
 impl Backend {
     pub fn new(
         id: u64,
-        pty_event_proxy_sender: mpsc::Sender<Event>,
+        pty_event_proxy_sender: mpsc::UnboundedSender<Event>,
         settings: BackendSettings,
     ) -> Result<Self> {
         let pty_config = tty::Options {
@@ -607,10 +607,12 @@ impl Drop for Backend {
 }
 
 #[derive(Clone)]
-pub struct EventProxy(mpsc::Sender<Event>);
+pub struct EventProxy(mpsc::UnboundedSender<Event>);
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        let _ = self.0.blocking_send(event);
+        // Called from the PTY thread, sometimes while it holds the terminal
+        // lock — must never block (see the channel comment in terminal.rs).
+        let _ = self.0.send(event);
     }
 }

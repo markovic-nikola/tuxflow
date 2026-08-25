@@ -63,3 +63,17 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    syncing per frame). Also fixed upstream's post-exit hot spin: after the
    channel closed, the stream looped on `recv() == None` forever, burning a
    core per exited terminal.
+
+   Coalescing alone was not enough — the hang persisted, and gdb backtraces
+   under a stress harness (`TUXFLOW_SPIKE_STRESS=1`) exposed the real root
+   cause: **alacritty's `Term` calls `send_event` (MouseCursorDirty,
+   PtyWrite, ClipboardStore, ...) while the PTY thread holds the terminal
+   lock** (`event_loop.rs` locks, then `parser.advance` emits). With a
+   bounded event channel this deadlocks under floods: PTY thread blocks
+   sending with the lock held → UI thread blocks on that lock inside
+   `sync()` → the forwarding task blocks on the full iced channel because
+   the blocked UI thread isn't draining messages. Fix: the proxy channel is
+   **unbounded** (`send` never blocks under the lock; the drain loop keeps
+   it near-empty), and `MouseCursorDirty`/`CursorBlinkingChange` — emitted
+   per scroll during floods — coalesce like Wakeup. Verified: 45 s of two
+   endless `yes` panes, zero UI stalls, worst sync 13 ms.

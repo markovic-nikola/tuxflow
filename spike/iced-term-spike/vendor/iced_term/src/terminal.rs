@@ -12,7 +12,7 @@ use iced::Subscription;
 use std::hash::{Hash, Hasher};
 use std::io::Result;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -36,12 +36,19 @@ pub struct Terminal {
     pub(crate) cache: Cache,
     pub(crate) bindings: BindingsLayout,
     pub(crate) backend: backend::Backend,
-    backend_event_rx: Arc<Mutex<Receiver<AlacrittyEvent>>>,
+    backend_event_rx: Arc<Mutex<UnboundedReceiver<AlacrittyEvent>>>,
 }
 
 impl Terminal {
     pub fn new(id: u64, settings: Settings) -> Result<Self> {
-        let (backend_event_tx, backend_event_rx) = mpsc::channel(100);
+        // Unbounded on purpose: Term emits events (MouseCursorDirty,
+        // PtyWrite, ...) WHILE the PTY thread holds the terminal lock. A
+        // bounded channel deadlocks under output floods: PTY thread blocks
+        // sending (lock held) -> UI thread blocks on the lock in sync() ->
+        // forwarding task blocks on the full iced channel because the UI
+        // thread isn't draining messages. The drain-and-coalesce loop below
+        // keeps this queue near-empty in practice.
+        let (backend_event_tx, backend_event_rx) = mpsc::unbounded_channel();
         let theme = Theme::new(settings.theme);
         let font = TermFont::new(settings.font);
 
@@ -148,7 +155,7 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
 #[derive(Clone)]
 struct TerminalSubscriptionData {
     id: u64,
-    event_receiver: Arc<Mutex<Receiver<AlacrittyEvent>>>,
+    event_receiver: Arc<Mutex<UnboundedReceiver<AlacrittyEvent>>>,
 }
 
 impl Hash for TerminalSubscriptionData {
@@ -175,6 +182,8 @@ fn terminal_subscription_stream(
                     // events in order, collapse every Wakeup into a single
                     // trailing one — content syncs at the app's own pace.
                     let mut wakeup = false;
+                    let mut mouse_dirty = false;
+                    let mut blink_changed = false;
                     let mut events = Vec::new();
                     let mut next = Some(event);
                     loop {
@@ -190,12 +199,28 @@ fn terminal_subscription_stream(
                         }
                         if matches!(ev, AlacrittyEvent::Wakeup) {
                             wakeup = true;
+                        } else if matches!(ev, AlacrittyEvent::MouseCursorDirty)
+                        {
+                            // Emitted per scroll during floods — collapse
+                            // like Wakeup or it spams the message queue.
+                            mouse_dirty = true;
+                        } else if matches!(
+                            ev,
+                            AlacrittyEvent::CursorBlinkingChange
+                        ) {
+                            blink_changed = true;
                         } else {
                             events.push(ev);
                         }
                         if events.len() >= 512 {
                             break;
                         }
+                    }
+                    if mouse_dirty {
+                        events.push(AlacrittyEvent::MouseCursorDirty);
+                    }
+                    if blink_changed {
+                        events.push(AlacrittyEvent::CursorBlinkingChange);
                     }
                     if wakeup {
                         events.push(AlacrittyEvent::Wakeup);

@@ -36,3 +36,19 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    canvas rebuild shapes every visible glyph per frame (`Shaping::Advanced`
    per cell). The production pattern is per-line shaping with caches, as in
    cosmic-term/Zed.
+4. **Mouse fidelity under tmux** (found live in step 6 of the manual
+   checklist: divider drag, wheel, drag-select and Shift+drag all broken).
+   `view.rs` input routing:
+   - Drag motion now reports when the app requested mode 1002
+     (`MOUSE_DRAG`, what tmux uses — motion-while-pressed), not only 1003
+     (`MOUSE_MOTION`); upstream checked 1003 alone, so tmux got the press
+     but never the drag, and the fallback issued `SelectUpdate` for a
+     selection that was never started.
+   - The wheel is encoded as wheel reports (buttons 64/65) while
+     `MOUSE_MODE` is active; upstream always fell through to `Scroll`,
+     which in the alternate screen becomes arrow keys — wheel-up at a
+     shell prompt browsed history instead of scrolling tmux copy-mode.
+   - Shift bypasses reporting throughout (press/drag/wheel) — the
+     standard escape hatch for a widget-side selection under tmux.
+   - A drag is routed for its whole lifetime the way it started
+     (`drag_is_mouse_report`), so releases only report for report-drags.

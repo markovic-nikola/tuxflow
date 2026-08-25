@@ -159,6 +159,7 @@ impl<'a> TerminalView<'a> {
                 Self::handle_wheel_scrolled(
                     state,
                     *delta,
+                    &terminal_mode,
                     &self.term.font.measure,
                     &mut commands,
                 );
@@ -176,7 +177,12 @@ impl<'a> TerminalView<'a> {
         layout_position: Point,
         commands: &mut Vec<Command>,
     ) {
-        let cmd = if terminal_mode.intersects(TermMode::MOUSE_MODE) {
+        // Shift bypasses mouse reporting (the universal terminal
+        // convention), so a selection stays reachable when tmux owns the
+        // mouse.
+        let is_mouse_report = terminal_mode.intersects(TermMode::MOUSE_MODE)
+            && !state.keyboard_modifiers.contains(Modifiers::SHIFT);
+        let cmd = if is_mouse_report {
             Command::MouseReport(
                 MouseButton::LeftButton,
                 state.keyboard_modifiers,
@@ -205,6 +211,7 @@ impl<'a> TerminalView<'a> {
         };
         commands.push(cmd);
         state.is_dragged = true;
+        state.drag_is_mouse_report = is_mouse_report;
     }
 
     fn handle_cursor_moved(
@@ -223,20 +230,28 @@ impl<'a> TerminalView<'a> {
             terminal_content.display_offset,
         );
 
-        // Handle command or selection update based on terminal mode and modifiers
+        // Route an active drag the way it started: a report-drag keeps
+        // reporting (mode 1002 covers motion-while-pressed, not only 1003),
+        // a selection-drag keeps selecting.
         if state.is_dragged {
             let terminal_mode = terminal_content.terminal_mode;
-            let cmd = if terminal_mode.intersects(TermMode::MOUSE_MOTION) {
-                Command::MouseReport(
-                    MouseButton::LeftMove,
-                    state.keyboard_modifiers,
-                    state.mouse_position_on_grid,
-                    true,
-                )
+            let cmd = if state.drag_is_mouse_report {
+                terminal_mode
+                    .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+                    .then(|| {
+                        Command::MouseReport(
+                            MouseButton::LeftMove,
+                            state.keyboard_modifiers,
+                            state.mouse_position_on_grid,
+                            true,
+                        )
+                    })
             } else {
-                Command::SelectUpdate((cursor_x, cursor_y))
+                Some(Command::SelectUpdate((cursor_x, cursor_y)))
             };
-            commands.push(cmd);
+            if let Some(cmd) = cmd {
+                commands.push(cmd);
+            }
         }
 
         // Handle link hover if applicable
@@ -256,7 +271,9 @@ impl<'a> TerminalView<'a> {
     ) {
         state.is_dragged = false;
 
-        if terminal_mode.intersects(TermMode::MOUSE_MODE) {
+        if state.drag_is_mouse_report
+            && terminal_mode.intersects(TermMode::MOUSE_MODE)
+        {
             commands.push(Command::MouseReport(
                 MouseButton::LeftButton,
                 state.keyboard_modifiers,
@@ -264,6 +281,7 @@ impl<'a> TerminalView<'a> {
                 false,
             ));
         }
+        state.drag_is_mouse_report = false;
 
         if bindings.get_action(
             InputKind::Mouse(iced_core::mouse::Button::Left),
@@ -281,23 +299,50 @@ impl<'a> TerminalView<'a> {
     fn handle_wheel_scrolled(
         state: &mut TerminalViewState,
         delta: ScrollDelta,
+        terminal_mode: &TermMode,
         font_measure: &Size<f32>,
         commands: &mut Vec<Command>,
     ) {
-        match delta {
+        let lines = match delta {
             ScrollDelta::Lines { y, .. } => {
-                let lines = y.signum() * y.abs().round();
-                commands.push(Command::Scroll(lines as i32));
+                (y.signum() * y.abs().round()) as i32
             },
             ScrollDelta::Pixels { y, .. } => {
                 state.scroll_pixels -= y;
-                let line_height = font_measure.height; // Assume this method exists and gives the height of a line
+                let line_height = font_measure.height;
                 let lines = (state.scroll_pixels / line_height).trunc();
                 state.scroll_pixels %= line_height;
-                if lines != 0.0 {
-                    commands.push(Command::Scroll(lines as i32));
-                }
+                lines as i32
             },
+        };
+
+        if lines == 0 {
+            return;
+        }
+
+        // When the app owns the mouse (tmux), the wheel must arrive as
+        // wheel REPORTS (buttons 64/65). Falling through to Scroll turns
+        // the wheel into arrow keys at a shell prompt — history browsing
+        // instead of tmux copy-mode scrolling. Shift keeps the widget's
+        // own scrollback reachable.
+        if terminal_mode.intersects(TermMode::MOUSE_MODE)
+            && !state.keyboard_modifiers.contains(Modifiers::SHIFT)
+        {
+            let button = if lines > 0 {
+                MouseButton::ScrollUp
+            } else {
+                MouseButton::ScrollDown
+            };
+            for _ in 0..lines.abs() {
+                commands.push(Command::MouseReport(
+                    button.clone(),
+                    state.keyboard_modifiers,
+                    state.mouse_position_on_grid,
+                    true,
+                ));
+            }
+        } else {
+            commands.push(Command::Scroll(lines));
         }
     }
 
@@ -715,6 +760,7 @@ impl<'a> From<TerminalView<'a>> for Element<'a, Event, Theme, iced::Renderer> {
 struct TerminalViewState {
     focus: bool,
     is_dragged: bool,
+    drag_is_mouse_report: bool,
     last_click: Option<mouse::Click>,
     scroll_pixels: f32,
     keyboard_modifiers: Modifiers,
@@ -727,6 +773,7 @@ impl TerminalViewState {
         Self {
             focus: false,
             is_dragged: false,
+            drag_is_mouse_report: false,
             last_click: None,
             scroll_pixels: 0.0,
             keyboard_modifiers: Modifiers::empty(),
@@ -997,6 +1044,7 @@ mod tests {
         fn generates_drag_update_command_when_dragged_in_mouse_motion_mode() {
             let mut state = TerminalViewState::new();
             state.is_dragged = true; // Simulate an ongoing drag operation
+            state.drag_is_mouse_report = true;
             let mut terminal_content = RenderableContent::default();
             terminal_content.terminal_mode = TermMode::MOUSE_MOTION;
             let layout_position = Point { x: 5.0, y: 5.0 };
@@ -1098,6 +1146,7 @@ mod tests {
         #[test]
         fn mouse_mode_activated() {
             let mut state = TerminalViewState::new();
+            state.drag_is_mouse_report = true;
             let terminal_mode = TermMode::MOUSE_MODE;
             let bindings = BindingsLayout::new();
             let mut commands = Vec::new();
@@ -1128,6 +1177,7 @@ mod tests {
         #[test]
         fn link_open_on_button_release() {
             let mut state = TerminalViewState::new();
+            state.drag_is_mouse_report = true;
             state.keyboard_modifiers = Modifiers::COMMAND;
             let terminal_mode = TermMode::MOUSE_MODE;
             let bindings = BindingsLayout::new();
@@ -1213,6 +1263,7 @@ mod tests {
             TerminalView::handle_wheel_scrolled(
                 &mut state,
                 ScrollDelta::Lines { y: 3.0, x: 0.0 }, // Scroll down 3 lines
+                &TermMode::empty(),
                 &font.measure,
                 &mut commands,
             );
@@ -1230,6 +1281,7 @@ mod tests {
             TerminalView::handle_wheel_scrolled(
                 &mut state,
                 ScrollDelta::Lines { y: -2.0, x: 0.0 },
+                &TermMode::empty(),
                 &font.measure,
                 &mut commands,
             );
@@ -1247,6 +1299,7 @@ mod tests {
             TerminalView::handle_wheel_scrolled(
                 &mut state,
                 ScrollDelta::Pixels { y: 45.0, x: 0.0 },
+                &TermMode::empty(),
                 &font.measure,
                 &mut commands,
             );
@@ -1265,6 +1318,7 @@ mod tests {
             TerminalView::handle_wheel_scrolled(
                 &mut state,
                 ScrollDelta::Pixels { y: -60.0, x: 0.0 },
+                &TermMode::empty(),
                 &font.measure,
                 &mut commands,
             );

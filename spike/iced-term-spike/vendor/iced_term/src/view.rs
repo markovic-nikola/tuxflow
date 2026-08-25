@@ -481,8 +481,8 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         let state = tree.state.downcast_ref::<TerminalViewState>();
         let content = self.term.backend.renderable_content();
         let term_size = content.terminal_size;
-        let cell_width = term_size.cell_width as f32;
-        let cell_height = term_size.cell_height as f32;
+        let cell_width = term_size.cell_width;
+        let cell_height = term_size.cell_height;
         let font_size = self.term.font.size;
         let font_scale_factor = self.term.font.scale_factor;
         // with_clip only MASKS to `bounds` — the child frame keeps the
@@ -510,6 +510,8 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
 
                 let mut last_line: Option<i32> = None;
                 let mut bg_batch_rect = BackgroundRect::default();
+                let base_font = self.term.font.font_type;
+                let mut text_run: Option<TextRun> = None;
 
                 for indexed in &content.cells {
                     // Compute per-cell geometry cheaply
@@ -628,41 +630,113 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                         frame.fill(&cursor_rect, cursor_color);
                     }
 
-                    // Draw text
+                    // Draw text: contiguous same-style ASCII cells
+                    // merge into one fill_text run (thousands of calls per
+                    // frame become dozens) with cheap Basic shaping. The
+                    // cursor cell and non-ASCII take the per-cell path with
+                    // full shaping. Valid because cell_width IS the font
+                    // advance (font.rs measures the same text pipeline), so
+                    // a Left-aligned run lands every glyph on its cell.
+                    let is_cursor_cell = content.cursor_point == indexed.point;
                     if indexed.c != ' ' && indexed.c != '\t' {
-                        if content.cursor_point == indexed.point
+                        if is_cursor_cell
                             && content
                                 .terminal_mode
                                 .contains(TermMode::APP_CURSOR)
                         {
                             fg = bg;
                         }
-                        // Resolve font style (bold/italic) from cell flags
-                        let mut font = self.term.font.font_type;
-                        if indexed.cell.flags.intersects(
+                        let bold = indexed.cell.flags.intersects(
                             cell::Flags::BOLD | cell::Flags::DIM_BOLD,
-                        ) {
-                            font.weight = FontWeight::Bold;
+                        );
+                        let italic =
+                            indexed.cell.flags.contains(cell::Flags::ITALIC);
+
+                        if indexed.c.is_ascii_graphic() && !is_cursor_cell {
+                            let col = indexed.point.column.0;
+                            let extended = match &mut text_run {
+                                Some(run)
+                                    if run.can_extend(
+                                        line, col, fg, bold, italic,
+                                    ) =>
+                                {
+                                    run.push(indexed.c);
+                                    true
+                                },
+                                _ => false,
+                            };
+                            if !extended {
+                                if let Some(run) = text_run.take() {
+                                    run.fill(
+                                        frame,
+                                        base_font,
+                                        font_size,
+                                        font_scale_factor,
+                                    );
+                                }
+                                text_run = Some(TextRun::start(
+                                    indexed.c,
+                                    x,
+                                    cell_center_y,
+                                    line,
+                                    col,
+                                    fg,
+                                    bold,
+                                    italic,
+                                ));
+                            }
+                        } else {
+                            if let Some(run) = text_run.take() {
+                                run.fill(
+                                    frame,
+                                    base_font,
+                                    font_size,
+                                    font_scale_factor,
+                                );
+                            }
+                            let mut font = base_font;
+                            if bold {
+                                font.weight = FontWeight::Bold;
+                            }
+                            if italic {
+                                font.style = FontStyle::Italic;
+                            }
+                            frame.fill_text(Text {
+                                content: indexed.cell.c.to_string(),
+                                position: Point::new(
+                                    cell_center_x,
+                                    cell_center_y,
+                                ),
+                                font,
+                                size: iced_core::Pixels(font_size),
+                                color: fg,
+                                align_x: Alignment::Center,
+                                align_y: Vertical::Center,
+                                shaping: Shaping::Advanced,
+                                line_height: LineHeight::Relative(
+                                    font_scale_factor,
+                                ),
+                                ..Default::default()
+                            });
                         }
-                        if indexed.cell.flags.contains(cell::Flags::ITALIC) {
-                            font.style = FontStyle::Italic;
-                        }
-                        let text = Text {
-                            content: indexed.cell.c.to_string(),
-                            position: Point::new(cell_center_x, cell_center_y),
-                            font,
-                            size: iced_core::Pixels(font_size),
-                            color: fg,
-                            align_x: Alignment::Center,
-                            align_y: Vertical::Center,
-                            shaping: Shaping::Advanced,
-                            line_height: LineHeight::Relative(
+                    } else if let Some(run) = &mut text_run {
+                        // Spaces extend an active run (monospace advance)
+                        // instead of fragmenting it per word.
+                        if run.can_extend_space(line, indexed.point.column.0) {
+                            run.push(' ');
+                        } else if let Some(run) = text_run.take() {
+                            run.fill(
+                                frame,
+                                base_font,
+                                font_size,
                                 font_scale_factor,
-                            ),
-                            ..Default::default()
-                        };
-                        frame.fill_text(text);
+                            );
+                        }
                     }
+                }
+
+                if let Some(run) = text_run.take() {
+                    run.fill(frame, base_font, font_size, font_scale_factor);
                 }
 
                 // Flush any remaining background run at the end
@@ -811,6 +885,94 @@ impl operation::Focusable for TerminalViewState {
 
     fn unfocus(&mut self) {
         self.focus = false;
+    }
+}
+
+/// Contiguous same-style ASCII cells merged into a single text fill.
+struct TextRun {
+    content: String,
+    start_x: f32,
+    center_y: f32,
+    line: i32,
+    next_col: usize,
+    fg: Color,
+    bold: bool,
+    italic: bool,
+}
+
+impl TextRun {
+    #[allow(clippy::too_many_arguments)]
+    fn start(
+        c: char,
+        x: f32,
+        center_y: f32,
+        line: i32,
+        col: usize,
+        fg: Color,
+        bold: bool,
+        italic: bool,
+    ) -> Self {
+        Self {
+            content: c.to_string(),
+            start_x: x,
+            center_y,
+            line,
+            next_col: col + 1,
+            fg,
+            bold,
+            italic,
+        }
+    }
+
+    fn can_extend(
+        &self,
+        line: i32,
+        col: usize,
+        fg: Color,
+        bold: bool,
+        italic: bool,
+    ) -> bool {
+        self.line == line
+            && self.next_col == col
+            && self.fg == fg
+            && self.bold == bold
+            && self.italic == italic
+    }
+
+    fn can_extend_space(&self, line: i32, col: usize) -> bool {
+        self.line == line && self.next_col == col
+    }
+
+    fn push(&mut self, c: char) {
+        self.content.push(c);
+        self.next_col += 1;
+    }
+
+    fn fill(
+        self,
+        frame: &mut iced::widget::canvas::Frame,
+        mut font: iced::Font,
+        font_size: f32,
+        scale_factor: f32,
+    ) {
+        if self.bold {
+            font.weight = FontWeight::Bold;
+        }
+        if self.italic {
+            font.style = FontStyle::Italic;
+        }
+        frame.fill_text(Text {
+            content: self.content,
+            position: Point::new(self.start_x, self.center_y),
+            font,
+            size: iced_core::Pixels(font_size),
+            color: self.fg,
+            align_x: Alignment::Left,
+            align_y: Vertical::Center,
+            shaping: Shaping::Basic,
+            line_height: LineHeight::Relative(scale_factor),
+            ..Default::default()
+        });
     }
 }
 

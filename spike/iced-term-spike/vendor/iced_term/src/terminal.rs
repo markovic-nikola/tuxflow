@@ -105,13 +105,13 @@ impl Terminal {
                 // every event is wasted work for commands that cannot change
                 // what is displayed (mouse reports, hover) — classify first.
                 let needs_sync = proxied_cmd_changes_content(&cmd);
-                let needs_redraw = needs_sync
-                    || matches!(cmd, backend::Command::ProcessLink(..));
+                let link_redraw =
+                    matches!(cmd, backend::Command::ProcessLink(..));
                 action = self.backend.handle(cmd);
-                if needs_sync {
-                    self.backend.sync();
-                }
-                if needs_redraw {
+                // Don't clear the canvas cache for a snapshot that was
+                // skipped on lock contention — the next Wakeup retries.
+                let synced = needs_sync && self.backend.sync();
+                if synced || link_redraw {
                     self.redraw();
                 }
             },
@@ -122,7 +122,7 @@ impl Terminal {
 
     fn sync_and_redraw(&mut self) {
         self.sync_font();
-        self.backend.sync();
+        let _ = self.backend.sync();
         self.redraw();
     }
 

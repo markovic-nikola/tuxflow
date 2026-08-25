@@ -77,8 +77,10 @@ pub enum LinkAction {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalSize {
-    pub cell_width: u16,
-    pub cell_height: u16,
+    // f32 on purpose: these ARE the font's advance/line-height. Truncating
+    // to u16 desyncs a merged text run from the cell grid within ~3 cells.
+    pub cell_width: f32,
+    pub cell_height: f32,
     num_cols: u16,
     num_lines: u16,
     layout_width: f32,
@@ -88,8 +90,8 @@ pub struct TerminalSize {
 impl Default for TerminalSize {
     fn default() -> Self {
         Self {
-            cell_width: 1,
-            cell_height: 1,
+            cell_width: 1.0,
+            cell_height: 1.0,
             num_cols: 80,
             num_lines: 50,
             layout_width: 80.0,
@@ -125,8 +127,8 @@ impl From<TerminalSize> for WindowSize {
         Self {
             num_lines: size.num_lines,
             num_cols: size.num_cols,
-            cell_width: size.cell_width,
-            cell_height: size.cell_height,
+            cell_width: size.cell_width as u16,
+            cell_height: size.cell_height as u16,
         }
     }
 }
@@ -193,24 +195,32 @@ impl Backend {
     }
 
     pub fn handle(&mut self, cmd: Command) -> Action {
-        let mut action = Action::default();
+        // Event bookkeeping and mouse reports never touch the grid — handle
+        // them without the terminal lock so the UI thread doesn't contend
+        // with a flooding PTY thread.
+        match cmd {
+            Command::ProcessAlacrittyEvent(event) => {
+                return match event {
+                    Event::Exit => Action::Shutdown,
+                    Event::Title(title) => Action::ChangeTitle(title),
+                    Event::PtyWrite(pty) => {
+                        self.notifier.notify(pty.into_bytes());
+                        Action::Ignore
+                    },
+                    _ => Action::Ignore,
+                };
+            },
+            Command::MouseReport(button, modifiers, point, pressed) => {
+                self.process_mouse_report(button, modifiers, point, pressed);
+                return Action::Ignore;
+            },
+            _ => {},
+        }
+
+        let action = Action::default();
         let term = self.term.clone();
         let mut term = term.lock();
         match cmd {
-            Command::ProcessAlacrittyEvent(event) => {
-                match event {
-                    Event::Exit => {
-                        action = Action::Shutdown;
-                    },
-                    Event::Title(title) => {
-                        action = Action::ChangeTitle(title);
-                    },
-                    Event::PtyWrite(pty) => {
-                        self.notifier.notify(pty.into_bytes())
-                    },
-                    _ => {},
-                };
-            },
             Command::Write(input) => {
                 self.write(input);
                 term.scroll_display(Scroll::Bottom);
@@ -230,8 +240,8 @@ impl Backend {
             Command::ProcessLink(link_action, point) => {
                 self.process_link_action(&term, link_action, point);
             },
-            Command::MouseReport(button, modifiers, point, pressed) => {
-                self.process_mouse_report(button, modifiers, point, pressed);
+            Command::ProcessAlacrittyEvent(..) | Command::MouseReport(..) => {
+                unreachable!()
             },
         };
 
@@ -395,18 +405,18 @@ impl Backend {
         terminal_size: &TerminalSize,
         display_offset: usize,
     ) -> Point {
-        let col = (x as usize) / (terminal_size.cell_width as usize);
+        let col = (x / terminal_size.cell_width) as usize;
         let col = min(Column(col), Column(terminal_size.num_cols as usize - 1));
 
-        let line = (y as usize) / (terminal_size.cell_height as usize);
+        let line = (y / terminal_size.cell_height) as usize;
         let line = min(line, terminal_size.num_lines as usize - 1);
 
         viewport_to_point(display_offset, Point::new(line, col))
     }
 
     fn selection_side(&self, x: f32) -> Side {
-        let cell_x = x as usize % self.size.cell_width as usize;
-        let half_cell_width = (self.size.cell_width as f32 / 2.0) as usize;
+        let cell_x = x % self.size.cell_width;
+        let half_cell_width = self.size.cell_width / 2.0;
 
         if cell_x > half_cell_width {
             Side::Right
@@ -427,14 +437,14 @@ impl Backend {
         };
 
         if let Some(size) = font_measure {
-            self.size.cell_height = size.height as u16;
-            self.size.cell_width = size.width as u16;
+            self.size.cell_height = size.height;
+            self.size.cell_width = size.width;
         }
 
-        let lines = (self.size.layout_height / self.size.cell_height as f32)
-            .floor() as u16;
-        let cols = (self.size.layout_width / self.size.cell_width as f32)
-            .floor() as u16;
+        let lines =
+            (self.size.layout_height / self.size.cell_height).floor() as u16;
+        let cols =
+            (self.size.layout_width / self.size.cell_width).floor() as u16;
         if lines > 0 && cols > 0 {
             self.size.num_lines = lines;
             self.size.num_cols = cols;
@@ -486,10 +496,16 @@ impl Backend {
         result
     }
 
-    pub fn sync(&mut self) {
+    /// Snapshot the viewport. Returns false when the PTY thread holds the
+    /// parse lock — never park the UI thread on it; a flood's next Wakeup
+    /// retries, and the last Wakeup of any burst finds the lock free.
+    pub fn sync(&mut self) -> bool {
         let term = self.term.clone();
-        let mut term = term.lock();
+        let Some(mut term) = term.try_lock_unfair() else {
+            return false;
+        };
         self.internal_sync(&mut term);
+        true
     }
 
     fn internal_sync(&mut self, terminal: &mut Term<EventProxy>) {

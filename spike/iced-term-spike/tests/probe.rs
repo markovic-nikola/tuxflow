@@ -195,6 +195,21 @@ fn mouse_mode_tracking_and_sgr_report() {
     );
 }
 
+/// Flood control: a PTY blasting output (`yes`) must not wedge the event
+/// pipeline — the child runs to completion and its exit is observed while
+/// the embedder keeps draining events.
+#[test]
+fn output_flood_completes() {
+    let mut probe = Probe::spawn("yes | head -n 2000000; exit 0");
+    assert!(
+        probe.wait(30, |_, events, _| events
+            .iter()
+            .any(|ev| matches!(ev, AEvent::ChildExit(0)))),
+        "flood child never finished; {} events seen",
+        probe.events.len()
+    );
+}
+
 /// Built-in URL regex matching at a grid point (VTE `match_add_regex` +
 /// Ctrl+click parity — feeds TuxFlow's url_rewriter/tunnel hook).
 #[test]

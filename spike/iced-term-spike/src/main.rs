@@ -213,6 +213,12 @@ impl App {
     fn observe_alacritty_event(&mut self, id: u64, ev: &AEvent) -> Task<Event> {
         match ev {
             AEvent::ClipboardStore(ty, data) => {
+                if data.is_empty() {
+                    // Seen in the wild (step 7: multiplex/tmux emit OSC 52
+                    // clears) — don't wipe the user's clipboard.
+                    self.log(format!("term {id}: OSC 52 clear — ignored"));
+                    return Task::none();
+                }
                 let (target, task) = match ty {
                     ClipboardType::Clipboard => ("clipboard", iced::clipboard::write(data.clone())),
                     ClipboardType::Selection => {

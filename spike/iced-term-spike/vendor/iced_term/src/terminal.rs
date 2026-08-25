@@ -168,21 +168,59 @@ fn terminal_subscription_stream(
             let mut event_receiver = event_receiver.lock().await;
             match event_receiver.recv().await {
                 Some(event) => {
-                    if let AlacrittyEvent::Exit = event {
-                        shutdown = true
-                    };
+                    // A flooding PTY (`yes`) emits Wakeups far faster than
+                    // the app can sync + redraw; forwarding each one starves
+                    // the UI thread until the desktop's not-responding
+                    // watchdog fires. Drain the burst: forward non-Wakeup
+                    // events in order, collapse every Wakeup into a single
+                    // trailing one — content syncs at the app's own pace.
+                    let mut wakeup = false;
+                    let mut events = Vec::new();
+                    let mut next = Some(event);
+                    loop {
+                        let ev = match next.take() {
+                            Some(ev) => ev,
+                            None => match event_receiver.try_recv() {
+                                Ok(ev) => ev,
+                                Err(_) => break,
+                            },
+                        };
+                        if matches!(ev, AlacrittyEvent::Exit) {
+                            shutdown = true;
+                        }
+                        if matches!(ev, AlacrittyEvent::Wakeup) {
+                            wakeup = true;
+                        } else {
+                            events.push(ev);
+                        }
+                        if events.len() >= 512 {
+                            break;
+                        }
+                    }
+                    if wakeup {
+                        events.push(AlacrittyEvent::Wakeup);
+                    }
 
-                    output
-                        .send(Event::BackendCall(id, backend::Command::ProcessAlacrittyEvent(event)))
-                        .await
-                        .unwrap_or_else(|_| {
-                            panic!("iced_term stream {}: sending BackendEventReceived event is failed", id)
-                        });
+                    for ev in events {
+                        output
+                            .send(Event::BackendCall(
+                                id,
+                                backend::Command::ProcessAlacrittyEvent(ev),
+                            ))
+                            .await
+                            .unwrap_or_else(|_| {
+                                panic!("iced_term stream {}: sending BackendEventReceived event is failed", id)
+                            });
+                    }
                 },
                 None => {
                     if !shutdown {
                         panic!("iced_term stream {}: terminal event channel closed unexpected", id);
                     }
+                    // Upstream looped forever here: recv() on a closed,
+                    // drained channel returns None immediately — a hot spin
+                    // burning a core per exited terminal. End the stream.
+                    return;
                 },
             }
         }

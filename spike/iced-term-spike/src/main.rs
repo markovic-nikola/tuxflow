@@ -350,7 +350,7 @@ fn visible_text(tab: &iced_term::Terminal) -> String {
     let content = tab.backend().renderable_content();
     let mut lines: Vec<String> = Vec::new();
     let mut current_line: Option<Line> = None;
-    for indexed in content.grid.display_iter() {
+    for indexed in &content.cells {
         if current_line != Some(indexed.point.line) {
             current_line = Some(indexed.point.line);
             lines.push(String::new());

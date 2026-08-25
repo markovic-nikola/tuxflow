@@ -78,7 +78,7 @@ impl Probe {
         let content = self.backend.renderable_content();
         let mut lines: Vec<String> = Vec::new();
         let mut current_line: Option<Line> = None;
-        for indexed in content.grid.display_iter() {
+        for indexed in &content.cells {
             if current_line != Some(indexed.point.line) {
                 current_line = Some(indexed.point.line);
                 lines.push(String::new());
@@ -211,6 +211,10 @@ fn url_regex_hover_match() {
         matched.is_some(),
         "hover at column 8 did not match the URL; got:\n{}",
         probe.visible_text()
+    );
+    assert_eq!(
+        probe.backend.renderable_content().hovered_url.as_deref(),
+        Some("http://localhost:5173/x")
     );
 }
 

@@ -4,7 +4,7 @@ use alacritty_terminal::event::{
     Event, EventListener, Notify, OnResize, WindowSize,
 };
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::{Dimensions, Indexed, Scroll};
 use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
@@ -12,7 +12,7 @@ use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{
     self, cell::Cell, test::TermSize, viewport_to_point, Term, TermMode,
 };
-use alacritty_terminal::{tty, Grid};
+use alacritty_terminal::tty;
 use iced::keyboard::Modifiers;
 use iced_core::Size;
 use std::borrow::Cow;
@@ -163,12 +163,15 @@ impl Backend {
         let cursor = term.grid_mut().cursor_cell().clone();
 
         let initial_content = RenderableContent {
-            grid: term.grid().clone(),
+            cells: snapshot_cells(&term),
+            display_offset: term.grid().display_offset(),
+            cursor_point: term.grid().cursor.point,
             selectable_range: None,
             terminal_mode: *term.mode(),
             terminal_size,
             cursor: cursor.clone(),
             hovered_hyperlink: None,
+            hovered_url: None,
         };
 
         let term = Arc::new(FairMutex::new(term));
@@ -243,14 +246,18 @@ impl Backend {
     ) {
         match link_action {
             LinkAction::Hover => {
-                self.last_content.hovered_hyperlink = self.regex_match_at(
+                let hovered = self.regex_match_at(
                     terminal,
                     point,
                     &mut self.url_regex.clone(),
                 );
+                self.last_content.hovered_url =
+                    hovered.as_ref().map(|range| extract_text(terminal, range));
+                self.last_content.hovered_hyperlink = hovered;
             },
             LinkAction::Clear => {
                 self.last_content.hovered_hyperlink = None;
+                self.last_content.hovered_url = None;
             },
             LinkAction::Open => {
                 self.open_link();
@@ -259,18 +266,7 @@ impl Backend {
     }
 
     fn open_link(&self) {
-        if let Some(range) = &self.last_content.hovered_hyperlink {
-            let start = range.start();
-            let end = range.end();
-
-            let mut url = String::from(self.last_content.grid.index(*start).c);
-            for indexed in self.last_content.grid.iter_from(*start) {
-                url.push(indexed.c);
-                if indexed.point == *end {
-                    break;
-                }
-            }
-
+        if let Some(url) = &self.last_content.hovered_url {
             open::that(url).unwrap_or_else(|_| {
                 panic!("link opening is failed");
             })
@@ -481,7 +477,7 @@ impl Backend {
         let content = self.renderable_content();
         let mut result = String::new();
         if let Some(range) = content.selectable_range {
-            for indexed in content.grid.display_iter() {
+            for indexed in &content.cells {
                 if range.contains(indexed.point) {
                     result.push(indexed.c);
                 }
@@ -503,7 +499,9 @@ impl Backend {
         };
 
         let cursor = terminal.grid_mut().cursor_cell().clone();
-        self.last_content.grid = terminal.grid().clone();
+        self.last_content.cells = snapshot_cells(terminal);
+        self.last_content.display_offset = terminal.grid().display_offset();
+        self.last_content.cursor_point = terminal.grid().cursor.point;
         self.last_content.selectable_range = selectable_range;
         self.last_content.cursor = cursor.clone();
         self.last_content.terminal_mode = *terminal.mode();
@@ -548,8 +546,13 @@ fn visible_regex_match_iter<'a>(
 }
 
 pub struct RenderableContent {
-    pub grid: Grid<Cell>,
+    /// Visible viewport cells only — never the scrollback history. Cloning
+    /// the full grid per sync is what froze scrolling on long histories.
+    pub cells: Vec<Indexed<Cell>>,
+    pub display_offset: usize,
+    pub cursor_point: Point,
     pub hovered_hyperlink: Option<RangeInclusive<Point>>,
+    pub hovered_url: Option<String>,
     pub selectable_range: Option<SelectionRange>,
     pub cursor: Cell,
     pub terminal_mode: TermMode,
@@ -559,14 +562,42 @@ pub struct RenderableContent {
 impl Default for RenderableContent {
     fn default() -> Self {
         Self {
-            grid: Grid::new(0, 0, 0),
+            cells: Vec::new(),
+            display_offset: 0,
+            cursor_point: Point::default(),
             hovered_hyperlink: None,
+            hovered_url: None,
             selectable_range: None,
             cursor: Cell::default(),
             terminal_mode: TermMode::empty(),
             terminal_size: TerminalSize::default(),
         }
     }
+}
+
+fn snapshot_cells(term: &Term<EventProxy>) -> Vec<Indexed<Cell>> {
+    term.grid()
+        .display_iter()
+        .map(|indexed| Indexed {
+            point: indexed.point,
+            cell: indexed.cell.clone(),
+        })
+        .collect()
+}
+
+fn extract_text(
+    term: &Term<EventProxy>,
+    range: &RangeInclusive<Point>,
+) -> String {
+    let grid = term.grid();
+    let mut text = String::from(grid.index(*range.start()).c);
+    for indexed in grid.iter_from(*range.start()) {
+        text.push(indexed.c);
+        if indexed.point == *range.end() {
+            break;
+        }
+    }
+    text
 }
 
 impl Drop for Backend {

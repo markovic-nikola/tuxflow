@@ -77,3 +77,24 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    it near-empty), and `MouseCursorDirty`/`CursorBlinkingChange` — emitted
    per scroll during floods — coalesce like Wakeup. Verified: 45 s of two
    endless `yes` panes, zero UI stalls, worst sync 13 ms.
+6. **Typing latency under floods** (step 8 re-test: no more hangs, but
+   input in idle panes lagged badly while two panes flooded). Three causes,
+   three fixes:
+   - `view.rs`: text drawing merged into **runs** — contiguous same-style
+     ASCII cells become a single `fill_text` with cheap `Basic` shaping
+     (thousands of per-cell calls with full Unicode shaping per frame
+     become dozens); non-ASCII and the cursor cell keep the per-cell
+     `Advanced` path. Prerequisite: `TerminalSize` cell metrics became
+     `f32` — they are the font's true advance/line-height, and the old u16
+     truncation would walk a merged run off the grid within a few cells.
+   - `backend.rs`: `handle()` no longer takes the terminal lock for
+     commands that never touch the grid (alacritty events, mouse reports) —
+     under floods that lock is busy and every Wakeup message paid a wait.
+   - `backend.rs`: `sync()` uses `try_lock_unfair` and returns `false` on
+     contention instead of parking the UI thread; `terminal.rs` skips the
+     cache clear for skipped syncs (the flood's next Wakeup retries; the
+     final Wakeup of a burst always finds the lock free).
+   Verified: 45 s of two endless floods on a software renderer — zero
+   stalls, zero syncs >10 ms, zero draws >20 ms; screenshot check confirms
+   merged runs land glyphs exactly on the cell grid (p10k prompt with mixed
+   icons/colors renders pixel-identically).

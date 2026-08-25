@@ -477,6 +477,7 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         _cursor: Cursor,
         viewport: &Rectangle,
     ) {
+        let draw_started = std::time::Instant::now();
         let state = tree.state.downcast_ref::<TerminalViewState>();
         let content = self.term.backend.renderable_content();
         let term_size = content.terminal_size;
@@ -676,6 +677,16 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
 
         use iced::advanced::graphics::geometry::Renderer as _;
         renderer.draw_geometry(geom);
+
+        let dt = draw_started.elapsed();
+        if dt.as_millis() > 20 {
+            eprintln!(
+                "[perf] draw tab {} took {:?} ({} cells)",
+                self.term.id,
+                dt,
+                self.term.backend.renderable_content().cells.len()
+            );
+        }
     }
 
     fn update(

@@ -14,6 +14,39 @@ use iced::widget::{button, column, container, responsive, row, text, text_input}
 use iced::{Element, Length, Size, Subscription, Task, window};
 use iced_term::{BackendCommand, TerminalView};
 use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
+/// Perf probes for the step-8 flood investigation. `TUXFLOW_SPIKE_STRESS=1`
+/// auto-spawns two flood panes + two idle ones; the watchdog thread reports
+/// UI-thread stalls (a proxy for the desktop's not-responding dialog).
+static APP_START: OnceLock<Instant> = OnceLock::new();
+static LAST_VIEW_MS: AtomicU64 = AtomicU64::new(0);
+
+fn ui_watchdog() {
+    let start = *APP_START.get_or_init(Instant::now);
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let now = start.elapsed().as_millis() as u64;
+            let last = LAST_VIEW_MS.load(Ordering::Relaxed);
+            if last != 0 && now.saturating_sub(last) > 2000 {
+                eprintln!(
+                    "[perf] UI thread stalled for {}ms",
+                    now.saturating_sub(last)
+                );
+                if now.saturating_sub(last) > 5000
+                    && std::env::var("TUXFLOW_SPIKE_ABORT_ON_STALL").is_ok()
+                {
+                    // Die under a debugger so all-thread backtraces show
+                    // exactly where the deadlock sits.
+                    std::process::abort();
+                }
+            }
+        }
+    });
+}
 
 fn main() -> iced::Result {
     // What Alacritty's own main() does before spawning PTYs — neither
@@ -23,6 +56,8 @@ fn main() -> iced::Result {
     // and a missing terminfo leaves full-screen apps (top/less/htop) unable
     // to enter the alternate screen.
     alacritty_terminal::tty::setup_env();
+    APP_START.get_or_init(Instant::now);
+    ui_watchdog();
 
     iced::application(App::new, App::update, App::view)
         .title(|_: &App| String::from("TuxFlow spike — iced_term"))
@@ -80,13 +115,49 @@ impl App {
         let mut tabs = HashMap::new();
         tabs.insert(0, tab);
 
+        let mut panes = panes;
+        let mut panes_created = 1;
+        if std::env::var("TUXFLOW_SPIKE_STRESS").is_ok() {
+            let flood_settings = iced_term::settings::Settings {
+                backend: iced_term::settings::BackendSettings {
+                    program: "/bin/sh".into(),
+                    args: vec!["-c".into(), "yes".into()],
+                    ..Default::default()
+                },
+                ..term_settings.clone()
+            };
+            let first = *panes.iter().next().unwrap().0;
+            let (right, _) = panes
+                .split(pane_grid::Axis::Vertical, first, Pane { id: 1 })
+                .unwrap();
+            panes
+                .split(pane_grid::Axis::Horizontal, first, Pane { id: 2 })
+                .unwrap();
+            panes
+                .split(pane_grid::Axis::Horizontal, right, Pane { id: 3 })
+                .unwrap();
+            for id in 1..=3u64 {
+                let settings = if id <= 2 {
+                    flood_settings.clone()
+                } else {
+                    term_settings.clone()
+                };
+                tabs.insert(
+                    id,
+                    iced_term::Terminal::new(id, settings)
+                        .expect("failed to create a stress terminal"),
+                );
+            }
+            panes_created = 4;
+        }
+
         (
             App {
                 panes,
                 tabs,
                 titles: HashMap::new(),
                 term_settings,
-                panes_created: 1,
+                panes_created,
                 focus: None,
                 composer: String::new(),
                 log: VecDeque::new(),
@@ -141,10 +212,15 @@ impl App {
                     side_task = self.observe_alacritty_event(id, ev);
                 }
 
+                let t0 = Instant::now();
                 let action = match self.tabs.get_mut(&id) {
                     Some(tab) => tab.handle(iced_term::Command::ProxyToBackend(cmd)),
                     None => iced_term::actions::Action::Ignore,
                 };
+                let dt = t0.elapsed();
+                if dt.as_millis() > 10 {
+                    eprintln!("[perf] handle tab {id} took {dt:?}");
+                }
                 let proxy_task = match action {
                     iced_term::actions::Action::Shutdown => {
                         let pane = self
@@ -262,6 +338,9 @@ impl App {
     }
 
     fn view(&'_ self) -> Element<'_, Event> {
+        if let Some(start) = APP_START.get() {
+            LAST_VIEW_MS.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
         let focus = self.focus;
         let total_panes = self.panes.len();
 

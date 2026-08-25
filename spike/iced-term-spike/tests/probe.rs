@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 struct Probe {
     backend: Backend,
-    rx: mpsc::Receiver<AEvent>,
+    rx: mpsc::UnboundedReceiver<AEvent>,
     events: Vec<AEvent>,
 }
 
@@ -27,7 +27,7 @@ impl Probe {
     }
 
     fn spawn_program(program: &str, args: Vec<String>) -> Self {
-        let (tx, rx) = mpsc::channel(1000);
+        let (tx, rx) = mpsc::unbounded_channel();
         let backend = Backend::new(
             1,
             tx,

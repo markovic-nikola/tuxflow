@@ -439,12 +439,14 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         let cell_height = term_size.cell_height as f32;
         let font_size = self.term.font.size;
         let font_scale_factor = self.term.font.scale_factor;
-        // Cells are drawn inside a clip layer anchored at the widget's own
-        // origin: coordinates are widget-relative and a partial bottom row
-        // cannot leak outside the terminal's bounds.
-        let layout_offset_x = 0.0;
-        let layout_offset_y = 0.0;
+        // with_clip only MASKS to `bounds` — the child frame keeps the
+        // parent's coordinate space (identity transform, no translation to
+        // the region origin), so cells must keep their absolute positions.
+        // The mask stops a partial bottom row from painting outside the
+        // terminal's bounds.
         let bounds = layout.bounds();
+        let layout_offset_x = bounds.x;
+        let layout_offset_y = bounds.y;
 
         let geom = self.term.cache.draw(renderer, viewport.size(), |frame| {
             frame.with_clip(bounds, |frame| {

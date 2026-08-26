@@ -11,6 +11,13 @@ pub enum BindingAction {
     Char(char),
     Esc(String),
     LinkOpen,
+    /// Leave the chord entirely unconsumed: nothing is written to the PTY
+    /// and the event is not captured, so it falls through to the
+    /// application's own listeners (`iced::keyboard::listen` sees only
+    /// ignored events). This is how an embedder reserves a shortcut the
+    /// defaults would otherwise swallow — the whole Ctrl+Shift alphabet
+    /// ships bound to control characters below.
+    Passthrough,
     Ignore,
 }
 
@@ -407,6 +414,37 @@ mod tests {
                 });
             assert!(found_binding.is_some());
         }
+    }
+
+    #[test]
+    fn passthrough_reserves_a_default_chord_for_the_app() {
+        let mut layout = BindingsLayout::default();
+        // Ctrl+Shift+F ships bound to ^F (0x06) — the app can't see it.
+        assert_eq!(
+            layout.get_action(
+                InputKind::Char("f".into()),
+                Modifiers::SHIFT | Modifiers::CTRL,
+                TermMode::empty(),
+            ),
+            BindingAction::Char('\x06'),
+        );
+
+        let len_before = layout.layout.len();
+        layout.add_bindings(generate_bindings!(
+            KeyboardBinding;
+            "f", Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Passthrough;
+        ));
+
+        // Replaced in place, not appended — and the chord now falls through.
+        assert_eq!(layout.layout.len(), len_before);
+        assert_eq!(
+            layout.get_action(
+                InputKind::Char("f".into()),
+                Modifiers::SHIFT | Modifiers::CTRL,
+                TermMode::empty(),
+            ),
+            BindingAction::Passthrough,
+        );
     }
 
     #[test]

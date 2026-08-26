@@ -146,3 +146,13 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    source of truth, no copied constants). `Osc52` is re-exported —
    `OnlyCopy` stays the default, which is exactly the agent-workflow
    policy: programs may set the clipboard, never read it.
+10. **`BindingAction::Passthrough`** (found live: the demo's Ctrl+Shift+F
+   search hotkey never fired — the default bindings map the whole
+   Ctrl+Shift alphabet to control characters, so the widget typed ^F into
+   the shell and captured the event before `iced::keyboard::listen`, which
+   only sees ignored events, could deliver it). Passthrough is a binding
+   that consumes nothing: no PTY write, no capture — the chord falls
+   through to the application. An embedder reserves its shortcuts by
+   overriding the default binding via the existing `AddBindings`
+   replacement mechanism (same target+modifiers+modes → replaced in
+   place). Any app shortcut on a Ctrl+Shift letter needs this.

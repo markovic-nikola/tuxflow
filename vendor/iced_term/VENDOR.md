@@ -174,3 +174,12 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    dropped first. Both now end the stream quietly: a closed channel is
    teardown, not a bug — stopping a process must not be able to take
    down the app.
+12. **Embedder-controlled link opening** (needed by the migration's M3).
+   `LinkAction::Open` returned nothing and the backend launched the URL
+   itself via `open::that` (panicking on failure, no less). On a remote
+   project that opens the WRONG THING: the printed URL names the host's
+   port, which locally is dead or another project's forward — TuxFlow
+   must rewrite it through its tunnel map (creating the forward on
+   demand) before any browser sees it. `ProcessLink(Open)` now returns
+   `Action::OpenUrl(url)` and the embedder decides; the `open` crate
+   dependency moved out of the widget accordingly.

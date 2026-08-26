@@ -2031,7 +2031,6 @@ dependencies = [
  "iced",
  "iced_core",
  "iced_graphics",
- "open",
  "tokio",
 ]
 
@@ -4750,9 +4749,11 @@ name = "tuxflow-iced"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "env_logger",
  "iced",
  "iced_term",
  "log",
+ "open",
  "tokio",
  "tuxflow-core",
 ]

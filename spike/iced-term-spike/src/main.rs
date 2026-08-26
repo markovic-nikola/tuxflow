@@ -257,6 +257,15 @@ impl App {
                     // Search results only arrive via send_search, which
                     // consumes them; nothing to do on the event path.
                     iced_term::actions::Action::SearchResult(_) => Task::none(),
+                    // Link opening moved to the embedder (fork patch 12) so
+                    // TuxFlow can rewrite remote URLs through its tunnel
+                    // map; the spike has no tunnels — open directly.
+                    iced_term::actions::Action::OpenUrl(url) => {
+                        if let Err(e) = open::that(&url) {
+                            self.log(format!("term {id}: open {url} failed: {e}"));
+                        }
+                        Task::none()
+                    }
                     iced_term::actions::Action::Ignore => Task::none(),
                 };
                 Task::batch([side_task, proxy_task])

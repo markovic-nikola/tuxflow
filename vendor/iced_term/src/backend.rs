@@ -284,7 +284,7 @@ impl Backend {
                 self.search = None;
             },
             Command::ProcessLink(link_action, point) => {
-                self.process_link_action(&term, link_action, point);
+                action = self.process_link_action(&term, link_action, point);
             },
             Command::ProcessAlacrittyEvent(..) | Command::MouseReport(..) => {
                 unreachable!()
@@ -360,7 +360,7 @@ impl Backend {
         terminal: &Term<EventProxy>,
         link_action: LinkAction,
         point: Point,
-    ) {
+    ) -> Action {
         match link_action {
             LinkAction::Hover => {
                 let hovered = self.regex_match_at(
@@ -371,22 +371,21 @@ impl Backend {
                 self.last_content.hovered_url =
                     hovered.as_ref().map(|range| extract_text(terminal, range));
                 self.last_content.hovered_hyperlink = hovered;
+                Action::Ignore
             },
             LinkAction::Clear => {
                 self.last_content.hovered_hyperlink = None;
                 self.last_content.hovered_url = None;
+                Action::Ignore
             },
-            LinkAction::Open => {
-                self.open_link();
+            // The embedder opens the URL, not the widget: a remote
+            // project's URL names the HOST's port, which locally is dead
+            // or someone else's forward — it must be rewritten through the
+            // tunnel map (and the forward created on demand) first.
+            LinkAction::Open => match &self.last_content.hovered_url {
+                Some(url) => Action::OpenUrl(url.clone()),
+                None => Action::Ignore,
             },
-        };
-    }
-
-    fn open_link(&self) {
-        if let Some(url) = &self.last_content.hovered_url {
-            open::that(url).unwrap_or_else(|_| {
-                panic!("link opening is failed");
-            })
         }
     }
 

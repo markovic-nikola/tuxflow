@@ -56,6 +56,12 @@ pub struct ProcessEntry {
     /// The last stop's remote kill is fire-and-forget — the next spawn
     /// clears any surviving session inline instead of reattaching to it.
     pub remote_fresh_next: bool,
+    /// One-shot browser auto-open, armed only by user-initiated starts
+    /// (never auto-restarts or reattaches). Fires when the badge is final,
+    /// or after a 5 s grace for provisional-only badges.
+    pub pending_auto_open: bool,
+    /// The provisional-badge grace timer is already scheduled.
+    pub auto_open_grace: bool,
 }
 
 impl ProcessEntry {
@@ -73,6 +79,8 @@ impl ProcessEntry {
             remote_pidfile: None,
             remote_session: None,
             remote_fresh_next: false,
+            pending_auto_open: false,
+            auto_open_grace: false,
         }
     }
 

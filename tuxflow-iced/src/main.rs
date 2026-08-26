@@ -10,7 +10,7 @@
 mod processes;
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::Event as AEvent;
 use alacritty_terminal::grid::Dimensions;
@@ -23,11 +23,19 @@ use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
 use tuxflow_core::remote::{self, ProjectLocation};
-use tuxflow_core::util::port_detector::{PortDetector, remap_url_port};
+use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
 use processes::{ProcessEntry, Status, plan_after_exit};
 
+/// Ports-poll cadence: fast while a run is settling (a new forward just
+/// opened), backed off once nothing new appears (GTK behavior).
+const POLL_FAST: Duration = Duration::from_secs(2);
+const POLL_SLOW: Duration = Duration::from_secs(30);
+/// Provisional badges get this long to firm up before auto-open fires.
+const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
+
 fn main() -> iced::Result {
+    env_logger::init();
     // VTE set TERM for its children silently; on this stack it is the
     // embedder's job (spike finding — top/less break without it).
     alacritty_terminal::tty::setup_env();
@@ -61,6 +69,9 @@ struct App {
     /// and the remote→local mapping for display (remaps on collision).
     tunnels: Option<TunnelManager>,
     port_map: HashMap<u16, u16>,
+    poll_interval: Duration,
+    poll_chain_started: bool,
+    composer: String,
     next_term_id: u64,
     terminals_created: usize,
 }
@@ -83,6 +94,17 @@ enum Event {
         index: usize,
         generation: u64,
     },
+    /// Ports-poll cadence tick (remote projects): ask the host what the
+    /// running sessions listen on — TUI runners never print their URL.
+    PortsPollTick,
+    PortsPolled(HashMap<String, Vec<u16>>),
+    /// A provisional badge's auto-open grace expired.
+    AutoOpenDue {
+        index: usize,
+        generation: u64,
+    },
+    ComposerChanged(String),
+    ComposerSend,
 }
 
 impl App {
@@ -110,6 +132,9 @@ impl App {
             selected: 0,
             ports: PortDetector::new(),
             port_map: HashMap::new(),
+            poll_interval: POLL_FAST,
+            poll_chain_started: false,
+            composer: String::new(),
             next_term_id: 0,
             terminals_created: 0,
         };
@@ -167,21 +192,35 @@ impl App {
 
     /// Start what should be up after load: sessions still alive on the host
     /// (reattach — the UI must never show "stopped" for a running detached
-    /// process) and start_with_project ones.
+    /// process) and start_with_project ones. Only the latter count as
+    /// user-initiated for auto-open purposes.
     fn boot_processes(&mut self, live_sessions: &[String]) -> Task<Event> {
         let key = self.location.key();
         let mut tasks = Vec::new();
         for i in 0..self.entries.len() {
             let name = self.entries[i].config.name.clone();
             let live = live_sessions.contains(&remote::remote_session_name(&key, &name));
-            if live || self.entries[i].config.start_with_project {
+            if live {
                 tasks.push(self.start(i));
+            } else if self.entries[i].config.start_with_project {
+                tasks.push(self.start_fresh(i));
             }
         }
         if self.entries.is_empty() {
             tasks.push(self.add_terminal());
         }
+        // Remote: begin the self-perpetuating ports-poll chain, once.
+        if self.tunnels.is_some() && !self.poll_chain_started {
+            self.poll_chain_started = true;
+            tasks.push(self.schedule_poll());
+        }
         Task::batch(tasks)
+    }
+
+    fn schedule_poll(&self) -> Task<Event> {
+        Task::perform(tokio::time::sleep(self.poll_interval), |_| {
+            Event::PortsPollTick
+        })
     }
 
     /// Spawn (or respawn/reattach) a process's terminal. Fresh terminal id
@@ -214,11 +253,14 @@ impl App {
         }
     }
 
-    /// Manual start: forgives past failures and cancels pending timers.
+    /// Manual start: forgives past failures, cancels pending timers, and
+    /// arms the one-shot auto-open (user-initiated starts only).
     fn start_fresh(&mut self, index: usize) -> Task<Event> {
         let entry = &mut self.entries[index];
         entry.restart_attempts = 0;
         entry.restart_generation += 1;
+        entry.pending_auto_open = entry.config.open_in_browser;
+        entry.auto_open_grace = false;
         self.start(index)
     }
 
@@ -325,9 +367,9 @@ impl App {
     /// Feed the scanner (remote output arrives hard-wrapped at pane width —
     /// scan_output_wrapped rejoins it) and keep a forward alive for every
     /// local port it has seen.
-    fn rescan_ports(&mut self, index: usize) {
+    fn rescan_ports(&mut self, index: usize) -> Task<Event> {
         let Some(term) = self.entries[index].terminal.as_ref() else {
-            return;
+            return Task::none();
         };
         let name = self.entries[index].config.name.clone();
         let dump = visible_text(term);
@@ -344,6 +386,52 @@ impl App {
                     self.port_map.insert(port, local);
                 }
             }
+        }
+        self.maybe_auto_open(index)
+    }
+
+    /// The one-shot browser open: fires when the badge is final, or arms a
+    /// 5 s grace when only a provisional badge exists — never on
+    /// first-URL-seen without one of those.
+    fn maybe_auto_open(&mut self, index: usize) -> Task<Event> {
+        let entry = &self.entries[index];
+        let name = entry.config.name.clone();
+        if !entry.pending_auto_open || !self.ports.has_port(&name) {
+            return Task::none();
+        }
+        if self.ports.badge_final(&name) {
+            self.open_in_browser(index);
+            Task::none()
+        } else if !entry.auto_open_grace {
+            self.entries[index].auto_open_grace = true;
+            let generation = self.entries[index].restart_generation;
+            Task::perform(tokio::time::sleep(AUTO_OPEN_GRACE), move |_| {
+                Event::AutoOpenDue { index, generation }
+            })
+        } else {
+            Task::none()
+        }
+    }
+
+    fn open_in_browser(&mut self, index: usize) {
+        let name = self.entries[index].config.name.clone();
+        self.entries[index].pending_auto_open = false;
+        let Some(url) = self.browser_url(&name) else {
+            return;
+        };
+        log::info!("auto-open {url}");
+        if let Err(e) = open::that(&url) {
+            log::warn!("auto-open {url} failed: {e}");
+        }
+    }
+
+    /// A full URL for the browser, tunnel-mapped on remote projects.
+    fn browser_url(&self, name: &str) -> Option<String> {
+        let port = self.ports.get_port(name)?;
+        let local = self.port_map.get(&port).copied().unwrap_or(port);
+        match self.ports.get_url(name) {
+            Some(url) => Some(remap_url_port(url, port, local)),
+            None => Some(format!("http://localhost:{local}")),
         }
     }
 
@@ -397,6 +485,104 @@ impl App {
                 });
                 if due { self.start(index) } else { Task::none() }
             }
+            Event::PortsPollTick => {
+                let sessions: Vec<String> = self
+                    .entries
+                    .iter()
+                    .filter(|e| e.is_running())
+                    .filter_map(|e| e.remote_session.clone())
+                    .collect();
+                let host = self.location.host().map(String::from);
+                match (host, sessions.is_empty()) {
+                    (Some(host), false) => Task::perform(
+                        tokio::task::spawn_blocking(move || {
+                            remote::ports::session_ports(&host, &sessions)
+                        }),
+                        |joined| Event::PortsPolled(joined.unwrap_or_default()),
+                    ),
+                    _ => {
+                        // Nothing running — idle at the slow cadence.
+                        self.poll_interval = POLL_SLOW;
+                        self.schedule_poll()
+                    }
+                }
+            }
+            Event::PortsPolled(session_ports) => {
+                // Everything the host-side walk found forwards 1:1
+                // (ensure_exact): remote dev servers bake their own port
+                // into URLs they serve, so a remapped forward would listen
+                // where nothing ever knocks. A taken local port is a hard
+                // failure by design, not a remap.
+                let mut opened = false;
+                for (session, ports) in &session_ports {
+                    let ours = self
+                        .entries
+                        .iter()
+                        .any(|e| e.remote_session.as_deref() == Some(session));
+                    if !ours {
+                        continue;
+                    }
+                    for &port in ports {
+                        if self.port_map.contains_key(&port) {
+                            continue;
+                        }
+                        if let Some(tunnels) = &mut self.tunnels {
+                            match tunnels.ensure_exact(port) {
+                                Some(local) => {
+                                    self.port_map.insert(port, local);
+                                    opened = true;
+                                    log::info!("exact forward {port} for {session}");
+                                }
+                                None => {
+                                    log::warn!("exact forward for {port} failed — local port taken")
+                                }
+                            }
+                        }
+                    }
+                }
+                // New forward → a run is settling: poll fast. Quiet → back
+                // off toward the slow cadence.
+                self.poll_interval = if opened {
+                    POLL_FAST
+                } else {
+                    (self.poll_interval * 2).min(POLL_SLOW)
+                };
+                self.schedule_poll()
+            }
+            Event::AutoOpenDue { index, generation } => {
+                let due = self
+                    .entries
+                    .get(index)
+                    .is_some_and(|e| e.restart_generation == generation && e.pending_auto_open);
+                if due && self.ports.has_port(&self.entries[index].config.name) {
+                    self.open_in_browser(index);
+                }
+                Task::none()
+            }
+            Event::ComposerChanged(value) => {
+                self.composer = value;
+                Task::none()
+            }
+            Event::ComposerSend => {
+                // The composer types into the selected terminal like the GTK
+                // composer_bar does via feed_child — local input beats ssh
+                // typing latency for remote agents.
+                if !self.composer.is_empty() {
+                    let mut bytes = self.composer.clone().into_bytes();
+                    bytes.push(b'\r');
+                    if let Some(term) = self
+                        .entries
+                        .get_mut(self.selected)
+                        .and_then(|e| e.terminal.as_mut())
+                    {
+                        term.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
+                            bytes,
+                        )));
+                        self.composer.clear();
+                    }
+                }
+                Task::none()
+            }
             Event::Terminal(iced_term::Event::BackendCall(term_id, cmd)) => {
                 let Some(index) = self.entry_index_for_term(term_id) else {
                     return Task::none();
@@ -437,14 +623,33 @@ impl App {
                     iced_term::actions::Action::PublishSelection(text) => {
                         iced::clipboard::write_primary(text)
                     }
+                    iced_term::actions::Action::OpenUrl(url) => {
+                        // Ctrl+click: the terminal shows the HOST's port —
+                        // rewrite through the tunnel map, creating/reviving
+                        // the forward the click is about to use (ensure).
+                        let tunnels = &mut self.tunnels;
+                        let port_map = &mut self.port_map;
+                        let rewritten = rewrite_clicked_url(&url, |port| {
+                            let local = tunnels.as_mut()?.ensure(port)?;
+                            port_map.insert(port, local);
+                            Some(local)
+                        });
+                        log::info!("open link {rewritten}");
+                        if let Err(e) = open::that(&rewritten) {
+                            log::warn!("open {rewritten} failed: {e}");
+                        }
+                        Task::none()
+                    }
                     _ => Task::none(),
                 };
 
-                if rescan {
-                    self.rescan_ports(index);
-                }
+                let scan_task = if rescan {
+                    self.rescan_ports(index)
+                } else {
+                    Task::none()
+                };
 
-                Task::batch([side_task, action_task])
+                Task::batch([side_task, action_task, scan_task])
             }
         }
     }
@@ -653,11 +858,31 @@ impl App {
             }
         };
 
-        column![
+        let mut col = column![
             container(controls).padding([4, 8]),
             container(body).width(Length::Fill).height(Length::Fill),
-        ]
-        .into()
+        ];
+
+        // The composer under agent terminals (GTK composer_bar parity):
+        // local typing, one atomic send — beats ssh keystroke latency.
+        if entry.config.category == ProcessCategory::Agent && entry.terminal.is_some() {
+            col = col.push(
+                container(
+                    row![
+                        iced::widget::text_input("message to agent — Enter sends", &self.composer)
+                            .on_input(Event::ComposerChanged)
+                            .on_submit(Event::ComposerSend)
+                            .size(13),
+                        action_button("send", Event::ComposerSend),
+                    ]
+                    .spacing(6)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([4, 8]),
+            );
+        }
+
+        col.into()
     }
 
     fn view_status_bar(&'_ self) -> Element<'_, Event> {

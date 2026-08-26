@@ -12,3 +12,4 @@ tokio = { version = "1.50.0", features = ["full"] }
 iced_graphics = { version = "0.14.0", default-features = false }
 iced_core = "0.14.0"
 anyhow = "1.0.102"
+log = "0.4"

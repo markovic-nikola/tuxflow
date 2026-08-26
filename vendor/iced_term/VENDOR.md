@@ -183,3 +183,21 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    demand) before any browser sees it. `ProcessLink(Open)` now returns
    `Action::OpenUrl(url)` and the embedder decides; the `open` crate
    dependency moved out of the widget accordingly.
+13. **Cell-metrics initialization + widget-state carryover** (found live on
+   the first real multi-project session: a reattached remote session
+   rendered as normal-size glyphs mashed into a tiny corner — the whole
+   grid drawn at 1×1-pixel cell positions).
+   - `TerminalSize` defaults to 1×1 px cells, and a reattached tmux
+     session replays its screen INSTANTLY — synced and drawn before the
+     widget's first Resize ever lands. `Terminal::new` now seeds the
+     backend with an 80×24 grid at the font's true advance/line-height,
+     so nothing can ever render on the 1×1 grid.
+   - iced reuses widget state by TYPE at a tree position: showing a
+     DIFFERENT terminal in the same slot (a process switcher — exactly
+     TuxFlow's main pane) inherited the previous terminal's recorded
+     size, and "size unchanged" skipped the new terminal's resize
+     forever. `TerminalViewState.sized_for` tracks which terminal the
+     size was sent to, not just the size.
+   Also logs each terminal's measured cell metrics at INFO — if a
+   platform's font resolution ever produces degenerate metrics, the log
+   says so immediately.

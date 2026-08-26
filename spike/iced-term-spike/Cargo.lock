@@ -1429,6 +1429,7 @@ dependencies = [
  "iced",
  "iced_core",
  "iced_graphics",
+ "log",
  "tokio",
 ]
 

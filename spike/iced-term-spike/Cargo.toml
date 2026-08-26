@@ -10,6 +10,8 @@ description = "TuxFlow spike: can iced + iced_term (alacritty_terminal) replace 
 iced_term = { path = "vendor/iced_term" }
 iced = "0.14.0"
 alacritty_terminal = "0.25.1"
+arboard = "3.6.1"
+png = "0.18.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync"] }

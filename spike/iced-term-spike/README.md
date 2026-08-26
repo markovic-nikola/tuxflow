@@ -45,7 +45,7 @@ those needs.
 
 1. ~~**Scrollback search UI/API**~~ — done (fork patch 8): `SearchNext`/`SearchClear` commands over alacritty's `RegexSearch`, wrap-around stepping, scroll-to-match, focused-match highlight in the view. The demo binds Ctrl+Shift+F to a search bar (incremental as you type, Enter/▲ = older, ▼ = newer, Esc closes). Pinned by the `scrollback_search_scrolls_to_match_and_wraps` probe.
 2. **IME (preedit only)** — zero `Ime` handling in the widget (grep-verified). Narrower than first scored: dead-key composition **works** (verified live — `ü` composes and renders; winit handles xkb compose itself). What's missing is preedit-style IME (CJK input methods). iced 0.14 itself has IME support (text_input uses it), so this is widget work, not framework work.
-3. **Image clipboard** — iced's clipboard tasks are text-only (confirmed live: Ctrl+Shift+V with an image does nothing). TuxFlow's paste-PNG-to-remote path needs raw clipboard access (e.g. `window_clipboard`/arboard directly). GTK wins here today.
+3. **Image clipboard** — iced's clipboard tasks are text-only (confirmed live: Ctrl+Shift+V with an image does nothing). ~~GTK wins here today~~ — demo-proven app-level work, not a framework wall: the widget leaves Ctrl+Shift+V *unconsumed* when there's no text, so the demo's `keyboard::listen` hook catches it and goes to arboard for the raw image → PNG in temp → path typed into the terminal (TuxFlow's paste-PNG story, local half). `png_encode_roundtrip` unit test + `examples/clipboard_image_check.rs` (arboard set→get byte-identical under Xvfb) pin the pieces; the hotkey fallthrough with an image-only clipboard still wants a check on a real session.
 4. **Perf** — ~~the backend clones the entire `Grid` (incl. scrollback) on every sync~~ hit for real during manual testing, in three escalating rounds, **all fixed in the fork** (VENDOR.md patches 3, 5, 6): viewport-only snapshots + event-classified syncs (scroll freeze); unbounded event channel + coalescing (a genuine three-way deadlock — alacritty emits events while the PTY thread holds the terminal lock); run-merged text drawing + lock-free event handling + contention-skipping sync (typing latency under floods). Verified: 45 s of two endless `yes` panes on a software renderer — zero stalls, zero syncs >10 ms, zero draws >20 ms.
 5. ~~**Scrollback length config etc.**~~ — mostly done (fork patch 9): `BackendSettings` plumbs `scrolling_history`, `semantic_escape_chars`, `kitty_keyboard` and OSC 52 policy into `term::Config` (probes pin the first two end-to-end). Still view-side, not config: cursor *styles* (beam/underline drawing) and bold-is-bright color mapping.
 6. **Accessibility** — iced has none yet (roadmap). GTK regression, not terminal-specific.
@@ -90,15 +90,20 @@ failure found was diagnosed to root cause and fixed in the fork the same day
       after the three-round perf saga (gaps list, item 4).
 - [x] Window resize/scaling — pass.
 - [x] Dead-key composition (`ü`) — **works** (winit xkb compose).
-- [x] Image paste — fails as scored (gaps list, item 3).
+- [x] Image paste — failed as scored during the walkthrough; the arboard
+      fallback added after (gaps list, item 3) awaits a real-session
+      re-check: copy an image, Ctrl+Shift+V in a terminal → a PNG path
+      should be typed.
 
 ## Verdict
 
-**The iced path is viable.** All 9 headless probes pass; the full manual
-walkthrough passes. Every VTE capability TuxFlow uses is either working or
-bounded, known work: scrollback-search UI, preedit IME, image-clipboard
-access, PRIMARY auto-publish, config plumbing — plus iced's missing
-accessibility story, the one framework-level regression.
+**The iced path is viable.** All 13 headless probes pass; the full manual
+walkthrough passes. Of the original gap list, scrollback search, PRIMARY
+auto-publish, config plumbing and image-clipboard access have since been
+closed in the fork/demo (patches 7–9 + the arboard fallback). What remains:
+preedit IME (widget work; iced itself has it), cursor-style/bold-is-bright
+rendering, and iced's missing accessibility story — the one framework-level
+regression.
 
 Two findings tip the balance beyond parity:
 

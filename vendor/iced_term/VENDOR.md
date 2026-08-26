@@ -164,3 +164,13 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    overriding the default binding via the existing `AddBindings`
    replacement mechanism (same target+modifiers+modes → replaced in
    place). Any app shortcut on a Ctrl+Shift letter needs this.
+11. **Graceful stream teardown** (found designing the process manager's
+   stop button, which drops a RUNNING terminal). The subscription stream
+   panicked when the event channel closed without an Exit event — but
+   that is exactly what dropping a live terminal does: Backend drop sends
+   the PTY loop `Msg::Shutdown`, alacritty's `Pty::drop` SIGHUPs and
+   reaps the child on the PTY thread, and no Exit is ever emitted. Same
+   for the mid-burst `output.send` unwrap when the subscription itself is
+   dropped first. Both now end the stream quietly: a closed channel is
+   teardown, not a bug — stopping a process must not be able to take
+   down the app.

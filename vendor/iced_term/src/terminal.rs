@@ -176,7 +176,6 @@ fn terminal_subscription_stream(
     let id = data.id;
     let event_receiver = data.event_receiver.clone();
     iced::stream::channel(1000, async move |mut output| {
-        let mut shutdown = false;
         loop {
             let mut event_receiver = event_receiver.lock().await;
             match event_receiver.recv().await {
@@ -200,9 +199,6 @@ fn terminal_subscription_stream(
                                 Err(_) => break,
                             },
                         };
-                        if matches!(ev, AlacrittyEvent::Exit) {
-                            shutdown = true;
-                        }
                         if matches!(ev, AlacrittyEvent::Wakeup) {
                             wakeup = true;
                         } else if matches!(ev, AlacrittyEvent::MouseCursorDirty)
@@ -233,24 +229,29 @@ fn terminal_subscription_stream(
                     }
 
                     for ev in events {
-                        output
+                        let sent = output
                             .send(Event::BackendCall(
                                 id,
                                 backend::Command::ProcessAlacrittyEvent(ev),
                             ))
-                            .await
-                            .unwrap_or_else(|_| {
-                                panic!("iced_term stream {}: sending BackendEventReceived event is failed", id)
-                            });
+                            .await;
+                        if sent.is_err() {
+                            // Subscription dropped mid-burst (terminal
+                            // closed) — teardown, not an error.
+                            return;
+                        }
                     }
                 },
                 None => {
-                    if !shutdown {
-                        panic!("iced_term stream {}: terminal event channel closed unexpected", id);
-                    }
-                    // Upstream looped forever here: recv() on a closed,
-                    // drained channel returns None immediately — a hot spin
-                    // burning a core per exited terminal. End the stream.
+                    // The channel closes on child exit (after Exit was
+                    // forwarded) or when the embedder DROPS a running
+                    // terminal (stop button, closed pane) — the drop sends
+                    // the PTY loop Msg::Shutdown, which never emits Exit.
+                    // Both are legitimate teardowns; upstream looped forever
+                    // here (hot spin), and panicking on the dropped case
+                    // would take down the app for stopping a process. End
+                    // the stream.
+                    let _ = id;
                     return;
                 },
             }

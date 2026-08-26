@@ -54,7 +54,7 @@ tuxflow-core/              # GUI-independent (no GTK/iced/VTE types allowed)
     util/port_detector.rs  # Regex scan terminal output for ports/URLs
   tests/                   # config, detector, log buffer, port detector, projects roundtrip, remote fs
   examples/                # detector_check, port_scan_check, remote_ports_check
-tuxflow-iced/              # The iced shell (migration target; M0 = terminal + config + port badge)
+tuxflow-iced/              # The iced shell (M1: sidebar, process lifecycle, auto-restart, port badges)
 vendor/iced_term/          # Hardened iced_term fork (MIT) — VENDOR.md documents every patch
 spike/iced-term-spike/     # Frozen spike record (own workspace; README = VTE-parity scorecard)
 src/                       # The GTK app — package `tuxflow` (root)
@@ -129,7 +129,7 @@ Always run `cargo fmt --all` after changing Rust code, before committing.
 
 ## TODO
 
-- **GTK→iced migration** — M0 done (2026-08-26, branch `iced-migration`): workspace split, tuxflow-core extracted (121 tests), tuxflow-iced boots a terminal with the config loader + live port badge. Next, M1: sidebar of processes + ProcessManager re-targeted from VTE spawn to the alacritty backend, auto-restart on `ChildExit`. Then M2 (remote: tmux wrap/tunnels/ports carry over; OSC 52 events replace the three-gate clipboard bridge — the honest "can switch" bar, since all projects live on the VPS), M3 (badges/auto-open), M4 (dialogs/settings/theming), M5 (parity walkthrough, packaging, flip default). Migration lessons so far: reserve app chords in the terminal via `BindingAction::Passthrough`; never store grid coordinates across syncs (the grid rotates under new output)
+- **GTK→iced migration** — M0 + M1 done (2026-08-26, branch `iced-migration`): workspace split, tuxflow-core extracted (121 tests); tuxflow-iced has the category sidebar (status dots, port badges), process lifecycle on the alacritty backend (spawn `$SHELL -li -c`, stop = drop → Pty SIGHUPs+reaps on its own thread, restart), and auto-restart mirroring the GTK backoff policy via pure unit-tested `plan_after_exit` (tuxflow-iced/src/processes.rs). Next, M2 (remote: tmux wrap/tunnels/ports carry over; OSC 52 events replace the three-gate clipboard bridge — the honest "can switch" bar, since all projects live on the VPS), M3 (badges/auto-open), M4 (dialogs/settings/theming), M5 (parity walkthrough, packaging, flip default). Migration lessons so far: reserve app chords in the terminal via `BindingAction::Passthrough`; never store grid coordinates across syncs (the grid rotates under new output)
 - **File upload to remote terminals** — Extend the image-paste bridge to arbitrary files: Ctrl+Shift+V with a file on the clipboard (`text/uri-list`) uploads over the existing ssh connection and types the remote path, like images do today (`remote::upload_image`). Plus a `GtkDropTarget` on the terminal view so drag-and-drop works too — local projects get path-paste-on-drop natively from VTE; remote should match
 - **Split terminal view** — Currently `gtk4::Stack` (one at a time). Would need `gtk4::Paned` for side-by-side
 - **Composer inline images** — Composer delivers attachments first, then text. Nicer: `insert_paintable` thumbnails at the cursor, send walks the buffer and interleaves text chunks with Ctrl+V per image so `[Image #N]` lands where it was placed. Replaces the chip row; needs thumbnail scaling, upload-in-flight gating on send, identity-based (not order) texture→path matching

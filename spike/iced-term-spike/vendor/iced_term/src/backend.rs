@@ -167,14 +167,22 @@ impl Backend {
         pty_event_proxy_sender: mpsc::UnboundedSender<Event>,
         settings: BackendSettings,
     ) -> Result<Self> {
+        // The terminal knobs ride in through BackendSettings; everything
+        // not exposed keeps alacritty's default.
+        let config = term::Config {
+            scrolling_history: settings.scrolling_history,
+            semantic_escape_chars: settings.semantic_escape_chars,
+            kitty_keyboard: settings.kitty_keyboard,
+            osc52: settings.osc52,
+            ..term::Config::default()
+        };
+
         let pty_config = tty::Options {
             shell: Some(tty::Shell::new(settings.program, settings.args)),
             working_directory: settings.working_directory,
             env: settings.env,
             ..tty::Options::default()
         };
-
-        let config = term::Config::default();
         let terminal_size = TerminalSize::default();
         let pty = tty::new(&pty_config, terminal_size.into(), id)?;
 

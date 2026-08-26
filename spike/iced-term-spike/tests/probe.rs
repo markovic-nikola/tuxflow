@@ -29,17 +29,16 @@ impl Probe {
     }
 
     fn spawn_program(program: &str, args: Vec<String>) -> Self {
+        Self::spawn_with(BackendSettings {
+            program: program.into(),
+            args,
+            ..Default::default()
+        })
+    }
+
+    fn spawn_with(settings: BackendSettings) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let backend = Backend::new(
-            1,
-            tx,
-            BackendSettings {
-                program: program.into(),
-                args,
-                ..Default::default()
-            },
-        )
-        .expect("failed to spawn PTY backend");
+        let backend = Backend::new(1, tx, settings).expect("failed to spawn PTY backend");
         Self {
             backend,
             rx,
@@ -232,6 +231,53 @@ fn url_regex_hover_match() {
     assert_eq!(
         probe.backend.renderable_content().hovered_url.as_deref(),
         Some("http://localhost:5173/x")
+    );
+}
+
+/// term::Config plumbing (VTE `set_scrollback_lines` parity): the
+/// configured history cap bounds how far the viewport can scroll back.
+#[test]
+fn scrollback_history_config_is_honored() {
+    let mut probe = Probe::spawn_with(BackendSettings {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), "seq 1 200; sleep 2".into()],
+        scrolling_history: 50,
+        ..Default::default()
+    });
+    assert!(probe.wait(5, |text, _, _| text.contains("200")));
+
+    probe.backend.handle(Command::Scroll(100_000));
+    probe.backend.sync();
+    assert_eq!(
+        probe.backend.renderable_content().display_offset,
+        50,
+        "scrolling must clamp at the configured 50-line history"
+    );
+}
+
+/// term::Config plumbing: custom word boundaries reach double-click
+/// (semantic) selection.
+#[test]
+fn semantic_escape_chars_config_is_honored() {
+    let mut probe = Probe::spawn_with(BackendSettings {
+        program: "/bin/sh".into(),
+        args: vec!["-c".into(), r#"printf 'foo.bar baz'; sleep 2"#.into()],
+        // '.' added as a boundary — the default set does not include it.
+        semantic_escape_chars: ". ".into(),
+        ..Default::default()
+    });
+    assert!(probe.wait(5, |text, _, _| text.contains("foo.bar")));
+
+    // Double-click on the 'a' of "bar" (col 5).
+    probe
+        .backend
+        .handle(Command::SelectStart(SelectionType::Semantic, (5.0, 0.0)));
+    let action = probe.backend.handle(Command::SelectRelease);
+    assert_eq!(
+        action,
+        Action::PublishSelection("bar".into()),
+        "'.' boundary not honored; visible:\n{}",
+        probe.visible_text()
     );
 }
 

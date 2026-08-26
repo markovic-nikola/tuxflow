@@ -22,15 +22,31 @@ pub struct BackendSettings {
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub working_directory: Option<PathBuf>,
+    /// Scrollback length in lines (`term::Config::scrolling_history`).
+    pub scrolling_history: usize,
+    /// Characters that terminate a double-click (semantic) selection.
+    pub semantic_escape_chars: String,
+    /// Enable the kitty keyboard protocol (a capability VTE lacks).
+    pub kitty_keyboard: bool,
+    /// OSC 52 policy. The default (`OnlyCopy`) is what agent workflows
+    /// need: programs may set the clipboard, never read it.
+    pub osc52: alacritty_terminal::term::Osc52,
 }
 
 impl Default for BackendSettings {
     fn default() -> Self {
+        // Terminal knobs inherit alacritty's own defaults — one source of
+        // truth instead of copied constants.
+        let config = alacritty_terminal::term::Config::default();
         Self {
             program: DEFAULT_SHELL.to_string(),
             args: vec![],
             env: HashMap::new(),
             working_directory: None,
+            scrolling_history: config.scrolling_history,
+            semantic_escape_chars: config.semantic_escape_chars,
+            kitty_keyboard: config.kitty_keyboard,
+            osc52: config.osc52,
         }
     }
 }

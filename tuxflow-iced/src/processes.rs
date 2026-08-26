@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tuxflow_core::config::loader;
+use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::detect::detector;
 use tuxflow_core::remote::{self, ProjectLocation};
@@ -99,13 +100,12 @@ pub fn entries_from(configs: Vec<ProcessConfig>) -> Vec<ProcessEntry> {
         .collect()
 }
 
-/// Project name + process list for a local directory: tuxflow.toml when
+/// Project name + process configs for a local directory: tuxflow.toml when
 /// present, stack detection otherwise (conservative variant — same as the
 /// GTK app's startup path). Remote projects go through the async core
 /// probe instead.
-pub fn load_local_project(dir: &Path) -> (String, Vec<ProcessEntry>) {
-    let (name, configs) = match loader::find_config(dir).and_then(|p| loader::load_config(&p).ok())
-    {
+pub fn load_local_configs(dir: &Path) -> (String, Vec<ProcessConfig>) {
+    match loader::find_config(dir).and_then(|p| loader::load_config(&p).ok()) {
         Some(config) => (config.project.name, config.process),
         None => {
             let name = dir
@@ -118,8 +118,48 @@ pub fn load_local_project(dir: &Path) -> (String, Vec<ProcessEntry>) {
                 .collect();
             (name, processes)
         }
-    };
-    (name, entries_from(configs))
+    }
+}
+
+/// Overlay per-project persisted state (projects.toml) onto the fresh
+/// config/detection list — the GTK load policy, verbatim:
+/// - A custom command sharing a detected process's name is the user's EDIT
+///   of that process; it overrides the fresh detection (or toggles like
+///   open_in_browser would reset on every restart). Other custom commands
+///   append.
+/// - Auto-detected processes the user deleted stay gone; custom-named ones
+///   are immune to the filter.
+/// - The saved order wins; names it doesn't know keep their relative order
+///   at the end.
+pub fn merge_saved(
+    mut configs: Vec<ProcessConfig>,
+    saved: &SavedProjects,
+    key: &str,
+) -> Vec<ProcessConfig> {
+    let mut custom_names: Vec<String> = Vec::new();
+    if let Some(custom) = saved.get_custom_commands(key) {
+        for cmd in custom.clone() {
+            custom_names.push(cmd.name.clone());
+            match configs.iter_mut().find(|c| c.name == cmd.name) {
+                Some(existing) => *existing = cmd,
+                None => configs.push(cmd),
+            }
+        }
+    }
+
+    configs.retain(|c| custom_names.contains(&c.name) || !saved.is_process_deleted(key, &c.name));
+
+    if let Some(order) = saved.get_process_order(key) {
+        let position = |name: &str| order.iter().position(|n| n == name);
+        let mut indexed: Vec<(usize, ProcessConfig)> = configs
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (position(&c.name).map_or(order.len() + i, |p| p), c))
+            .collect();
+        indexed.sort_by_key(|(pos, _)| *pos);
+        configs = indexed.into_iter().map(|(_, c)| c).collect();
+    }
+    configs
 }
 
 /// Spawn settings for a process, local or remote — the GTK recipes:
@@ -205,6 +245,7 @@ pub fn spawn_settings(
             env,
             ..Default::default()
         },
+        theme: iced_term::settings::ThemeSettings::new(Box::new(crate::theme::terminal_palette())),
         ..Default::default()
     }
 }
@@ -393,6 +434,64 @@ mod tests {
     fn user_stop_of_lost_connection_stays_stopped() {
         let (status, ..) = plan_after_exit(true, true, true, Some(255), None, 2);
         assert_eq!(status, Status::Stopped);
+    }
+
+    fn pc(name: &str) -> ProcessConfig {
+        ProcessConfig {
+            name: name.into(),
+            command: format!("echo {name}"),
+            working_dir: None,
+            start_with_project: false,
+            auto_restart: false,
+            open_in_browser: false,
+            restart_when_changed: Vec::new(),
+            env: Default::default(),
+            category: ProcessCategory::Command,
+            auto_named: false,
+            display_name: None,
+        }
+    }
+
+    /// A custom command with a detected process's name is the user's edit —
+    /// it must override the fresh detection, or persisted toggles would
+    /// reset on every restart.
+    #[test]
+    fn custom_command_overrides_same_named_detection() {
+        let mut saved = SavedProjects::default();
+        let mut edited = pc("web");
+        edited.open_in_browser = true;
+        saved.add_custom_command("k", edited);
+        saved.add_custom_command("k", pc("extra"));
+
+        let merged = merge_saved(vec![pc("web"), pc("api")], &saved, "k");
+        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["web", "api", "extra"]);
+        assert!(merged[0].open_in_browser, "user edit lost to detection");
+    }
+
+    /// Deleted auto-detected processes stay gone; custom-named ones are
+    /// immune to the filter.
+    #[test]
+    fn deleted_processes_stay_deleted() {
+        let mut saved = SavedProjects::default();
+        saved.add_deleted_process("k", "api");
+        saved.add_deleted_process("k", "mine");
+        saved.add_custom_command("k", pc("mine"));
+
+        let merged = merge_saved(vec![pc("web"), pc("api")], &saved, "k");
+        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["web", "mine"]);
+    }
+
+    /// Saved order wins; unknown names keep relative order at the end.
+    #[test]
+    fn saved_order_applies() {
+        let mut saved = SavedProjects::default();
+        saved.set_process_order("k", vec!["api".into(), "web".into()]);
+
+        let merged = merge_saved(vec![pc("web"), pc("api"), pc("new")], &saved, "k");
+        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["api", "web", "new"]);
     }
 
     /// A stable connection forgives past outages, like stable runs do.

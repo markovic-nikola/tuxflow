@@ -12,6 +12,7 @@ iced = "0.14.0"
 alacritty_terminal = "0.25.1"
 arboard = "3.6.1"
 png = "0.18.1"
+open = "5.3.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync"] }

@@ -8,6 +8,10 @@ pub enum Action {
     PublishSelection(String),
     /// Outcome of a `SearchNext` command — whether a match is now focused.
     SearchResult(bool),
+    /// The user opened a hovered link (Ctrl+click). The embedder launches
+    /// the browser — after rewriting the URL if the terminal is remote
+    /// (the printed port is the host's; only a tunnel makes it local).
+    OpenUrl(String),
     #[default]
     Ignore,
 }

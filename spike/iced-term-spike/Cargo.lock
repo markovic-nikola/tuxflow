@@ -1316,6 +1316,7 @@ dependencies = [
  "arboard",
  "iced",
  "iced_term",
+ "open",
  "png",
  "tokio",
 ]
@@ -1428,7 +1429,6 @@ dependencies = [
  "iced",
  "iced_core",
  "iced_graphics",
- "open",
  "tokio",
 ]
 

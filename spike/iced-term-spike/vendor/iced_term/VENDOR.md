@@ -133,10 +133,18 @@ marks something VTE gives TuxFlow that stock iced_term does not.
      grid edges — the same idiom `search_next` uses internally, so a lone
      match keeps being found. An uncompilable regex (the user mid-typing
      `(`) reports "no match" instead of erroring.
-   - The focused match lands in `RenderableContent.search_match`
-     (absolute grid coordinates, like the cells); the view highlights it
-     with the selection's fg/bg swap. `Action::SearchResult(bool)` tells
-     the embedder whether anything was found.
+   - Visible matches land in `RenderableContent.search_matches`,
+     recomputed from the live grid at every sync (the same
+     `visible_regex_match_iter` the URL hover uses; alacritty recomputes
+     per frame for the same reason); the view highlights them with the
+     selection's fg/bg swap. They are deliberately NOT stored from search
+     time: grid lines rotate when new output scrolls in, so a
+     coordinate-stored match highlights the line BELOW the text it
+     matched — found live as "typed 555, highlighted 556" (a p10k prompt
+     redraw after the search was enough). The stored match survives only
+     as the next/previous stepping anchor, where a stale origin is
+     harmless. `Action::SearchResult(bool)` tells the embedder whether
+     anything was found.
    - Search commands classify as content-changing (they scroll and move
      the highlight), so the existing sync/redraw pipeline covers them.
 9. **term::Config plumbing** (gap 5 of the migration work list). Upstream

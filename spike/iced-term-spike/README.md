@@ -98,11 +98,16 @@ Post-walkthrough re-check (2026-08-26) of the newly closed gaps:
 
 - [x] PRIMARY: drag-select → middle-click paste in another pane — pass.
 - [x] Image paste — pass (above).
-- [ ] Ctrl+Shift+F search — **failed**, root-caused and fixed (fork patch
-      10): the default bindings map the whole Ctrl+Shift alphabet to
-      control characters, so the widget typed ^F and captured the event
-      before the hotkey listener saw it. The demo now overrides the chord
-      with `BindingAction::Passthrough`. Needs one more interactive try.
+- [x] Ctrl+Shift+F search — first failed (default bindings map the whole
+      Ctrl+Shift alphabet to control characters; fixed via
+      `BindingAction::Passthrough`, fork patch 10), then **passed**
+      including incremental typing and both step directions. The one
+      anomaly reported — "typed 555, highlighted 556" — was root-caused
+      to grid rotation (output after the search shifts every line number
+      by one, so a coordinate-stored match highlights the line below) and
+      fixed: highlights are now recomputed from the live grid at every
+      sync, which also highlights *all* visible matches like VTE does.
+      Pinned by `search_highlight_survives_grid_rotation`.
 
 ## Verdict
 

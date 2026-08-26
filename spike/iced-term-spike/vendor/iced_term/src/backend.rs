@@ -202,7 +202,7 @@ impl Backend {
             cursor: cursor.clone(),
             hovered_hyperlink: None,
             hovered_url: None,
-            search_match: None,
+            search_matches: Vec::new(),
         };
 
         let term = Arc::new(FairMutex::new(term));
@@ -623,8 +623,14 @@ impl Backend {
         self.last_content.cursor = cursor.clone();
         self.last_content.terminal_mode = *terminal.mode();
         self.last_content.terminal_size = self.size;
-        self.last_content.search_match =
-            self.search.as_ref().and_then(|s| s.focused.clone());
+        // Highlights come from the live grid, never from search-time
+        // coordinates — `focused` survives only as the stepping anchor.
+        self.last_content.search_matches = match self.search.as_mut() {
+            Some(search) => {
+                visible_regex_match_iter(terminal, &mut search.regex).collect()
+            },
+            None => Vec::new(),
+        };
     }
 
     pub fn renderable_content(&self) -> &RenderableContent {
@@ -672,9 +678,11 @@ pub struct RenderableContent {
     pub cursor_point: Point,
     pub hovered_hyperlink: Option<RangeInclusive<Point>>,
     pub hovered_url: Option<String>,
-    /// The focused scrollback-search match (absolute grid coordinates,
-    /// like the cells themselves) — the view highlights it.
-    pub search_match: Option<RangeInclusive<Point>>,
+    /// Visible scrollback-search matches, recomputed from the live grid at
+    /// every sync. NOT stored from search time: grid lines rotate when new
+    /// output scrolls in, so a coordinate kept across syncs highlights the
+    /// line BELOW the text it matched ("typed 555, highlighted 556").
+    pub search_matches: Vec<RangeInclusive<Point>>,
     pub selectable_range: Option<SelectionRange>,
     pub cursor: Cell,
     pub terminal_mode: TermMode,
@@ -689,7 +697,7 @@ impl Default for RenderableContent {
             cursor_point: Point::default(),
             hovered_hyperlink: None,
             hovered_url: None,
-            search_match: None,
+            search_matches: Vec::new(),
             selectable_range: None,
             cursor: Cell::default(),
             terminal_mode: TermMode::empty(),

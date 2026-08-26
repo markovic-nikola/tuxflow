@@ -305,8 +305,8 @@ fn scrollback_search_scrolls_to_match_and_wraps() {
         "viewport did not scroll into history"
     );
     assert!(
-        content.search_match.is_some(),
-        "no focused match to highlight"
+        !content.search_matches.is_empty(),
+        "no visible match to highlight"
     );
     assert!(
         probe.visible_text().contains("needle-alpha"),
@@ -329,7 +329,104 @@ fn scrollback_search_scrolls_to_match_and_wraps() {
     // Clearing drops the highlight.
     probe.backend.handle(Command::SearchClear);
     probe.backend.sync();
-    assert!(probe.backend.renderable_content().search_match.is_none());
+    assert!(probe.backend.renderable_content().search_matches.is_empty());
+}
+
+/// The text under every highlighted range, one string per visible match.
+fn highlighted_texts(content: &iced_term::backend::RenderableContent) -> Vec<String> {
+    content
+        .search_matches
+        .iter()
+        .map(|range| {
+            content
+                .cells
+                .iter()
+                .filter(|i| range.contains(&i.point))
+                .map(|i| i.c)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Regression for the walkthrough report "typed 555, highlighted 556":
+/// after incremental refinement (5 → 55 → 555, restarting each time), the
+/// cells under the focused match must spell the pattern itself.
+#[test]
+fn search_highlight_lands_on_matched_cells() {
+    use alacritty_terminal::index::Direction;
+
+    let mut probe = Probe::spawn(r#"seq 1 1000; sleep 2"#);
+    assert!(probe.wait(5, |text, _, _| text.contains("1000")));
+
+    for pattern in ["5", "55", "555"] {
+        let action = probe
+            .backend
+            .handle(Command::SearchNext(pattern.into(), Direction::Left));
+        assert_eq!(action, Action::SearchResult(true), "no match for {pattern}");
+        probe.backend.sync();
+    }
+
+    let texts = highlighted_texts(probe.backend.renderable_content());
+    assert!(
+        !texts.is_empty() && texts.iter().all(|t| t == "555"),
+        "highlight covers the wrong cells ({:?}); visible:\n{}",
+        texts,
+        probe.visible_text()
+    );
+
+    // Stepping with the same pattern (wrap-around) must not drift either.
+    probe
+        .backend
+        .handle(Command::SearchNext("555".into(), Direction::Left));
+    probe.backend.sync();
+    let texts = highlighted_texts(probe.backend.renderable_content());
+    assert!(
+        !texts.is_empty() && texts.iter().all(|t| t == "555"),
+        "drifted after wrap step: {:?}",
+        texts
+    );
+}
+
+/// The real-session "typed 555, highlighted 556" bug: output arriving
+/// AFTER a search rotates the grid (every new line shifts all line numbers
+/// by one), so a match stored in absolute coordinates highlights the line
+/// below the text it matched. The highlight must track content, not
+/// coordinates.
+#[test]
+fn search_highlight_survives_grid_rotation() {
+    use alacritty_terminal::index::Direction;
+
+    let mut probe = Probe::spawn_program("/bin/cat", vec![]);
+    // Fill past the 50-line screen so new output rotates line numbers.
+    let mut fill = String::new();
+    for i in 1..=60 {
+        fill.push_str(&format!("filler-{i}\r"));
+    }
+    fill.push_str("needle-555\r");
+    probe.backend.handle(Command::Write(fill.into_bytes()));
+    assert!(probe.wait(5, |text, _, _| text.contains("needle-555")));
+
+    let action = probe
+        .backend
+        .handle(Command::SearchNext("needle-555".into(), Direction::Left));
+    assert_eq!(action, Action::SearchResult(true));
+    probe.backend.sync();
+
+    // The prompt/agent keeps printing: five more lines → five rotations.
+    probe
+        .backend
+        .handle(Command::Write(b"aaa\rbbb\rccc\rddd\reee\r".to_vec()));
+    assert!(probe.wait(5, |text, _, _| text.contains("eee")));
+
+    let texts = highlighted_texts(probe.backend.renderable_content());
+    assert!(
+        !texts.is_empty() && texts.iter().all(|t| t == "needle-555"),
+        "highlight drifted off the matched text ({:?}); visible:\n{}",
+        texts,
+        probe.visible_text()
+    );
 }
 
 /// A finished mouse selection surfaces its text for PRIMARY (VTE publishes

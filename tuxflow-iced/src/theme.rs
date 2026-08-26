@@ -7,11 +7,16 @@
 //! The location rule survives from the GTK system: gold = remote,
 //! green = local, and a project's accent tints its own interactions.
 //! Status colors (crashed red, restarting amber, stopped gray) stay
-//! semantic and fixed; the terminal is always Catppuccin Mocha.
+//! semantic and fixed. The local/remote accents and the terminal scheme
+//! follow settings.toml (core's shared palette data); the compiled
+//! constants are the shipped defaults.
+
+use std::sync::RwLock;
 
 use iced::gradient::Linear;
-use iced::widget::{button, container, text_input};
+use iced::widget::{button, container, scrollable, text_input};
 use iced::{Background, Border, Color, Gradient, Radians, Shadow, Theme, Vector};
+use tuxflow_core::config::palette;
 
 // ── Surfaces ────────────────────────────────────────────────────────────
 /// Sidebar ground the cards float on.
@@ -49,44 +54,89 @@ pub fn alpha(color: Color, a: f32) -> Color {
     Color { a, ..color }
 }
 
-pub fn accent_for(remote: bool) -> Color {
-    if remote { REMOTE_ACCENT } else { LOCAL_ACCENT }
+/// The live local/remote accents, settable from settings. A process-wide
+/// slot rather than a parameter because `accent_for` is called from every
+/// view helper — threading two colors through ~40 call sites buys nothing.
+/// Written once at boot and on a settings change, read on the view thread.
+static ACCENTS: RwLock<(Color, Color)> = RwLock::new((LOCAL_ACCENT, REMOTE_ACCENT));
+
+/// Resolve the two sidebar accents from their settings names (dark
+/// variants — this shell's chrome is dark) and make them current.
+pub fn set_accents(local_name: &str, remote_name: &str) {
+    let local = palette::accent_by_name(local_name, palette::FALLBACK_LOCAL);
+    let remote = palette::accent_by_name(remote_name, palette::FALLBACK_REMOTE);
+    *ACCENTS.write().expect("accent slot") = (hex(local.accent), hex(remote.accent));
 }
 
-/// The lighter companion of each accent, for text on tinted surfaces
-/// (#ffe1a0 gold / #b8e6c8 green).
+pub fn accent_for(remote: bool) -> Color {
+    let (local_c, remote_c) = *ACCENTS.read().expect("accent slot");
+    if remote { remote_c } else { local_c }
+}
+
+/// The lighter companion of each accent, for text on tinted surfaces —
+/// the accent nudged toward white (matches the hand-tuned #ffe1a0 gold /
+/// #b8e6c8 green pairs the defaults shipped with).
 pub fn accent_soft(remote: bool) -> Color {
-    if remote {
-        Color::from_rgb(1.0, 0.882, 0.627)
-    } else {
-        Color::from_rgb(0.722, 0.902, 0.784)
-    }
+    let c = accent_for(remote);
+    Color::from_rgb(
+        c.r + (1.0 - c.r) * 0.5,
+        c.g + (1.0 - c.g) * 0.5,
+        c.b + (1.0 - c.b) * 0.5,
+    )
+}
+
+pub fn hex(hex_str: &str) -> Color {
+    let (r, g, b) = palette::hex_rgb(hex_str);
+    Color::from_rgb(r, g, b)
 }
 
 /// Dark ink for text sitting ON a filled accent (the send button).
 pub const ON_ACCENT: Color = Color::from_rgb(0.125, 0.102, 0.031);
 
-/// Catppuccin Mocha — the GTK default terminal scheme, field for field.
-pub fn terminal_palette() -> iced_term::ColorPalette {
+pub fn bold() -> iced::Font {
+    iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
+    }
+}
+
+/// Flat card for settings groups — form_card without the floating shadow
+/// (a settings page stacks several; shadows would stripe it).
+pub fn settings_card(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(BG_CARD)),
+        border: Border {
+            color: alpha(Color::WHITE, 0.06),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// A named terminal scheme from core's shared data, as iced_term colors.
+pub fn terminal_palette(name: &str) -> iced_term::ColorPalette {
+    let t = palette::terminal_theme(name);
+    let p = |i: usize| t.palette[i].to_string();
     iced_term::ColorPalette {
-        foreground: String::from("#CDD6F4"),
-        background: String::from("#1E1E2E"),
-        black: String::from("#45475A"),
-        red: String::from("#F38BA8"),
-        green: String::from("#A6E3A1"),
-        yellow: String::from("#F9E2AF"),
-        blue: String::from("#89B4FA"),
-        magenta: String::from("#F5C2E7"),
-        cyan: String::from("#94E2D5"),
-        white: String::from("#BAC2DE"),
-        bright_black: String::from("#585B70"),
-        bright_red: String::from("#F38BA8"),
-        bright_green: String::from("#A6E3A1"),
-        bright_yellow: String::from("#F9E2AF"),
-        bright_blue: String::from("#89B4FA"),
-        bright_magenta: String::from("#F5C2E7"),
-        bright_cyan: String::from("#94E2D5"),
-        bright_white: String::from("#A6ADC8"),
+        foreground: t.foreground.to_string(),
+        background: t.background.to_string(),
+        black: p(0),
+        red: p(1),
+        green: p(2),
+        yellow: p(3),
+        blue: p(4),
+        magenta: p(5),
+        cyan: p(6),
+        white: p(7),
+        bright_black: p(8),
+        bright_red: p(9),
+        bright_green: p(10),
+        bright_yellow: p(11),
+        bright_blue: p(12),
+        bright_magenta: p(13),
+        bright_cyan: p(14),
+        bright_white: p(15),
         ..Default::default()
     }
 }
@@ -199,6 +249,45 @@ pub fn status_pill(color: Color) -> impl Fn(&Theme) -> container::Style {
             a: 1.0,
         }),
         ..Default::default()
+    }
+}
+
+/// Overlay scrollbar with Adwaita manners: invisible until the pointer is
+/// over the scrollable, then a thin floating scroller (no rail), a shade
+/// stronger while grabbed. Pair with a narrow `scrollable::Scrollbar` at
+/// the call site — this only paints, it doesn't size.
+pub fn overlay_scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let scroller = match status {
+        scrollable::Status::Active { .. } => Color::TRANSPARENT,
+        scrollable::Status::Hovered {
+            is_vertical_scrollbar_hovered: true,
+            ..
+        }
+        | scrollable::Status::Dragged { .. } => alpha(Color::WHITE, 0.45),
+        scrollable::Status::Hovered { .. } => alpha(Color::WHITE, 0.22),
+    };
+    let rail = scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: Background::Color(scroller),
+            border: Border {
+                radius: 99.0.into(),
+                ..Default::default()
+            },
+        },
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        gap: None,
+        auto_scroll: scrollable::AutoScroll {
+            background: Background::Color(BG_CARD),
+            border: Border::default(),
+            shadow: Shadow::default(),
+            icon: TEXT_SECONDARY,
+        },
     }
 }
 

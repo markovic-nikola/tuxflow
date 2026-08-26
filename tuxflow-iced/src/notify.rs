@@ -1,8 +1,8 @@
 //! Desktop notifications for process lifecycle events, honoring the
-//! shared settings.toml notification flags (read-only). Mirrors the GTK
-//! app's surface: crash, auto-restart, connection lost (once per outage),
-//! clean finish. Best-effort — a missing notification daemon must never
-//! affect the app.
+//! shared settings.toml notification flags. Mirrors the GTK app's
+//! surface: crash, auto-restart, connection lost (once per outage),
+//! clean finish — each with the optional notification sound. Best-effort
+//! — a missing notification daemon must never affect the app.
 
 use tuxflow_core::config::settings::NotificationSettings;
 
@@ -22,6 +22,20 @@ fn send(summary: &str, body: &str) {
     });
 }
 
+/// GTK parity: every notification carries the configured sound when
+/// enabled (paplay is fire-and-forget; failure is logged in core).
+fn send_with_sound(ns: &NotificationSettings, summary: &str, body: &str) {
+    send(summary, body);
+    if ns.sound_enabled {
+        let _ = tuxflow_core::util::sounds::play_sound(&ns.sound_name);
+    }
+}
+
+/// The settings page's "send test" button.
+pub fn test(ns: &NotificationSettings) {
+    send_with_sound(ns, "TuxFlow", "test");
+}
+
 pub fn crash(ns: &NotificationSettings, project: &str, process: &str, code: Option<i32>) {
     if !ns.on_crash {
         return;
@@ -30,14 +44,15 @@ pub fn crash(ns: &NotificationSettings, project: &str, process: &str, code: Opti
         Some(code) => format!("{process} crashed (exit {code})"),
         None => format!("{process} crashed"),
     };
-    send(project, &body);
+    send_with_sound(ns, project, &body);
 }
 
 pub fn auto_restart(ns: &NotificationSettings, project: &str, process: &str, attempt: u32) {
     if !ns.on_auto_restart {
         return;
     }
-    send(
+    send_with_sound(
+        ns,
         project,
         &format!("{process} crashed — restarting ({attempt})"),
     );
@@ -56,5 +71,5 @@ pub fn finish(ns: &NotificationSettings, project: &str, process: &str) {
     if !ns.on_process_finish {
         return;
     }
-    send(project, &format!("{process} finished"));
+    send_with_sound(ns, project, &format!("{process} finished"));
 }

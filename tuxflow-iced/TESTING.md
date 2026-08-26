@@ -59,11 +59,19 @@ memory, rendering under your real workload.
   (working directory field included), add project, SSH section rows,
   git chip in the status bar (branch ↑ahead ↓behind ±changed, 20 s
   refresh, over ssh for remote projects).
+- **Settings** (gear next to "+ project", or Ctrl+,): full GTK-parity
+  port — all seven pages, every change saves to the shared settings.toml
+  immediately. Live-applies here: terminal theme + font family / size /
+  weight / line height (running terminals restyle in place), sidebar
+  accents, keybindings (click a chip, press the combo — conflicts
+  refused), notification flags + sounds, composer toggle, single-expand,
+  recent-first, keybind hints (Ctrl+1-9 / Alt+1-9 switchers now work
+  here too). Rows whose consumer only exists in the GTK shell say so in
+  their subtitle. Window geometry (size/position/maximized) persists —
+  debounced, so even a cargo-watch kill keeps the last position.
 
 ## Not there yet (deliberate, GTK still covers these)
 
-- Settings window — edit `settings.toml` by hand or via the GTK app;
-  the iced shell re-reads it at launch.
 - Drag-and-drop reorder (use Alt+Shift+Up/Down).
 - Local-only trio: file watcher restarts, MCP socket, update chip.
 - Voice bridge for remote agents.

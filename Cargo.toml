@@ -1,3 +1,9 @@
+[workspace]
+members = ["tuxflow-core", "tuxflow-iced", "vendor/iced_term"]
+# The spike is a frozen record with its own lockfile; it consumes
+# vendor/iced_term as an external path dep.
+exclude = ["spike"]
+
 [package]
 name = "tuxflow"
 version = "0.1.70"
@@ -23,6 +29,7 @@ name = "tuxflow-mcp"
 path = "src/bin/tuxflow-mcp.rs"
 
 [dependencies]
+tuxflow-core = { path = "tuxflow-core" }
 gtk4 = { version = "0.11", features = ["v4_14"] }
 gdk4-x11 = { version = "0.11", features = ["xlib"] }
 x11 = { version = "2.21", features = ["xlib"] }
@@ -30,19 +37,15 @@ libadwaita = { version = "0.9", features = ["v1_5"] }
 vte4 = { version = "0.10", features = ["v0_76"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 notify = "7"
 notify-debouncer-mini = "0.5"
 log = "0.4"
 env_logger = "0.11"
-thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 glob = "0.3"
 dirs = "6"
 nix = { version = "0.29", features = ["signal", "process"] }
-rmcp = { version = "1.2", features = ["server", "transport-io"] }
-anyhow = "1"
 ureq = { version = "3", features = ["json"] }
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
 

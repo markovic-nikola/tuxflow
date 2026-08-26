@@ -1,4 +1,4 @@
-use tuxflow::util::port_detector::PortDetector;
+use tuxflow_core::util::port_detector::PortDetector;
 fn main() {
     let text = std::fs::read_to_string(std::env::args().nth(1).expect("path")).unwrap();
     let mut pd = PortDetector::new();

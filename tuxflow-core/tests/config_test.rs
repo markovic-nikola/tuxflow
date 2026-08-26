@@ -1,8 +1,8 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-use tuxflow::config::loader::{ConfigError, load_config};
-use tuxflow::config::schema::{ProcessCategory, TuxFlowConfig};
+use tuxflow_core::config::loader::{ConfigError, load_config};
+use tuxflow_core::config::schema::{ProcessCategory, TuxFlowConfig};
 
 #[test]
 fn parse_minimal_config() {

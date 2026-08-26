@@ -1,4 +1,4 @@
-use tuxflow::mcp::bridge::LogBuffer;
+use tuxflow_core::mcp::bridge::LogBuffer;
 
 #[test]
 fn push_and_recent() {

@@ -10,7 +10,7 @@
 //! cargo run --example port_scan_check -- pane.txt 84
 //! ```
 
-use tuxflow::util::port_detector::PortDetector;
+use tuxflow_core::util::port_detector::PortDetector;
 
 fn main() {
     let mut args = std::env::args().skip(1);

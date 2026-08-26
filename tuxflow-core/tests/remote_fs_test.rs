@@ -9,9 +9,9 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
-use tuxflow::detect::detector::detect_stacks_fs;
-use tuxflow::remote::fs::{ProjectFs, SshFs, remote_dir_exists};
-use tuxflow::remote::{list_live_sessions, sh_quote, wrap_remote_command};
+use tuxflow_core::detect::detector::detect_stacks_fs;
+use tuxflow_core::remote::fs::{ProjectFs, SshFs, remote_dir_exists};
+use tuxflow_core::remote::{list_live_sessions, sh_quote, wrap_remote_command};
 
 /// Install a fake `ssh` (once per test process) that runs the remote command
 /// locally. Skips option flags the way OpenSSH would, so the exact

@@ -70,6 +70,16 @@ assets = [
 		"755",
 	],
 	[
+		"target/release/tuxflow-iced",
+		"usr/bin/",
+		"755",
+	],
+	[
+		"data/com.tuxflow.TuxFlowIced.desktop",
+		"usr/share/applications/",
+		"644",
+	],
+	[
 		"data/com.tuxflow.TuxFlow.desktop",
 		"usr/share/applications/",
 		"644",

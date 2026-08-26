@@ -24,6 +24,8 @@ pub enum AppAction {
     CloseProcess,
     FontIncrease,
     FontDecrease,
+    MoveProcessUp,
+    MoveProcessDown,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +63,16 @@ impl AppKeys {
             match parse(raw) {
                 Some(chord) => bindings.push((chord, action)),
                 None => log::warn!("unparseable keybinding {raw:?} for {action:?}"),
+            }
+        }
+        // Built-ins with no settings key (yet): process reorder — the
+        // keyboard stand-in for the GTK sidebar's drag-and-drop.
+        for (raw, action) in [
+            ("Alt+Shift+Up", AppAction::MoveProcessUp),
+            ("Alt+Shift+Down", AppAction::MoveProcessDown),
+        ] {
+            if let Some(chord) = parse(raw) {
+                bindings.push((chord, action));
             }
         }
         Self { bindings }
@@ -184,7 +196,7 @@ mod tests {
     fn default_chords_parse() {
         // All ten shipped defaults must parse — a silent drop means a
         // shortcut the GTK app honors and this shell ignores.
-        assert_eq!(keys().bindings.len(), 10);
+        assert_eq!(keys().bindings.len(), 12);
     }
 
     #[test]

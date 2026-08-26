@@ -1,4 +1,5 @@
 pub mod fs;
+pub mod git;
 pub mod mic;
 pub mod ports;
 pub mod probe;

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=TuxFlow Preview
+Comment=TuxFlow's next-generation shell (iced) — same workspace, new engine
+Exec=tuxflow-iced
+Icon=com.tuxflow.TuxFlow
+Terminal=false
+Type=Application
+Categories=Development;
+Keywords=terminal;dev;processes;agents;
+StartupWMClass=tuxflow-iced

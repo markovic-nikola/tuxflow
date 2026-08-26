@@ -85,6 +85,7 @@ struct ProjectState {
     poll_interval: Duration,
     poll_chain_started: bool,
     terminals_created: usize,
+    git: Option<tuxflow_core::remote::git::GitStatus>,
 }
 
 impl ProjectState {
@@ -166,6 +167,11 @@ enum Event {
         project: u64,
         index: usize,
         generation: u64,
+    },
+    GitTick,
+    GitPolled {
+        project: u64,
+        status: Option<tuxflow_core::remote::git::GitStatus>,
     },
     PortsPollTick(u64),
     PortsPolled {
@@ -266,18 +272,27 @@ impl App {
             }
         }
 
-        let keys: Vec<String> = if app.saved.directories.is_empty() {
+        let mut keys: Vec<String> = if app.saved.directories.is_empty() {
             // Nothing saved and no args: live in the cwd, unpersisted.
             vec![ProjectLocation::Local(std::env::current_dir().unwrap_or_default()).key()]
         } else {
             app.saved.directories.clone()
         };
+        // GTK sidebar parity: recently used projects first (stable for
+        // never-used ones, which keep their saved order).
+        if settings.sidebar.recent_first {
+            let mut indexed: Vec<(usize, String)> = keys.into_iter().enumerate().collect();
+            let saved = &app.saved;
+            indexed.sort_by_key(|(i, k)| (std::cmp::Reverse(saved.get_last_used(k)), *i));
+            keys = indexed.into_iter().map(|(_, k)| k).collect();
+        }
         for key in keys {
             tasks.push(app.open_project(&key));
         }
         if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("edit") {
             tasks.push(Task::done(Event::OpenEditProcess));
         }
+        tasks.push(Task::done(Event::GitTick));
 
         (app, Task::batch(tasks))
     }
@@ -308,6 +323,7 @@ impl App {
             poll_interval: POLL_FAST,
             poll_chain_started: false,
             terminals_created: 0,
+            git: None,
             location,
         };
 
@@ -614,6 +630,50 @@ impl App {
         task
     }
 
+    /// Poll git for the ACTIVE project on a worker — on switch and on
+    /// the 20 s tick. One project at a time; 24 parallel ssh polls would
+    /// be rude to the mux.
+    fn poll_git(&self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        if !matches!(project.phase, Phase::Ready) {
+            return Task::none();
+        }
+        let id = project.id;
+        let location = project.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || tuxflow_core::remote::git::query_status(&location)),
+            move |joined| Event::GitPolled {
+                project: id,
+                status: joined.ok().flatten(),
+            },
+        )
+    }
+
+    /// Move the selected process within its project and persist the order
+    /// — the keyboard stand-in for GTK's sidebar drag-and-drop.
+    fn move_selected(&mut self, delta: i32) -> Task<Event> {
+        let Some(project) = self.projects.get_mut(self.active) else {
+            return Task::none();
+        };
+        let from = project.selected;
+        let to = from as i32 + delta;
+        if to < 0 || to as usize >= project.entries.len() {
+            return Task::none();
+        }
+        project.entries.swap(from, to as usize);
+        project.selected = to as usize;
+        let key = project.key();
+        let order: Vec<String> = project
+            .entries
+            .iter()
+            .map(|e| e.config.name.clone())
+            .collect();
+        self.saved.set_process_order(&key, order);
+        Task::none()
+    }
+
     fn entry_for_term(&self, term_id: u64) -> Option<(usize, usize)> {
         for (pidx, project) in self.projects.iter().enumerate() {
             if let Some(eidx) = project
@@ -706,6 +766,8 @@ impl App {
             AppAction::CloseProcess => self.close_selected_process(),
             AppAction::FontIncrease => self.change_font(1.0),
             AppAction::FontDecrease => self.change_font(-1.0),
+            AppAction::MoveProcessUp => self.move_selected(-1),
+            AppAction::MoveProcessDown => self.move_selected(1),
         }
     }
 
@@ -727,7 +789,7 @@ impl App {
             return Task::none();
         }
         self.active = ((self.active as i32 + delta).rem_euclid(n as i32)) as usize;
-        self.focus_selected_terminal()
+        Task::batch([self.focus_selected_terminal(), self.poll_git()])
     }
 
     /// Close = GTK's "Close Agent/Terminal": ad-hoc terminals disappear,
@@ -914,7 +976,14 @@ impl App {
                         let merged = processes::merge_saved(configs, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
-                        self.boot_processes(pidx, &live_sessions)
+                        let boot = self.boot_processes(pidx, &live_sessions);
+                        // The chip shouldn't wait for the next 20 s tick.
+                        let git = if pidx == self.active {
+                            self.poll_git()
+                        } else {
+                            Task::none()
+                        };
+                        Task::batch([boot, git])
                     }
                     Err((message, retryable)) => {
                         self.projects[pidx].phase = Phase::Failed(message, retryable);
@@ -930,15 +999,21 @@ impl App {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
                 };
+                let switched = self.active != pidx;
                 self.active = pidx;
                 self.projects[pidx].selected = index;
-                match self.projects[pidx]
+                let focus = match self.projects[pidx]
                     .entries
                     .get(index)
                     .and_then(|e| e.terminal.as_ref())
                 {
                     Some(term) => TerminalView::focus(term.widget_id().clone()),
                     None => Task::none(),
+                };
+                if switched {
+                    Task::batch([focus, self.poll_git()])
+                } else {
+                    focus
                 }
             }
             Event::Start { project, index } | Event::Restart { project, index } => {
@@ -992,6 +1067,19 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            Event::GitTick => {
+                let poll = self.poll_git();
+                let next = Task::perform(tokio::time::sleep(Duration::from_secs(20)), |_| {
+                    Event::GitTick
+                });
+                Task::batch([poll, next])
+            }
+            Event::GitPolled { project, status } => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.projects[pidx].git = status;
+                }
+                Task::none()
             }
             Event::PortsPollTick(project) => {
                 let Some(pidx) = self.project_index(project) else {
@@ -2219,12 +2307,27 @@ impl App {
             None => (String::from("no projects"), String::new(), LOCAL_ACCENT),
         };
 
-        let mut bar = row![
-            text(left).size(11).color(TEXT_SECONDARY),
-            iced::widget::space::horizontal(),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
+        let mut bar = row![text(left).size(11).color(TEXT_SECONDARY)]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        if let Some(git) = self.active_project().and_then(|p| p.git.as_ref()) {
+            let mut label = format!("\u{2387} {}", git.branch);
+            if git.ahead > 0 {
+                label.push_str(&format!(" \u{2191}{}", git.ahead));
+            }
+            if git.behind > 0 {
+                label.push_str(&format!(" \u{2193}{}", git.behind));
+            }
+            if git.changed > 0 {
+                label.push_str(&format!(" \u{00b1}{}", git.changed));
+            }
+            bar = bar.push(
+                container(text(label).size(10.5))
+                    .padding([2, 9])
+                    .style(theme::pill),
+            );
+        }
+        bar = bar.push(iced::widget::space::horizontal());
         if !badge.is_empty() {
             bar = bar.push(
                 button(

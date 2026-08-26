@@ -139,3 +139,10 @@ marks something VTE gives TuxFlow that stock iced_term does not.
      the embedder whether anything was found.
    - Search commands classify as content-changing (they scroll and move
      the highlight), so the existing sync/redraw pipeline covers them.
+9. **term::Config plumbing** (gap 5 of the migration work list). Upstream
+   hardcoded `term::Config::default()`; `BackendSettings` now carries
+   `scrolling_history`, `semantic_escape_chars`, `kitty_keyboard` and
+   `osc52`, defaulting to alacritty's own `Config::default()` values (one
+   source of truth, no copied constants). `Osc52` is re-exported —
+   `OnlyCopy` stays the default, which is exactly the agent-workflow
+   policy: programs may set the clipboard, never read it.

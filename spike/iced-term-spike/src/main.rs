@@ -237,6 +237,15 @@ impl App {
                         self.titles.insert(id, title);
                         Task::none()
                     }
+                    iced_term::actions::Action::PublishSelection(text) => {
+                        // VTE parity: a finished mouse selection becomes the
+                        // PRIMARY selection (middle-click paste target).
+                        self.log(format!(
+                            "term {id}: selection → PRIMARY ({} bytes)",
+                            text.len()
+                        ));
+                        iced::clipboard::write_primary(text)
+                    }
                     iced_term::actions::Action::Ignore => Task::none(),
                 };
                 Task::batch([side_task, proxy_task])

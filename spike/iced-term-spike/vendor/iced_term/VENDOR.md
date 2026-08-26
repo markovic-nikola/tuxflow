@@ -98,3 +98,27 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    stalls, zero syncs >10 ms, zero draws >20 ms; screenshot check confirms
    merged runs land glyphs exactly on the cell grid (p10k prompt with mixed
    icons/colors renders pixel-identically).
+7. **X11 selection conventions** (the PRIMARY gap scored in the manual
+   checklist, step 3). What VTE does internally must surface through the
+   widget:
+   - New `Command::SelectRelease`, pushed by `view.rs` when a selection
+     gesture ends (left release after a drag or double/triple click; a
+     release outside the widget bounds now reaches the handler too, so an
+     off-widget release neither sticks the drag state nor loses the text).
+     The backend extracts the selection and returns
+     `Action::PublishSelection(text)` — the embedder routes it to
+     `iced::clipboard::write_primary`. Riding the ordered command queue
+     means every SelectStart/Update has been applied first; an empty
+     (plain-click) selection publishes nothing.
+   - Middle-click pastes PRIMARY (or reports middle press/release to the
+     app when it owns the mouse, Shift bypassing as everywhere).
+   - `selectable_content()` now uses alacritty's `selection_to_string`
+     instead of walking viewport cells — the walk glued multi-line copies
+     into one line (no newlines), broke on wide-char spacers, and missed
+     scrolled-out selection parts.
+   - Both paste paths (Ctrl+Shift+V, middle-click) go through
+     `paste_content`: bracketed-paste wrapping when the app opted in (with
+     the end-marker stripped from the payload — paste injection guard),
+     newline→CR normalization otherwise. Upstream wrote clipboard bytes
+     raw, so pasting into an app that requested bracketed paste typed the
+     content as keystrokes.

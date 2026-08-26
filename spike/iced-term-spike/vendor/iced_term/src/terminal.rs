@@ -147,7 +147,10 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
         backend::Command::ProcessAlacrittyEvent(event) => {
             matches!(event, AlacrittyEvent::Wakeup | AlacrittyEvent::Exit)
         },
-        backend::Command::ProcessLink(..)
+        // SelectRelease reads the finished selection; it changes nothing
+        // on screen.
+        backend::Command::SelectRelease
+        | backend::Command::ProcessLink(..)
         | backend::Command::MouseReport(..) => false,
     }
 }

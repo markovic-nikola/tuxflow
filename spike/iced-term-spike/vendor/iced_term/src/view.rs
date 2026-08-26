@@ -104,6 +104,7 @@ impl<'a> TerminalView<'a> {
     fn handle_mouse_event(
         &self,
         state: &mut TerminalViewState,
+        clipboard: &mut dyn iced_graphics::core::Clipboard,
         layout_position: Point,
         cursor_position: Point,
         event: &iced::mouse::Event,
@@ -154,6 +155,50 @@ impl<'a> TerminalView<'a> {
                     &self.term.bindings,
                     &mut commands,
                 );
+            },
+            iced_core::mouse::Event::ButtonPressed(
+                iced_core::mouse::Button::Middle,
+            ) => {
+                if !state.is_focused() {
+                    return Vec::default();
+                }
+
+                // Middle-click: report to the app when it owns the mouse
+                // (Shift bypasses, as everywhere), otherwise paste PRIMARY —
+                // the half of the X11 selection convention VTE gives for
+                // free.
+                if terminal_mode.intersects(TermMode::MOUSE_MODE)
+                    && !state.keyboard_modifiers.contains(Modifiers::SHIFT)
+                {
+                    commands.push(Command::MouseReport(
+                        MouseButton::MiddleButton,
+                        state.keyboard_modifiers,
+                        state.mouse_position_on_grid,
+                        true,
+                    ));
+                } else if let Some(data) =
+                    clipboard.read(ClipboardKind::Primary)
+                {
+                    commands.push(Command::Write(paste_content(
+                        &terminal_mode,
+                        &data,
+                    )));
+                }
+            },
+            iced_core::mouse::Event::ButtonReleased(
+                iced_core::mouse::Button::Middle,
+            ) => {
+                if state.is_focused()
+                    && terminal_mode.intersects(TermMode::MOUSE_MODE)
+                    && !state.keyboard_modifiers.contains(Modifiers::SHIFT)
+                {
+                    commands.push(Command::MouseReport(
+                        MouseButton::MiddleButton,
+                        state.keyboard_modifiers,
+                        state.mouse_position_on_grid,
+                        false,
+                    ));
+                }
             },
             iced::mouse::Event::WheelScrolled { delta } => {
                 Self::handle_wheel_scrolled(
@@ -269,6 +314,8 @@ impl<'a> TerminalView<'a> {
         bindings: &BindingsLayout, // Use the actual type of your bindings here
         commands: &mut Vec<Command>,
     ) {
+        let ended_selection_gesture =
+            state.is_dragged && !state.drag_is_mouse_report;
         state.is_dragged = false;
 
         if state.drag_is_mouse_report
@@ -282,6 +329,13 @@ impl<'a> TerminalView<'a> {
             ));
         }
         state.drag_is_mouse_report = false;
+
+        // Every finished selection gesture (drag, double/triple click)
+        // offers its text to PRIMARY. An empty selection — a plain click —
+        // extracts no text and publishes nothing.
+        if ended_selection_gesture {
+            commands.push(Command::SelectRelease);
+        }
 
         if bindings.get_action(
             InputKind::Mouse(iced_core::mouse::Button::Left),
@@ -412,8 +466,10 @@ impl<'a> TerminalView<'a> {
             },
             BindingAction::Paste => {
                 if let Some(data) = clipboard.read(ClipboardKind::Standard) {
-                    let input: Vec<u8> = data.bytes().collect();
-                    return Some(Command::Write(input));
+                    return Some(Command::Write(paste_content(
+                        &last_content.terminal_mode,
+                        &data,
+                    )));
                 }
             },
             BindingAction::Copy => {
@@ -780,14 +836,29 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         let is_cursor_in_layout = self.is_cursor_in_layout(cursor, layout);
         self.handle_focus(event, state, is_cursor_in_layout);
 
+        // A drag that leaves the widget must still see its release —
+        // otherwise the drag state sticks and a selection finished outside
+        // the bounds is never offered to PRIMARY.
+        let is_dragged_release = state.is_dragged
+            && matches!(
+                event,
+                iced::Event::Mouse(iced_core::mouse::Event::ButtonReleased(
+                    iced_core::mouse::Button::Left
+                ))
+            );
+
         let commands = match event {
-            iced::Event::Mouse(mouse_event) if is_cursor_in_layout => self
-                .handle_mouse_event(
+            iced::Event::Mouse(mouse_event)
+                if is_cursor_in_layout || is_dragged_release =>
+            {
+                self.handle_mouse_event(
                     state,
+                    clipboard,
                     layout.position(),
-                    cursor.position().unwrap(),
+                    cursor.position().unwrap_or_default(),
                     mouse_event,
-                ),
+                )
+            },
             iced::Event::Keyboard(keyboard_event) => {
                 if !state.is_focused() {
                     return;
@@ -885,6 +956,21 @@ impl operation::Focusable for TerminalViewState {
 
     fn unfocus(&mut self) {
         self.focus = false;
+    }
+}
+
+/// Prepare clipboard text for the PTY the way VTE/alacritty do: wrap in the
+/// bracketed-paste markers when the app opted in (stripping an embedded end
+/// marker — paste injection guard), otherwise normalize newlines to carriage
+/// returns so a shell runs the lines instead of literal-inserting them.
+fn paste_content(mode: &TermMode, data: &str) -> Vec<u8> {
+    if mode.contains(TermMode::BRACKETED_PASTE) {
+        let mut out = b"\x1b[200~".to_vec();
+        out.extend_from_slice(data.replace("\x1b[201~", "").as_bytes());
+        out.extend_from_slice(b"\x1b[201~");
+        out
+    } else {
+        data.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
     }
 }
 
@@ -1390,6 +1476,48 @@ mod tests {
         }
 
         #[test]
+        fn selection_drag_release_requests_primary_publish() {
+            let mut state = TerminalViewState::new();
+            state.is_dragged = true;
+            state.drag_is_mouse_report = false;
+            let terminal_mode = TermMode::empty();
+            let bindings = BindingsLayout::new();
+            let mut commands = Vec::new();
+
+            TerminalView::handle_button_released(
+                &mut state,
+                &terminal_mode,
+                &bindings,
+                &mut commands,
+            );
+
+            assert_eq!(commands.len(), 1);
+            assert!(matches!(commands[0], Command::SelectRelease));
+            assert!(!state.is_dragged);
+        }
+
+        #[test]
+        fn report_drag_release_does_not_publish_selection() {
+            let mut state = TerminalViewState::new();
+            state.is_dragged = true;
+            state.drag_is_mouse_report = true;
+            let terminal_mode = TermMode::MOUSE_MODE;
+            let bindings = BindingsLayout::new();
+            let mut commands = Vec::new();
+
+            TerminalView::handle_button_released(
+                &mut state,
+                &terminal_mode,
+                &bindings,
+                &mut commands,
+            );
+
+            assert!(!commands
+                .iter()
+                .any(|c| matches!(c, Command::SelectRelease)));
+        }
+
+        #[test]
         fn link_open_on_button_release_in_non_mouse_mode() {
             let mut state = TerminalViewState::new();
             state.keyboard_modifiers = Modifiers::COMMAND;
@@ -1419,6 +1547,24 @@ mod tests {
                     }
                 ),
             ));
+        }
+    }
+
+    mod paste_content_tests {
+        use super::*;
+
+        #[test]
+        fn bracketed_mode_wraps_and_strips_end_marker() {
+            let mode = TermMode::BRACKETED_PASTE;
+            let out = paste_content(&mode, "safe\x1b[201~rm -rf /\n");
+            assert_eq!(out, b"\x1b[200~saferm -rf /\n\x1b[201~".to_vec());
+        }
+
+        #[test]
+        fn plain_mode_normalizes_newlines() {
+            let mode = TermMode::empty();
+            let out = paste_content(&mode, "line1\r\nline2\nline3");
+            assert_eq!(out, b"line1\rline2\rline3".to_vec());
         }
     }
 

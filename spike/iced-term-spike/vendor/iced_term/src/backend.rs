@@ -31,6 +31,9 @@ pub enum Command {
     Resize(Option<Size<f32>>, Option<Size<f32>>),
     SelectStart(SelectionType, (f32, f32)),
     SelectUpdate((f32, f32)),
+    /// A selection gesture ended (button release). Extracts the selected
+    /// text so the embedder can publish it to PRIMARY.
+    SelectRelease,
     ProcessLink(LinkAction, Point),
     MouseReport(MouseButton, Modifiers, Point, bool),
     ProcessAlacrittyEvent(Event),
@@ -217,7 +220,7 @@ impl Backend {
             _ => {},
         }
 
-        let action = Action::default();
+        let mut action = Action::default();
         let term = self.term.clone();
         let mut term = term.lock();
         match cmd {
@@ -236,6 +239,16 @@ impl Backend {
             },
             Command::SelectUpdate((x, y)) => {
                 self.update_selection(&mut term, x, y);
+            },
+            Command::SelectRelease => {
+                // Runs through the ordered command queue, so every
+                // SelectStart/SelectUpdate of the gesture has already been
+                // applied — reading the selection here cannot race the drag.
+                if let Some(text) = term.selection_to_string() {
+                    if !text.is_empty() {
+                        action = Action::PublishSelection(text);
+                    }
+                }
             },
             Command::ProcessLink(link_action, point) => {
                 self.process_link_action(&term, link_action, point);
@@ -484,16 +497,10 @@ impl Backend {
     }
 
     pub fn selectable_content(&self) -> String {
-        let content = self.renderable_content();
-        let mut result = String::new();
-        if let Some(range) = content.selectable_range {
-            for indexed in &content.cells {
-                if range.contains(indexed.point) {
-                    result.push(indexed.c);
-                }
-            }
-        }
-        result
+        // alacritty's own extraction: keeps line breaks (the cell-walk this
+        // replaced glued a multi-line copy into one line), skips wide-char
+        // spacers, and rejoins soft-wrapped lines.
+        self.term.lock().selection_to_string().unwrap_or_default()
     }
 
     /// Snapshot the viewport. Returns false when the PTY thread holds the

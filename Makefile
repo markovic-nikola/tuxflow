@@ -1,4 +1,4 @@
-.PHONY: help dev run run-mcp build build-release test fmt clippy lint deb install uninstall clean release
+.PHONY: help dev run run-mcp iced dev-iced build build-release test fmt clippy lint deb install uninstall clean release
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -12,6 +12,13 @@ run: ## Run debug build
 
 run-mcp: ## Run MCP server binary
 	cargo run --bin tuxflow-mcp
+
+iced: ## Run the iced shell, release (debug misrepresents terminal latency)
+	cargo run --release -p tuxflow-iced
+
+dev-iced: ## Live reload for iced-shell hacking (debug build)
+	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
+	cargo watch -x 'run -p tuxflow-iced'
 
 build: ## Debug build
 	cargo build

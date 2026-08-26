@@ -11,10 +11,12 @@ just don't edit the *same* process in both simultaneously.
 ```bash
 cd ~/Projects/tuxflow
 git pull
-cargo build --release -p tuxflow-iced
-./target/release/tuxflow-iced              # opens your saved workspace
+make iced                                  # release build + run (debug misrepresents latency)
 ./target/release/tuxflow-iced ssh://host/dir   # add a project from the CLI
 ```
+
+`make dev` still runs the GTK app; `make dev-iced` is the live-reload
+equivalent for hacking on the iced shell.
 
 From the next tagged release the .deb ships it as **TuxFlow Preview** in
 the app grid (`/usr/bin/tuxflow-iced`).

@@ -158,12 +158,13 @@ struct App {
     palette_input: iced::widget::Id,
     add_project: Option<String>,
     add_command: Option<ProcessForm>,
-    /// Live window geometry, saved on close. The sidebar takes a fraction
-    /// of the width (GTK parity). Position stays `None` until the first
-    /// Moved event — Wayland never sends one, and an untracked position
-    /// must not overwrite the saved one.
+    /// Live inner size (resize events); the sidebar takes a fraction of
+    /// the width (GTK parity). The *position* is never tracked from Moved
+    /// events — those carry the client-area point while restore sets the
+    /// frame origin, so a save/restore cycle through them drifts the
+    /// window by the WM's frame extents. Saves query
+    /// `window::position()` (winit outer_position) instead.
     window_size: Size,
-    window_pos: Option<iced::Point>,
     /// Bumped on every move/resize; the debounced save only fires for the
     /// newest generation, so a drag writes once, not per pixel.
     geometry_gen: u64,
@@ -179,16 +180,29 @@ type ProbeResult = Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (St
 enum Event {
     Terminal(iced_term::Event),
     WindowResized(Size),
-    WindowMoved(iced::Point),
+    /// A Moved event arrived — only ever a trigger for the debounced
+    /// save, never a position source (see `window_size` field comment).
+    WindowMoved,
     WindowCloseRequested(iced::window::Id),
     WindowClose {
         id: iced::window::Id,
         maximized: bool,
+        position: Option<iced::Point>,
     },
     /// Debounced geometry persistence — `make dev-iced` kills the process
     /// on rebuild, so waiting for a clean close would lose every move.
     GeometrySettled(u64),
-    SaveGeometry(bool),
+    SaveGeometry {
+        maximized: bool,
+        position: Option<iced::Point>,
+    },
+    /// Post-launch placement correction (GTK's restore_window_placement
+    /// trick): measure where the frame actually landed and fix the delta.
+    RestoreSettle,
+    RestoreMeasured {
+        id: iced::window::Id,
+        actual: Option<iced::Point>,
+    },
     OpenSettings,
     SettingsMsg(settings_ui::Msg),
     Probed {
@@ -315,7 +329,6 @@ impl App {
                 width: settings.window.width.max(1) as f32,
                 height: settings.window.height.max(1) as f32,
             },
-            window_pos: None,
             geometry_gen: 0,
             next_project_id: 0,
             next_term_id: 0,
@@ -356,6 +369,13 @@ impl App {
         }
         if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("settings") {
             tasks.push(Task::done(Event::OpenSettings));
+        }
+        // Placement correction after the WM settles (see RestoreSettle).
+        if app.settings.window.x.is_some() && !app.settings.window.maximized {
+            tasks.push(Task::perform(
+                tokio::time::sleep(Duration::from_millis(300)),
+                |_| Event::RestoreSettle,
+            ));
         }
         tasks.push(Task::done(Event::GitTick));
 
@@ -1103,19 +1123,52 @@ impl App {
                 self.window_size = size;
                 self.debounce_geometry_save()
             }
-            Event::WindowMoved(point) => {
-                self.window_pos = Some(point);
-                self.debounce_geometry_save()
-            }
+            Event::WindowMoved => self.debounce_geometry_save(),
             Event::GeometrySettled(generation) => {
                 if generation != self.geometry_gen {
                     return Task::none();
                 }
-                iced::window::latest()
-                    .and_then(|id| iced::window::is_maximized(id).map(Event::SaveGeometry))
+                iced::window::latest().and_then(|id| {
+                    iced::window::is_maximized(id).then(move |maximized| {
+                        iced::window::position(id).map(move |position| Event::SaveGeometry {
+                            maximized,
+                            position,
+                        })
+                    })
+                })
             }
-            Event::SaveGeometry(maximized) => {
-                self.save_window_state(maximized);
+            Event::SaveGeometry {
+                maximized,
+                position,
+            } => {
+                self.save_window_state(maximized, position);
+                Task::none()
+            }
+            // WMs disagree on whether a requested position applies to the
+            // frame or to the client area (they differ by the decoration
+            // extents), so a fixed convention drifts on half of them.
+            // Measure where the frame actually landed and correct once by
+            // the delta — the GTK shell does the same 200 ms after map.
+            Event::RestoreSettle => iced::window::latest().and_then(|id| {
+                iced::window::position(id).map(move |actual| Event::RestoreMeasured { id, actual })
+            }),
+            Event::RestoreMeasured { id, actual } => {
+                let w = &self.settings.window;
+                log::info!(
+                    "restore measure: actual {actual:?} saved ({:?},{:?})",
+                    w.x,
+                    w.y
+                );
+                if let (Some(sx), Some(sy), Some(actual), false) = (w.x, w.y, actual, w.maximized) {
+                    let (dx, dy) = (actual.x - sx as f32, actual.y - sy as f32);
+                    if dx != 0.0 || dy != 0.0 {
+                        log::info!("restore correction: delta ({dx},{dy})");
+                        return iced::window::move_to(
+                            id,
+                            iced::Point::new(sx as f32 - dx, sy as f32 - dy),
+                        );
+                    }
+                }
                 Task::none()
             }
             Event::OpenSettings => {
@@ -1124,12 +1177,22 @@ impl App {
             }
             Event::SettingsMsg(msg) => self.handle_settings(msg),
             Event::WindowCloseRequested(id) => {
-                // Maximized is queryable only, so fetch it before saving.
-                iced::window::is_maximized(id)
-                    .map(move |maximized| Event::WindowClose { id, maximized })
+                // Maximized and the frame position are queryable only, so
+                // fetch both before saving.
+                iced::window::is_maximized(id).then(move |maximized| {
+                    iced::window::position(id).map(move |position| Event::WindowClose {
+                        id,
+                        maximized,
+                        position,
+                    })
+                })
             }
-            Event::WindowClose { id, maximized } => {
-                self.save_window_state(maximized);
+            Event::WindowClose {
+                id,
+                maximized,
+                position,
+            } => {
+                self.save_window_state(maximized, position);
                 iced::window::close(id)
             }
             Event::Probed { project, result } => {
@@ -2914,13 +2977,14 @@ impl App {
     /// saved while we ran — don't clobber its edits), then write only the
     /// window geometry. A maximized close keeps the last normal size and
     /// position on disk, so unmaximizing after relaunch restores them.
-    fn save_window_state(&self, maximized: bool) {
+    fn save_window_state(&self, maximized: bool, position: Option<iced::Point>) {
         let mut settings = tuxflow_core::config::settings::AppSettings::load();
         settings.window.maximized = maximized;
         if !maximized {
             settings.window.width = self.window_size.width as i32;
             settings.window.height = self.window_size.height as i32;
-            if let Some(pos) = self.window_pos {
+            // `None` (Wayland: no positioning) keeps the values on disk.
+            if let Some(pos) = position {
                 settings.window.x = Some(pos.x as i32);
                 settings.window.y = Some(pos.y as i32);
             }
@@ -2943,9 +3007,7 @@ impl App {
             iced::keyboard::listen().map(Event::Hotkey),
             iced::window::resize_events().map(|(_, size)| Event::WindowResized(size)),
             iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Window(iced::window::Event::Moved(point)) => {
-                    Some(Event::WindowMoved(point))
-                }
+                iced::Event::Window(iced::window::Event::Moved(_)) => Some(Event::WindowMoved),
                 _ => None,
             }),
             // exit_on_close_request(false): the close button routes through

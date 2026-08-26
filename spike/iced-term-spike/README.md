@@ -91,9 +91,18 @@ failure found was diagnosed to root cause and fixed in the fork the same day
 - [x] Window resize/scaling — pass.
 - [x] Dead-key composition (`ü`) — **works** (winit xkb compose).
 - [x] Image paste — failed as scored during the walkthrough; the arboard
-      fallback added after (gaps list, item 3) awaits a real-session
-      re-check: copy an image, Ctrl+Shift+V in a terminal → a PNG path
-      should be typed.
+      fallback added after (gaps list, item 3) **passed the real-session
+      re-check** (2026-08-26): PNG path typed into the terminal.
+
+Post-walkthrough re-check (2026-08-26) of the newly closed gaps:
+
+- [x] PRIMARY: drag-select → middle-click paste in another pane — pass.
+- [x] Image paste — pass (above).
+- [ ] Ctrl+Shift+F search — **failed**, root-caused and fixed (fork patch
+      10): the default bindings map the whole Ctrl+Shift alphabet to
+      control characters, so the widget typed ^F and captured the event
+      before the hotkey listener saw it. The demo now overrides the chord
+      with `BindingAction::Passthrough`. Needs one more interactive try.
 
 ## Verdict
 

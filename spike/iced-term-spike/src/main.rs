@@ -118,8 +118,7 @@ impl App {
             ..Default::default()
         };
 
-        let tab = iced_term::Terminal::new(0, term_settings.clone())
-            .expect("failed to create the initial terminal");
+        let tab = spawn_terminal(0, term_settings.clone());
         let mut tabs = HashMap::new();
         tabs.insert(0, tab);
 
@@ -150,11 +149,7 @@ impl App {
                 } else {
                     term_settings.clone()
                 };
-                tabs.insert(
-                    id,
-                    iced_term::Terminal::new(id, settings)
-                        .expect("failed to create a stress terminal"),
-                );
+                tabs.insert(id, spawn_terminal(id, settings));
             }
             panes_created = 4;
         }
@@ -197,8 +192,7 @@ impl App {
             Event::Split(axis, pane) => {
                 let id = self.panes_created as u64;
                 let result = self.panes.split(axis, pane, Pane { id });
-                let tab = iced_term::Terminal::new(id, self.term_settings.clone())
-                    .expect("failed to create a terminal");
+                let tab = spawn_terminal(id, self.term_settings.clone());
                 let focus_task = TerminalView::focus(tab.widget_id().clone());
                 self.tabs.insert(id, tab);
                 if let Some((pane, _)) = result {
@@ -622,6 +616,25 @@ fn visible_text(tab: &iced_term::Terminal) -> String {
         .map(|l| l.trim_end())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Terminal factory: installs the app's reserved chords before first use.
+/// Found live in the walkthrough re-check: iced_term binds the whole
+/// Ctrl+Shift alphabet to control characters, so without the Passthrough
+/// override Ctrl+Shift+F typed ^F into the shell (event captured) and the
+/// search hotkey never fired.
+fn spawn_terminal(id: u64, settings: iced_term::settings::Settings) -> iced_term::Terminal {
+    let mut tab = iced_term::Terminal::new(id, settings).expect("failed to create a terminal");
+    tab.handle(iced_term::Command::AddBindings(vec![(
+        iced_term::bindings::Binding {
+            target: iced_term::bindings::InputKind::Char("f".into()),
+            modifiers: iced::keyboard::Modifiers::SHIFT | iced::keyboard::Modifiers::COMMAND,
+            terminal_mode_include: iced_term::TermMode::empty(),
+            terminal_mode_exclude: iced_term::TermMode::empty(),
+        },
+        iced_term::bindings::BindingAction::Passthrough,
+    )]));
+    tab
 }
 
 /// RGBA8 → PNG on disk (arboard hands over raw RGBA).

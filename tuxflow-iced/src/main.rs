@@ -20,7 +20,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::ClipboardType;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{Color, Element, Length, Size, Subscription, Task};
+use iced::{Element, Length, Size, Subscription, Task};
 use iced_term::{BackendCommand, SearchDirection, TerminalView};
 use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
@@ -101,6 +101,7 @@ impl ProjectState {
 struct ProcessForm {
     name: String,
     command: String,
+    working_dir: String,
     agent: bool,
     start_with_project: bool,
     auto_restart: bool,
@@ -134,14 +135,16 @@ struct App {
     next_term_id: u64,
 }
 
+/// Probe success: project name if configured, process configs, live tmux
+/// sessions. Failure: message + whether it's worth retrying.
+type ProbeResult = Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (String, bool)>;
+
 #[derive(Debug, Clone)]
 enum Event {
     Terminal(iced_term::Event),
-    /// Worker finished a remote probe: (project name if configured,
-    /// process configs, live tmux sessions) or (message, retryable).
     Probed {
         project: u64,
-        result: Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (String, bool)>,
+        result: ProbeResult,
     },
     RetryProbe(u64),
     SelectProcess {
@@ -216,6 +219,7 @@ enum Event {
     OpenEditProcess,
     AddCommandName(String),
     AddCommandCommand(String),
+    FormWorkingDir(String),
     FormToggleStartWith(bool),
     FormToggleAutoRestart(bool),
     FormToggleOpenBrowser(bool),
@@ -230,11 +234,11 @@ impl App {
         let saved = SavedProjects::load();
         // Insurance: keep a .bak of the last known-good (non-empty)
         // workspace before this process ever saves. One wipe was enough.
-        if !saved.directories.is_empty() {
-            if let Some(dir) = dirs::config_dir() {
-                let file = dir.join("tuxflow/projects.toml");
-                let _ = std::fs::copy(&file, file.with_extension("toml.bak"));
-            }
+        if !saved.directories.is_empty()
+            && let Some(dir) = dirs::config_dir()
+        {
+            let file = dir.join("tuxflow/projects.toml");
+            let _ = std::fs::copy(&file, file.with_extension("toml.bak"));
         }
         let mut app = App {
             projects: Vec::new(),
@@ -327,7 +331,7 @@ impl App {
             location,
         };
 
-        let task = match project.location.clone() {
+        match project.location.clone() {
             ProjectLocation::Local(dir) => {
                 let (name, configs) = processes::load_local_configs(&dir);
                 if self.saved.get_name(key).is_none() {
@@ -344,8 +348,7 @@ impl App {
                 self.projects.push(project);
                 self.probe_task(self.projects.len() - 1)
             }
-        };
-        task
+        }
     }
 
     fn project_index(&self, id: u64) -> Option<usize> {
@@ -968,10 +971,10 @@ impl App {
                 match result {
                     Ok((name, configs, live_sessions)) => {
                         let key = self.projects[pidx].key();
-                        if self.saved.get_name(&key).is_none() {
-                            if let Some(name) = name {
-                                self.projects[pidx].name = name;
-                            }
+                        if self.saved.get_name(&key).is_none()
+                            && let Some(name) = name
+                        {
+                            self.projects[pidx].name = name;
                         }
                         let merged = processes::merge_saved(configs, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
@@ -1323,14 +1326,13 @@ impl App {
                 Task::none()
             }
             Event::OpenBadge => {
-                if let Some(project) = self.active_project() {
-                    if let Some(entry) = project.entries.get(project.selected) {
-                        if let Some(url) = browser_url(project, &entry.config.name) {
-                            log::info!("open badge {url}");
-                            if let Err(e) = open::that(&url) {
-                                log::warn!("open {url} failed: {e}");
-                            }
-                        }
+                if let Some(project) = self.active_project()
+                    && let Some(entry) = project.entries.get(project.selected)
+                    && let Some(url) = browser_url(project, &entry.config.name)
+                {
+                    log::info!("open badge {url}");
+                    if let Err(e) = open::that(&url) {
+                        log::warn!("open {url} failed: {e}");
                     }
                 }
                 Task::none()
@@ -1372,6 +1374,7 @@ impl App {
                     self.add_command = Some(ProcessForm {
                         name: String::new(),
                         command: String::new(),
+                        working_dir: String::new(),
                         agent,
                         start_with_project: false,
                         auto_restart: false,
@@ -1387,19 +1390,26 @@ impl App {
                 Task::none()
             }
             Event::OpenEditProcess => {
-                if let Some(project) = self.active_project() {
-                    if let Some(entry) = project.entries.get(project.selected) {
-                        self.add_command = Some(ProcessForm {
-                            name: entry.config.name.clone(),
-                            command: entry.config.command.clone(),
-                            agent: entry.config.category == ProcessCategory::Agent,
-                            start_with_project: entry.config.start_with_project,
-                            auto_restart: entry.config.auto_restart,
-                            open_in_browser: entry.config.open_in_browser,
-                            editing: Some((project.id, project.selected)),
-                            original_category: entry.config.category.clone(),
-                        });
-                    }
+                if let Some(project) = self.active_project()
+                    && let Some(entry) = project.entries.get(project.selected)
+                {
+                    self.add_command = Some(ProcessForm {
+                        name: entry.config.name.clone(),
+                        command: entry.config.command.clone(),
+                        working_dir: entry.config.working_dir.clone().unwrap_or_default(),
+                        agent: entry.config.category == ProcessCategory::Agent,
+                        start_with_project: entry.config.start_with_project,
+                        auto_restart: entry.config.auto_restart,
+                        open_in_browser: entry.config.open_in_browser,
+                        editing: Some((project.id, project.selected)),
+                        original_category: entry.config.category.clone(),
+                    });
+                }
+                Task::none()
+            }
+            Event::FormWorkingDir(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.working_dir = v;
                 }
                 Task::none()
             }
@@ -1490,6 +1500,12 @@ impl App {
                     }
                     let mut config = entry.config.clone();
                     config.command = command.to_string();
+                    let wd = form.working_dir.trim();
+                    config.working_dir = if wd.is_empty() {
+                        None
+                    } else {
+                        Some(wd.to_string())
+                    };
                     config.start_with_project = form.start_with_project;
                     config.auto_restart = form.auto_restart;
                     config.open_in_browser = form.open_in_browser;
@@ -1512,10 +1528,15 @@ impl App {
                 {
                     return Task::none();
                 }
+                let wd = form.working_dir.trim();
                 let config = ProcessConfig {
                     name,
                     command: command.to_string(),
-                    working_dir: None,
+                    working_dir: if wd.is_empty() {
+                        None
+                    } else {
+                        Some(wd.to_string())
+                    },
                     start_with_project: form.start_with_project,
                     auto_restart: form.auto_restart,
                     open_in_browser: form.open_in_browser,
@@ -1573,6 +1594,10 @@ impl App {
                 };
 
                 let action_task = match action {
+                    iced_term::actions::Action::ChangeTitle(title) => {
+                        self.projects[pidx].entries[index].title = Some(title);
+                        Task::none()
+                    }
                     iced_term::actions::Action::Shutdown => self.finalize_exit(pidx, index),
                     iced_term::actions::Action::PublishSelection(text) => {
                         iced::clipboard::write_primary(text)
@@ -2010,16 +2035,32 @@ impl App {
             ),
             Status::Reconnecting(n) => (RESTARTING, format!("\u{25cf} reconnecting \u{00b7} {n}")),
         };
+        let title: String = entry
+            .title
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .take(70)
+            .collect();
         let mut controls = row![
             text(&entry.config.name).size(13.5).font(bold()).color(TEXT),
             container(text(status_word).size(10.5))
                 .padding([3, 10])
                 .style(theme::status_pill(status_color)),
+            text(title).size(11).color(DIM),
             iced::widget::space::horizontal(),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
 
+        if display_badge(project, &entry.config.name).is_some() {
+            controls = controls.push(
+                button(text("\u{2197} open").size(11.5))
+                    .padding([4, 12])
+                    .style(theme::pill_button(accent))
+                    .on_press(Event::OpenBadge),
+            );
+        }
         controls = controls
             .push(
                 button(text("\u{270e} edit").size(11.5))
@@ -2242,6 +2283,14 @@ impl App {
                 .style(theme::input(accent))
                 .padding([8, 14])
                 .size(13),
+            text_input(
+                "working directory \u{2014} optional, defaults to the project",
+                &form.working_dir,
+            )
+            .on_input(Event::FormWorkingDir)
+            .style(theme::input(accent))
+            .padding([8, 14])
+            .size(13),
             iced::widget::checkbox(form.start_with_project)
                 .label("start with project")
                 .on_toggle(Event::FormToggleStartWith)

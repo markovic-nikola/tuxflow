@@ -38,7 +38,7 @@ pub enum Command {
     SelectRelease,
     /// Find the next scrollback match for a regex (VTE `search_set_regex`
     /// + `search_find_next/previous` parity). A changed pattern restarts
-    /// from the visible edge; a repeated one advances, wrapping around.
+    ///   from the visible edge; a repeated one advances, wrapping around.
     SearchNext(String, Direction),
     /// Drop the active search and its highlight.
     SearchClear,

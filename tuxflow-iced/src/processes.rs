@@ -66,6 +66,8 @@ pub struct ProcessEntry {
     /// A disconnect notification went out for the current outage — reset
     /// on manual action so the next outage notifies again.
     pub outage_notified: bool,
+    /// OSC title the running program last set (shown dim in the toolbar).
+    pub title: Option<String>,
 }
 
 impl ProcessEntry {
@@ -86,6 +88,7 @@ impl ProcessEntry {
             pending_auto_open: false,
             auto_open_grace: false,
             outage_notified: false,
+            title: None,
         }
     }
 
@@ -254,7 +257,6 @@ pub fn spawn_settings(
             ..Default::default()
         },
         theme: iced_term::settings::ThemeSettings::new(Box::new(crate::theme::terminal_palette())),
-        ..Default::default()
     }
 }
 

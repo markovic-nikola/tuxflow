@@ -8,6 +8,7 @@
 //! run as inline forms; closing a project detaches its remote sessions.
 
 mod keys;
+mod notify;
 mod processes;
 mod theme;
 
@@ -96,10 +97,16 @@ impl ProjectState {
     }
 }
 
-struct AddCommandForm {
+struct ProcessForm {
     name: String,
     command: String,
     agent: bool,
+    start_with_project: bool,
+    auto_restart: bool,
+    open_in_browser: bool,
+    /// Some((project id, entry index)) when editing an existing process.
+    editing: Option<(u64, usize)>,
+    original_category: ProcessCategory,
 }
 
 struct App {
@@ -108,6 +115,7 @@ struct App {
     active: usize,
     saved: SavedProjects,
     app_keys: AppKeys,
+    notifications: tuxflow_core::config::settings::NotificationSettings,
     font_size: f32,
     scrollback: usize,
     composer: String,
@@ -120,7 +128,7 @@ struct App {
     palette_index: usize,
     palette_input: iced::widget::Id,
     add_project: Option<String>,
-    add_command: Option<AddCommandForm>,
+    add_command: Option<ProcessForm>,
     next_project_id: u64,
     next_term_id: u64,
 }
@@ -199,8 +207,13 @@ enum Event {
     OpenAddCommand {
         agent: bool,
     },
+    OpenEditProcess,
     AddCommandName(String),
     AddCommandCommand(String),
+    FormToggleStartWith(bool),
+    FormToggleAutoRestart(bool),
+    FormToggleOpenBrowser(bool),
+    DeleteProcess,
     AddCommandSubmit,
     AddCommandCancel,
 }
@@ -222,6 +235,7 @@ impl App {
             active: 0,
             saved,
             app_keys: AppKeys::from_settings(&settings.keybindings),
+            notifications: settings.notifications.clone(),
             font_size: (settings.appearance.font_size as f32).clamp(8.0, 32.0),
             scrollback: settings.appearance.scrollback_lines as usize,
             composer: String::new(),
@@ -260,6 +274,9 @@ impl App {
         };
         for key in keys {
             tasks.push(app.open_project(&key));
+        }
+        if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("edit") {
+            tasks.push(Task::done(Event::OpenEditProcess));
         }
 
         (app, Task::batch(tasks))
@@ -453,6 +470,7 @@ impl App {
         entry.restart_generation += 1;
         entry.pending_auto_open = entry.config.open_in_browser;
         entry.auto_open_grace = false;
+        entry.outage_notified = false;
         self.start(pidx, index)
     }
 
@@ -546,6 +564,7 @@ impl App {
         entry.term_id = None;
 
         let run = entry.started_at.map(|t| t.elapsed());
+        let stopping_was = entry.stopping;
         let (status, attempts, delay) = plan_after_exit(
             entry.config.auto_restart,
             entry.stopping,
@@ -558,6 +577,28 @@ impl App {
         entry.restart_attempts = attempts;
         entry.stopping = false;
 
+        // Desktop notifications, per the shared settings (GTK parity).
+        let project_name = self.projects[pidx].name.clone();
+        let entry = &mut self.projects[pidx].entries[index];
+        let name = entry.config.name.clone();
+        match &entry.status {
+            Status::Crashed(code) => {
+                notify::crash(&self.notifications, &project_name, &name, *code)
+            }
+            Status::Restarting(attempt) => {
+                notify::auto_restart(&self.notifications, &project_name, &name, *attempt)
+            }
+            Status::Reconnecting(_) if !entry.outage_notified => {
+                entry.outage_notified = true;
+                notify::disconnect(&project_name, &name);
+            }
+            Status::Stopped if !stopping_was => {
+                notify::finish(&self.notifications, &project_name, &name)
+            }
+            _ => {}
+        }
+
+        let entry = &mut self.projects[pidx].entries[index];
         let task = match delay {
             Some(delay) => {
                 let generation = entry.restart_generation;
@@ -1240,12 +1281,89 @@ impl App {
             }
             Event::OpenAddCommand { agent } => {
                 if self.active_project().is_some() {
-                    self.add_command = Some(AddCommandForm {
+                    self.add_command = Some(ProcessForm {
                         name: String::new(),
                         command: String::new(),
                         agent,
+                        start_with_project: false,
+                        auto_restart: false,
+                        open_in_browser: false,
+                        editing: None,
+                        original_category: if agent {
+                            ProcessCategory::Agent
+                        } else {
+                            ProcessCategory::Command
+                        },
                     });
                 }
+                Task::none()
+            }
+            Event::OpenEditProcess => {
+                if let Some(project) = self.active_project() {
+                    if let Some(entry) = project.entries.get(project.selected) {
+                        self.add_command = Some(ProcessForm {
+                            name: entry.config.name.clone(),
+                            command: entry.config.command.clone(),
+                            agent: entry.config.category == ProcessCategory::Agent,
+                            start_with_project: entry.config.start_with_project,
+                            auto_restart: entry.config.auto_restart,
+                            open_in_browser: entry.config.open_in_browser,
+                            editing: Some((project.id, project.selected)),
+                            original_category: entry.config.category.clone(),
+                        });
+                    }
+                }
+                Task::none()
+            }
+            Event::FormToggleStartWith(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.start_with_project = v;
+                }
+                Task::none()
+            }
+            Event::FormToggleAutoRestart(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.auto_restart = v;
+                }
+                Task::none()
+            }
+            Event::FormToggleOpenBrowser(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.open_in_browser = v;
+                }
+                Task::none()
+            }
+            Event::DeleteProcess => {
+                let Some(form) = self.add_command.take() else {
+                    return Task::none();
+                };
+                let Some((project_id, index)) = form.editing else {
+                    return Task::none();
+                };
+                let Some(pidx) = self.project_index(project_id) else {
+                    return Task::none();
+                };
+                if self.projects[pidx].entries.get(index).is_none() {
+                    return Task::none();
+                }
+                self.stop(pidx, index);
+                let key = self.projects[pidx].key();
+                let name = self.projects[pidx].entries[index].config.name.clone();
+                // The user's edit of a DETECTED process lives in
+                // custom_commands; deleting must both drop the custom copy
+                // and remember the deletion, or detection resurrects it on
+                // the next load.
+                let is_custom = self
+                    .saved
+                    .get_custom_commands(&key)
+                    .is_some_and(|l| l.iter().any(|c| c.name == name));
+                if is_custom {
+                    self.saved.remove_custom_command(&key, &name);
+                }
+                self.saved.add_deleted_process(&key, &name);
+                self.projects[pidx].entries.remove(index);
+                let n = self.projects[pidx].entries.len();
+                self.projects[pidx].selected = if n == 0 { 0 } else { index.min(n - 1) };
                 Task::none()
             }
             Event::AddCommandName(value) => {
@@ -1268,6 +1386,30 @@ impl App {
                 let Some(form) = self.add_command.take() else {
                     return Task::none();
                 };
+                if let Some((project_id, index)) = form.editing {
+                    // Edit: persist as the custom command that overrides
+                    // same-named detection on every future load.
+                    let Some(pidx) = self.project_index(project_id) else {
+                        return Task::none();
+                    };
+                    let Some(entry) = self.projects[pidx].entries.get_mut(index) else {
+                        return Task::none();
+                    };
+                    let command = form.command.trim();
+                    if command.is_empty() {
+                        self.add_command = Some(form);
+                        return Task::none();
+                    }
+                    let mut config = entry.config.clone();
+                    config.command = command.to_string();
+                    config.start_with_project = form.start_with_project;
+                    config.auto_restart = form.auto_restart;
+                    config.open_in_browser = form.open_in_browser;
+                    entry.config = config.clone();
+                    let key = self.projects[pidx].key();
+                    self.saved.add_custom_command(&key, config);
+                    return Task::none();
+                }
                 let (name, command) = (form.name.trim().to_string(), form.command.trim());
                 if name.is_empty() || command.is_empty() {
                     self.add_command = Some(form);
@@ -1286,9 +1428,9 @@ impl App {
                     name,
                     command: command.to_string(),
                     working_dir: None,
-                    start_with_project: false,
-                    auto_restart: false,
-                    open_in_browser: false,
+                    start_with_project: form.start_with_project,
+                    auto_restart: form.auto_restart,
+                    open_in_browser: form.open_in_browser,
                     restart_when_changed: Vec::new(),
                     env: Default::default(),
                     category: if form.agent {
@@ -1303,7 +1445,6 @@ impl App {
                 // overrides same-named detection, like the GTK dialogs.
                 let key = self.projects[pidx].key();
                 self.saved.add_custom_command(&key, config.clone());
-                self.saved.save();
                 self.projects[pidx].entries.push(ProcessEntry::new(config));
                 let index = self.projects[pidx].entries.len() - 1;
                 self.start_fresh(pidx, index)
@@ -1578,6 +1719,7 @@ impl App {
                     for category in [
                         ProcessCategory::Agent,
                         ProcessCategory::Command,
+                        ProcessCategory::SSH,
                         ProcessCategory::Terminal,
                     ] {
                         let members: Vec<usize> = (0..project.entries.len())
@@ -1792,6 +1934,12 @@ impl App {
 
         controls = controls
             .push(
+                button(text("\u{270e} edit").size(11.5))
+                    .padding([4, 12])
+                    .style(theme::pill_button(accent))
+                    .on_press(Event::OpenEditProcess),
+            )
+            .push(
                 button(text("+ command").size(11.5))
                     .padding([4, 12])
                     .style(theme::pill_button(accent))
@@ -1961,44 +2109,95 @@ impl App {
         col.into()
     }
 
-    fn view_add_command(&'_ self, form: &'_ AddCommandForm) -> Element<'_, Event> {
+    fn view_add_command<'a>(&'a self, form: &'a ProcessForm) -> Element<'a, Event> {
         let accent = self
             .active_project()
             .map(|p| accent_for(p.location.is_remote()))
             .unwrap_or(LOCAL_ACCENT);
-        let title = if form.agent {
-            "add agent"
-        } else {
-            "add command"
+        let editing = form.editing.is_some();
+        let title = match (editing, form.agent) {
+            (true, _) => "edit process",
+            (false, true) => "add agent",
+            (false, false) => "add command",
         };
-        form_card(
-            column![
-                text(title).size(16).font(bold()),
-                text_input("name \u{2014} e.g. web", &form.name)
-                    .on_input(Event::AddCommandName)
-                    .style(theme::input(accent))
-                    .padding([8, 14])
-                    .size(13),
-                text_input("command \u{2014} e.g. npm run dev", &form.command)
-                    .on_input(Event::AddCommandCommand)
-                    .on_submit(Event::AddCommandSubmit)
-                    .style(theme::input(accent))
-                    .padding([8, 14])
-                    .size(13),
-                row![
-                    button(text("add & start").size(12).font(bold()))
-                        .padding([7, 16])
-                        .style(theme::primary(accent))
-                        .on_press(Event::AddCommandSubmit),
-                    button(text("cancel").size(12))
-                        .padding([7, 16])
-                        .style(theme::pill_button(accent))
-                        .on_press(Event::AddCommandCancel),
-                ]
-                .spacing(8),
+
+        let name_row: Element<'_, Event> = if editing {
+            row![
+                text(&form.name).size(15).font(bold()),
+                text(match form.original_category {
+                    ProcessCategory::Agent => "agent",
+                    ProcessCategory::Command => "command",
+                    ProcessCategory::Terminal => "terminal",
+                    ProcessCategory::SSH => "ssh",
+                })
+                .size(11)
+                .color(DIM),
             ]
-            .spacing(14),
-        )
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            text_input("name \u{2014} e.g. web", &form.name)
+                .on_input(Event::AddCommandName)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into()
+        };
+
+        let mut col = column![
+            text(title).size(16).font(bold()),
+            name_row,
+            text_input("command \u{2014} e.g. npm run dev", &form.command)
+                .on_input(Event::AddCommandCommand)
+                .on_submit(Event::AddCommandSubmit)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13),
+            iced::widget::checkbox(form.start_with_project)
+                .label("start with project")
+                .on_toggle(Event::FormToggleStartWith)
+                .size(16)
+                .text_size(12.5),
+            iced::widget::checkbox(form.auto_restart)
+                .label("restart on crash")
+                .on_toggle(Event::FormToggleAutoRestart)
+                .size(16)
+                .text_size(12.5),
+            iced::widget::checkbox(form.open_in_browser)
+                .label("open in browser when a port appears")
+                .on_toggle(Event::FormToggleOpenBrowser)
+                .size(16)
+                .text_size(12.5),
+        ]
+        .spacing(14);
+
+        let mut buttons = row![
+            button(
+                text(if editing { "save" } else { "add & start" })
+                    .size(12)
+                    .font(bold()),
+            )
+            .padding([7, 16])
+            .style(theme::primary(accent))
+            .on_press(Event::AddCommandSubmit),
+            button(text("cancel").size(12))
+                .padding([7, 16])
+                .style(theme::pill_button(accent))
+                .on_press(Event::AddCommandCancel),
+        ]
+        .spacing(8);
+        if editing {
+            buttons = buttons.push(iced::widget::space::horizontal()).push(
+                button(text("delete process").size(12))
+                    .padding([7, 16])
+                    .style(theme::pill_intent(accent, CRASHED))
+                    .on_press(Event::DeleteProcess),
+            );
+        }
+        col = col.push(buttons);
+
+        form_card(col)
     }
 
     fn view_status_bar(&'_ self) -> Element<'_, Event> {

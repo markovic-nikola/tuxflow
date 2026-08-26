@@ -63,6 +63,9 @@ pub struct ProcessEntry {
     pub pending_auto_open: bool,
     /// The provisional-badge grace timer is already scheduled.
     pub auto_open_grace: bool,
+    /// A disconnect notification went out for the current outage — reset
+    /// on manual action so the next outage notifies again.
+    pub outage_notified: bool,
 }
 
 impl ProcessEntry {
@@ -82,6 +85,7 @@ impl ProcessEntry {
             remote_fresh_next: false,
             pending_auto_open: false,
             auto_open_grace: false,
+            outage_notified: false,
         }
     }
 
@@ -90,14 +94,10 @@ impl ProcessEntry {
     }
 }
 
-/// SSH-category entries reuse the GTK app's ssh-terminal machinery, which
-/// has no iced counterpart yet — held back.
+/// SSH-category entries are ssh invocations run locally (spawn_settings
+/// routes them around the remote wrap), like the GTK app's SSH section.
 pub fn entries_from(configs: Vec<ProcessConfig>) -> Vec<ProcessEntry> {
-    configs
-        .into_iter()
-        .filter(|c| c.category != ProcessCategory::SSH)
-        .map(ProcessEntry::new)
-        .collect()
+    configs.into_iter().map(ProcessEntry::new).collect()
 }
 
 /// Project name + process configs for a local directory: tuxflow.toml when

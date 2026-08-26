@@ -157,6 +157,16 @@ enum Event {
     },
     ComposerChanged(String),
     ComposerSend,
+    /// Ignored-status keys — the widget consumed everything it wanted
+    /// (Ctrl+Shift+V with TEXT on the clipboard never reaches here).
+    Hotkey(iced::keyboard::Event),
+    /// The image-paste worker finished: bytes to feed the terminal that
+    /// initiated the paste (a typed path, or Ctrl+V for agents).
+    ImagePasted {
+        project: u64,
+        term: u64,
+        result: Result<Vec<u8>, String>,
+    },
     OpenAddProject,
     AddProjectInput(String),
     AddProjectSubmit,
@@ -573,6 +583,64 @@ impl App {
         }
     }
 
+    /// Ctrl+Shift+V with an image-only clipboard — the GTK app's flow,
+    /// verbatim: upload the PNG to the host's clipboard-shim slot; AGENT
+    /// terminals then get a real Ctrl+V (the agent "reads the clipboard"
+    /// through the shim and shows its native attachment UI), others get
+    /// the remote path typed. Local projects: agents get Ctrl+V (they can
+    /// read the real clipboard themselves), others get a temp-file path.
+    /// Clipboard read + encode + ssh all run on a worker.
+    fn paste_image(&mut self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        let Some(entry) = project.entries.get(project.selected) else {
+            return Task::none();
+        };
+        let (Some(term), true) = (entry.term_id, entry.terminal.is_some()) else {
+            return Task::none();
+        };
+        let project_id = project.id;
+        let host = project.location.host().map(String::from);
+        let is_agent = entry.config.category == ProcessCategory::Agent;
+
+        Task::perform(
+            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                let image = arboard::Clipboard::new()
+                    .and_then(|mut cb| cb.get_image())
+                    .map_err(|e| format!("no image on clipboard: {e}"))?;
+                match (host, is_agent) {
+                    (None, true) => {
+                        // Local agent: it reads the real clipboard itself.
+                        Ok(vec![0x16])
+                    }
+                    (None, false) => {
+                        let png = encode_png(&image)?;
+                        let path = std::env::temp_dir()
+                            .join(format!(".tuxflow-img-{}.png", std::process::id()));
+                        std::fs::write(&path, png).map_err(|e| e.to_string())?;
+                        Ok(format!("{} ", path.display()).into_bytes())
+                    }
+                    (Some(host), agent) => {
+                        let png = encode_png(&image)?;
+                        let path = remote::upload_clipboard_image(&host, &png)?;
+                        log::info!("image paste: uploaded to {host}:{path}");
+                        if agent {
+                            Ok(vec![0x16])
+                        } else {
+                            Ok(format!("{path} ").into_bytes())
+                        }
+                    }
+                }
+            }),
+            move |joined| Event::ImagePasted {
+                project: project_id,
+                term,
+                result: joined.unwrap_or_else(|e| Err(format!("paste worker died: {e}"))),
+            },
+        )
+    }
+
     fn open_in_browser(&mut self, pidx: usize, index: usize) {
         let name = self.projects[pidx].entries[index].config.name.clone();
         self.projects[pidx].entries[index].pending_auto_open = false;
@@ -773,6 +841,48 @@ impl App {
                     .unwrap_or_default();
                 if due && self.projects[pidx].ports.has_port(&name) {
                     self.open_in_browser(pidx, index);
+                }
+                Task::none()
+            }
+            Event::Hotkey(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                match key.as_ref() {
+                    // Reaching here means the widget found no TEXT to paste
+                    // — the clipboard holds an image (or nothing).
+                    iced::keyboard::Key::Character(c)
+                        if c.eq_ignore_ascii_case("v")
+                            && modifiers.control()
+                            && modifiers.shift() =>
+                    {
+                        self.paste_image()
+                    }
+                    _ => Task::none(),
+                }
+            }
+            Event::Hotkey(_) => Task::none(),
+            Event::ImagePasted {
+                project,
+                term,
+                result,
+            } => {
+                match result {
+                    Ok(bytes) => {
+                        // Only if the initiating terminal is still alive —
+                        // a restart between paste and upload must not type
+                        // a stale path into the fresh run.
+                        let target = self.project_index(project).and_then(|pidx| {
+                            self.projects[pidx]
+                                .entries
+                                .iter_mut()
+                                .find(|e| e.term_id == Some(term))
+                                .and_then(|e| e.terminal.as_mut())
+                        });
+                        if let Some(terminal) = target {
+                            terminal.handle(iced_term::Command::ProxyToBackend(
+                                BackendCommand::Write(bytes),
+                            ));
+                        }
+                    }
+                    Err(e) => log::error!("image paste failed: {e}"),
                 }
                 Task::none()
             }
@@ -1413,8 +1523,28 @@ impl App {
             .filter_map(|e| e.terminal.as_ref())
             .map(|t| t.subscription())
             .collect();
-        Subscription::batch(subs).map(Event::Terminal)
+        Subscription::batch([
+            Subscription::batch(subs).map(Event::Terminal),
+            // Ignored-status keys only — anything a focused widget consumed
+            // never reaches the hotkeys.
+            iced::keyboard::listen().map(Event::Hotkey),
+        ])
     }
+}
+
+/// RGBA8 (what arboard hands over) → PNG bytes.
+fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, image.width as u32, image.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer
+            .write_image_data(&image.bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(out)
 }
 
 fn view_add_project(input: &str) -> Element<'_, Event> {

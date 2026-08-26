@@ -1,13 +1,14 @@
-//! TuxFlow's iced shell — migration M2: remote projects.
+//! TuxFlow's iced shell — migration M4: the multi-project workspace.
 //!
-//! `tuxflow-iced [path | ssh://host/dir]`. Remote projects probe over ssh
-//! on a worker (config or detection via SshFs), spawn their processes
-//! inside host-side tmux sessions through core's wrap_remote_command
-//! (connection loss and app quit only detach), reattach live sessions at
-//! startup, treat ssh's exit 255 as "reconnecting" rather than a crash,
-//! and auto-tunnel every port the output scanner finds.
+//! `tuxflow-iced [path | ssh://host/dir]…`. Projects come from
+//! `~/.config/tuxflow/projects.toml` (plus any CLI args, which persist),
+//! each with its own process list (config or detection, overlaid with the
+//! user's custom commands/deletions/order — same policy as the GTK app),
+//! ports, tunnels and poll cadence. Add project / add command / add agent
+//! run as inline forms; closing a project detaches its remote sessions.
 
 mod processes;
+mod theme;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -16,9 +17,10 @@ use alacritty_terminal::event::Event as AEvent;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::ClipboardType;
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Color, Element, Length, Size, Subscription, Task};
 use iced_term::{BackendCommand, TerminalView};
+use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
@@ -26,6 +28,7 @@ use tuxflow_core::remote::{self, ProjectLocation};
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
 use processes::{ProcessEntry, Status, plan_after_exit};
+use theme::{CRASHED, DIM, LOCAL_ACCENT, REMOTE_ACCENT, RUNNING, SIDEBAR_BG, WORKING};
 
 /// Ports-poll cadence: fast while a run is settling (a new forward just
 /// opened), backed off once nothing new appears (GTK behavior).
@@ -41,7 +44,10 @@ fn main() -> iced::Result {
     alacritty_terminal::tty::setup_env();
 
     iced::application(App::new, App::update, App::view)
-        .title(|app: &App| format!("TuxFlow — {}", app.project_name))
+        .title(|app: &App| match app.active_project() {
+            Some(p) => format!("TuxFlow — {}", p.name),
+            None => String::from("TuxFlow"),
+        })
         .window_size(Size {
             width: 1280.0,
             height: 760.0,
@@ -58,107 +64,216 @@ enum Phase {
     Failed(String, bool),
 }
 
-struct App {
+/// One open project: its own processes, port knowledge, tunnels and poll
+/// cadence. `id` is stable across closes — timer events must never land on
+/// whatever project inherited a vec index.
+struct ProjectState {
+    id: u64,
     location: ProjectLocation,
-    project_name: String,
+    name: String,
     phase: Phase,
     entries: Vec<ProcessEntry>,
     selected: usize,
+    expanded: bool,
     ports: PortDetector,
-    /// Remote projects: ssh -L forwards for every port the scanner sees,
-    /// and the remote→local mapping for display (remaps on collision).
     tunnels: Option<TunnelManager>,
     port_map: HashMap<u16, u16>,
     poll_interval: Duration,
     poll_chain_started: bool,
-    composer: String,
-    next_term_id: u64,
     terminals_created: usize,
+}
+
+impl ProjectState {
+    fn key(&self) -> String {
+        self.location.key()
+    }
+
+    fn running(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_running()).count()
+    }
+}
+
+struct AddCommandForm {
+    name: String,
+    command: String,
+    agent: bool,
+}
+
+struct App {
+    projects: Vec<ProjectState>,
+    /// Index of the project owning the main pane.
+    active: usize,
+    saved: SavedProjects,
+    composer: String,
+    add_project: Option<String>,
+    add_command: Option<AddCommandForm>,
+    next_project_id: u64,
+    next_term_id: u64,
 }
 
 #[derive(Debug, Clone)]
 enum Event {
     Terminal(iced_term::Event),
-    /// Worker finished the remote probe: (project name if configured,
+    /// Worker finished a remote probe: (project name if configured,
     /// process configs, live tmux sessions) or (message, retryable).
-    Probed(Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (String, bool)>),
-    RetryProbe,
-    Select(usize),
-    Start(usize),
-    Stop(usize),
-    Restart(usize),
-    AddTerminal,
-    /// Backoff timer fired; the generation guards against timers scheduled
-    /// before a manual action superseded them.
+    Probed {
+        project: u64,
+        result: Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (String, bool)>,
+    },
+    RetryProbe(u64),
+    SelectProcess {
+        project: u64,
+        index: usize,
+    },
+    Start {
+        project: u64,
+        index: usize,
+    },
+    Stop {
+        project: u64,
+        index: usize,
+    },
+    Restart {
+        project: u64,
+        index: usize,
+    },
+    AddTerminal(u64),
+    ToggleExpanded(u64),
+    CloseProject(u64),
     RestartDue {
+        project: u64,
         index: usize,
         generation: u64,
     },
-    /// Ports-poll cadence tick (remote projects): ask the host what the
-    /// running sessions listen on — TUI runners never print their URL.
-    PortsPollTick,
-    PortsPolled(HashMap<String, Vec<u16>>),
-    /// A provisional badge's auto-open grace expired.
+    PortsPollTick(u64),
+    PortsPolled {
+        project: u64,
+        session_ports: HashMap<String, Vec<u16>>,
+    },
     AutoOpenDue {
+        project: u64,
         index: usize,
         generation: u64,
     },
     ComposerChanged(String),
     ComposerSend,
+    OpenAddProject,
+    AddProjectInput(String),
+    AddProjectSubmit,
+    AddProjectCancel,
+    OpenAddCommand {
+        agent: bool,
+    },
+    AddCommandName(String),
+    AddCommandCommand(String),
+    AddCommandSubmit,
+    AddCommandCancel,
 }
 
 impl App {
     fn new() -> (Self, Task<Event>) {
-        let location = match std::env::args().nth(1) {
-            Some(arg) => {
-                let loc = ProjectLocation::parse(&arg);
-                match loc {
-                    // Relative paths resolve against the launch cwd.
-                    ProjectLocation::Local(p) => {
-                        ProjectLocation::Local(p.canonicalize().unwrap_or(p))
-                    }
-                    remote => remote,
-                }
-            }
-            None => ProjectLocation::Local(std::env::current_dir().unwrap_or_default()),
+        let mut app = App {
+            projects: Vec::new(),
+            active: 0,
+            saved: SavedProjects::load(),
+            composer: String::new(),
+            add_project: None,
+            add_command: None,
+            next_project_id: 0,
+            next_term_id: 0,
         };
 
-        let mut app = App {
-            project_name: location.base_name(),
-            tunnels: location.host().map(TunnelManager::new),
-            location,
+        let mut tasks = Vec::new();
+
+        // CLI args join the persisted workspace.
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        for arg in &args {
+            let key = normalize_key(arg);
+            if !app.saved.directories.iter().any(|d| d == &key) {
+                app.saved.add(&key);
+                app.saved.save();
+            }
+        }
+
+        let keys: Vec<String> = if app.saved.directories.is_empty() {
+            // Nothing saved and no args: live in the cwd, unpersisted.
+            vec![ProjectLocation::Local(std::env::current_dir().unwrap_or_default()).key()]
+        } else {
+            app.saved.directories.clone()
+        };
+        for key in keys {
+            tasks.push(app.open_project(&key));
+        }
+
+        (app, Task::batch(tasks))
+    }
+
+    fn saved_has(&self, saved: &SavedProjects, key: &str) -> bool {
+        saved.directories.iter().any(|d| d == key)
+    }
+
+    fn open_project(&mut self, key: &str) -> Task<Event> {
+        let location = ProjectLocation::parse(key);
+        let id = self.next_project_id;
+        self.next_project_id += 1;
+
+        let mut project = ProjectState {
+            id,
+            name: self
+                .saved
+                .get_name(key)
+                .cloned()
+                .unwrap_or_else(|| location.base_name()),
+            expanded: self.saved.is_expanded(key).unwrap_or(true),
             phase: Phase::Loading,
             entries: Vec::new(),
             selected: 0,
             ports: PortDetector::new(),
+            tunnels: location.host().map(TunnelManager::new),
             port_map: HashMap::new(),
             poll_interval: POLL_FAST,
             poll_chain_started: false,
-            composer: String::new(),
-            next_term_id: 0,
             terminals_created: 0,
+            location,
         };
 
-        let boot = match app.location.clone() {
+        let task = match project.location.clone() {
             ProjectLocation::Local(dir) => {
-                let (name, entries) = processes::load_local_project(&dir);
-                app.project_name = name;
-                app.entries = entries;
-                app.phase = Phase::Ready;
-                app.boot_processes(&[])
+                let (name, configs) = processes::load_local_configs(&dir);
+                if self.saved.get_name(key).is_none() {
+                    project.name = name;
+                }
+                let merged = processes::merge_saved(configs, &self.saved, key);
+                project.entries = processes::entries_from(merged);
+                project.phase = Phase::Ready;
+                self.projects.push(project);
+                let pidx = self.projects.len() - 1;
+                self.boot_processes(pidx, &[])
             }
-            ProjectLocation::Ssh { .. } => app.probe_task(),
+            ProjectLocation::Ssh { .. } => {
+                self.projects.push(project);
+                self.probe_task(self.projects.len() - 1)
+            }
         };
-
-        (app, boot)
+        task
     }
 
-    /// Kick the blocking ssh probe onto a worker; the UI shows Loading.
-    fn probe_task(&mut self) -> Task<Event> {
-        self.phase = Phase::Loading;
+    fn project_index(&self, id: u64) -> Option<usize> {
+        self.projects.iter().position(|p| p.id == id)
+    }
+
+    fn active_project(&self) -> Option<&ProjectState> {
+        self.projects.get(self.active)
+    }
+
+    /// Kick the blocking ssh probe onto a worker; the project shows Loading.
+    fn probe_task(&mut self, pidx: usize) -> Task<Event> {
+        let project = &mut self.projects[pidx];
+        project.phase = Phase::Loading;
+        let id = project.id;
         let (Some(host), dir) = (
-            self.location.host().map(String::from),
-            self.location.dir_str(),
+            project.location.host().map(String::from),
+            project.location.dir_str(),
         ) else {
             return Task::none();
         };
@@ -182,56 +297,54 @@ impl App {
                         (e.to_string(), retryable)
                     })
             }),
-            |joined| {
-                Event::Probed(
-                    joined.unwrap_or_else(|e| Err((format!("probe worker died: {e}"), false))),
-                )
+            move |joined| Event::Probed {
+                project: id,
+                result: joined.unwrap_or_else(|e| Err((format!("probe worker died: {e}"), false))),
             },
         )
     }
 
     /// Start what should be up after load: sessions still alive on the host
-    /// (reattach — the UI must never show "stopped" for a running detached
-    /// process) and start_with_project ones. Only the latter count as
-    /// user-initiated for auto-open purposes.
-    fn boot_processes(&mut self, live_sessions: &[String]) -> Task<Event> {
-        let key = self.location.key();
+    /// (reattach — never show "stopped" for a running detached process) and
+    /// start_with_project ones (those count as user-initiated).
+    fn boot_processes(&mut self, pidx: usize, live_sessions: &[String]) -> Task<Event> {
+        let key = self.projects[pidx].key();
         let mut tasks = Vec::new();
-        for i in 0..self.entries.len() {
-            let name = self.entries[i].config.name.clone();
+        for i in 0..self.projects[pidx].entries.len() {
+            let name = self.projects[pidx].entries[i].config.name.clone();
             let live = live_sessions.contains(&remote::remote_session_name(&key, &name));
             if live {
-                tasks.push(self.start(i));
-            } else if self.entries[i].config.start_with_project {
-                tasks.push(self.start_fresh(i));
+                tasks.push(self.start(pidx, i));
+            } else if self.projects[pidx].entries[i].config.start_with_project {
+                tasks.push(self.start_fresh(pidx, i));
             }
         }
-        if self.entries.is_empty() {
-            tasks.push(self.add_terminal());
-        }
         // Remote: begin the self-perpetuating ports-poll chain, once.
-        if self.tunnels.is_some() && !self.poll_chain_started {
-            self.poll_chain_started = true;
-            tasks.push(self.schedule_poll());
+        if self.projects[pidx].tunnels.is_some() && !self.projects[pidx].poll_chain_started {
+            self.projects[pidx].poll_chain_started = true;
+            tasks.push(self.schedule_poll(pidx));
         }
         Task::batch(tasks)
     }
 
-    fn schedule_poll(&self) -> Task<Event> {
-        Task::perform(tokio::time::sleep(self.poll_interval), |_| {
-            Event::PortsPollTick
-        })
+    fn schedule_poll(&self, pidx: usize) -> Task<Event> {
+        let id = self.projects[pidx].id;
+        Task::perform(
+            tokio::time::sleep(self.projects[pidx].poll_interval),
+            move |_| Event::PortsPollTick(id),
+        )
     }
 
     /// Spawn (or respawn/reattach) a process's terminal. Fresh terminal id
     /// each time: subscription identity must change or iced keeps the dead
     /// stream.
-    fn start(&mut self, index: usize) -> Task<Event> {
+    fn start(&mut self, pidx: usize, index: usize) -> Task<Event> {
         let id = self.next_term_id;
         self.next_term_id += 1;
 
-        let settings = processes::spawn_settings(&self.location, &mut self.entries[index]);
-        let entry = &mut self.entries[index];
+        let project = &mut self.projects[pidx];
+        let settings = processes::spawn_settings(&project.location, &mut project.entries[index]);
+        let entry = &mut project.entries[index];
         match iced_term::Terminal::new(id, settings) {
             Ok(term) => {
                 let focus = TerminalView::focus(term.widget_id().clone());
@@ -240,9 +353,12 @@ impl App {
                 entry.status = Status::Running;
                 entry.last_exit = None;
                 entry.stopping = false;
+                entry.auto_open_grace = false;
                 entry.started_at = Some(Instant::now());
-                self.ports.clear(&entry.config.name);
-                self.selected = index;
+                let name = entry.config.name.clone();
+                project.ports.clear(&name);
+                project.selected = index;
+                self.active = pidx;
                 focus
             }
             Err(err) => {
@@ -253,25 +369,33 @@ impl App {
         }
     }
 
-    /// Manual start: forgives past failures, cancels pending timers, and
-    /// arms the one-shot auto-open (user-initiated starts only).
-    fn start_fresh(&mut self, index: usize) -> Task<Event> {
-        let entry = &mut self.entries[index];
+    /// Manual start: forgives past failures, cancels pending timers, arms
+    /// the one-shot auto-open, and stamps the project recently-used.
+    fn start_fresh(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let key = self.projects[pidx].key();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.saved.set_last_used(&key, now);
+        self.saved.save();
+
+        let entry = &mut self.projects[pidx].entries[index];
         entry.restart_attempts = 0;
         entry.restart_generation += 1;
         entry.pending_auto_open = entry.config.open_in_browser;
         entry.auto_open_grace = false;
-        self.start(index)
+        self.start(pidx, index)
     }
 
     /// Stop. Remote: explicitly kill the host-side session first (the local
     /// PTY teardown only detaches it), fire-and-forget, and make the next
-    /// spawn clear any survivor instead of reattaching. Local: dropping the
-    /// terminal makes alacritty's Pty::drop SIGHUP + reap the child on the
-    /// PTY thread — never blocking the UI.
-    fn stop(&mut self, index: usize) {
-        if let Some(host) = self.location.host() {
-            let entry = &mut self.entries[index];
+    /// spawn clear any survivor. Local: dropping the terminal SIGHUPs the
+    /// child on the PTY thread.
+    fn stop(&mut self, pidx: usize, index: usize) {
+        let project = &mut self.projects[pidx];
+        if let Some(host) = project.location.host() {
+            let entry = &mut project.entries[index];
             if entry.config.category != ProcessCategory::SSH {
                 let session = entry.remote_session.take();
                 if let Some(pidfile) = entry.remote_pidfile.take() {
@@ -280,32 +404,34 @@ impl App {
                 }
             }
         }
-        let entry = &mut self.entries[index];
+        let entry = &mut project.entries[index];
         entry.stopping = true;
         entry.restart_generation += 1;
         entry.restart_attempts = 0;
+        entry.pending_auto_open = false;
         entry.terminal = None;
         entry.term_id = None;
         entry.status = Status::Stopped;
-        self.maybe_drop_tunnels();
+        self.maybe_drop_tunnels(pidx);
     }
 
     /// Forwards live only while something runs — the next run rediscovers
     /// its ports instead of inheriting stale forwards (GTK behavior).
-    fn maybe_drop_tunnels(&mut self) {
-        if self.entries.iter().any(|e| e.is_running()) {
+    fn maybe_drop_tunnels(&mut self, pidx: usize) {
+        let project = &mut self.projects[pidx];
+        if project.entries.iter().any(|e| e.is_running()) {
             return;
         }
-        if let Some(tunnels) = &mut self.tunnels {
+        if let Some(tunnels) = &mut project.tunnels {
             tunnels.close_all();
         }
-        self.port_map.clear();
+        project.port_map.clear();
     }
 
-    fn add_terminal(&mut self) -> Task<Event> {
-        self.terminals_created += 1;
+    fn add_terminal(&mut self, pidx: usize) -> Task<Event> {
+        self.projects[pidx].terminals_created += 1;
         let config = ProcessConfig {
-            name: format!("terminal {}", self.terminals_created),
+            name: format!("terminal {}", self.projects[pidx].terminals_created),
             command: String::new(),
             working_dir: None,
             start_with_project: false,
@@ -317,19 +443,37 @@ impl App {
             auto_named: true,
             display_name: None,
         };
-        self.entries.push(ProcessEntry::new(config));
-        self.start(self.entries.len() - 1)
+        self.projects[pidx].entries.push(ProcessEntry::new(config));
+        let index = self.projects[pidx].entries.len() - 1;
+        self.start(pidx, index)
     }
 
-    /// A terminal's run ended (Exit event) — classify it and schedule what
-    /// the policy asks for (restart with backoff, endless reconnect, or
-    /// nothing).
-    fn finalize_exit(&mut self, index: usize) -> Task<Event> {
-        let connection_loss = self.location.is_remote()
-            && self.entries[index].config.category != ProcessCategory::SSH
-            && self.entries[index].last_exit == Some(255);
+    /// Close a project: local processes die with their PTYs, remote
+    /// sessions DETACH (kill only happens on explicit per-process stop) —
+    /// the same contract as quitting the app.
+    fn close_project(&mut self, pidx: usize) {
+        let key = self.projects[pidx].key();
+        if let Some(tunnels) = &mut self.projects[pidx].tunnels {
+            tunnels.close_all();
+        }
+        self.projects.remove(pidx);
+        self.saved.remove(&key);
+        self.saved.save();
+        if self.active >= self.projects.len() {
+            self.active = self.projects.len().saturating_sub(1);
+        }
+    }
 
-        let entry = &mut self.entries[index];
+    /// A terminal's run ended (Exit event) — classify and schedule what the
+    /// policy asks for (restart with backoff, endless reconnect, nothing).
+    fn finalize_exit(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let project = &mut self.projects[pidx];
+        let connection_loss = project.location.is_remote()
+            && project.entries[index].config.category != ProcessCategory::SSH
+            && project.entries[index].last_exit == Some(255);
+
+        let project_id = project.id;
+        let entry = &mut project.entries[index];
         entry.terminal = None;
         entry.term_id = None;
 
@@ -350,73 +494,89 @@ impl App {
             Some(delay) => {
                 let generation = entry.restart_generation;
                 Task::perform(tokio::time::sleep(delay), move |_| Event::RestartDue {
+                    project: project_id,
                     index,
                     generation,
                 })
             }
             None => Task::none(),
         };
-        self.maybe_drop_tunnels();
+        self.maybe_drop_tunnels(pidx);
         task
     }
 
-    fn entry_index_for_term(&self, term_id: u64) -> Option<usize> {
-        self.entries.iter().position(|e| e.term_id == Some(term_id))
+    fn entry_for_term(&self, term_id: u64) -> Option<(usize, usize)> {
+        for (pidx, project) in self.projects.iter().enumerate() {
+            if let Some(eidx) = project
+                .entries
+                .iter()
+                .position(|e| e.term_id == Some(term_id))
+            {
+                return Some((pidx, eidx));
+            }
+        }
+        None
     }
 
-    /// Feed the scanner (remote output arrives hard-wrapped at pane width —
-    /// scan_output_wrapped rejoins it) and keep a forward alive for every
-    /// local port it has seen.
-    fn rescan_ports(&mut self, index: usize) -> Task<Event> {
-        let Some(term) = self.entries[index].terminal.as_ref() else {
+    /// Feed the scanner (remote output arrives hard-wrapped at pane width),
+    /// keep a forward alive for every local port it has seen, and let
+    /// auto-open react to the new badge.
+    fn rescan_ports(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let project = &mut self.projects[pidx];
+        let Some(term) = project.entries[index].terminal.as_ref() else {
             return Task::none();
         };
-        let name = self.entries[index].config.name.clone();
+        let name = project.entries[index].config.name.clone();
         let dump = visible_text(term);
-        if self.location.is_remote() {
+        if project.location.is_remote() {
             let cols = term.backend().renderable_content().terminal_size.columns();
-            self.ports.scan_output_wrapped(&name, &dump, cols);
+            project.ports.scan_output_wrapped(&name, &dump, cols);
         } else {
-            self.ports.scan_output(&name, &dump);
+            project.ports.scan_output(&name, &dump);
         }
 
-        if let Some(tunnels) = &mut self.tunnels {
-            for port in self.ports.all_local_ports(&name) {
+        if let Some(tunnels) = &mut project.tunnels {
+            for port in project.ports.all_local_ports(&name) {
                 if let Some(local) = tunnels.ensure(port) {
-                    self.port_map.insert(port, local);
+                    project.port_map.insert(port, local);
                 }
             }
         }
-        self.maybe_auto_open(index)
+        self.maybe_auto_open(pidx, index)
     }
 
     /// The one-shot browser open: fires when the badge is final, or arms a
-    /// 5 s grace when only a provisional badge exists — never on
-    /// first-URL-seen without one of those.
-    fn maybe_auto_open(&mut self, index: usize) -> Task<Event> {
-        let entry = &self.entries[index];
+    /// 5 s grace when only a provisional badge exists.
+    fn maybe_auto_open(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
         let name = entry.config.name.clone();
-        if !entry.pending_auto_open || !self.ports.has_port(&name) {
+        if !entry.pending_auto_open || !project.ports.has_port(&name) {
             return Task::none();
         }
-        if self.ports.badge_final(&name) {
-            self.open_in_browser(index);
+        if project.ports.badge_final(&name) {
+            self.open_in_browser(pidx, index);
             Task::none()
         } else if !entry.auto_open_grace {
-            self.entries[index].auto_open_grace = true;
-            let generation = self.entries[index].restart_generation;
+            let project_id = project.id;
+            self.projects[pidx].entries[index].auto_open_grace = true;
+            let generation = self.projects[pidx].entries[index].restart_generation;
             Task::perform(tokio::time::sleep(AUTO_OPEN_GRACE), move |_| {
-                Event::AutoOpenDue { index, generation }
+                Event::AutoOpenDue {
+                    project: project_id,
+                    index,
+                    generation,
+                }
             })
         } else {
             Task::none()
         }
     }
 
-    fn open_in_browser(&mut self, index: usize) {
-        let name = self.entries[index].config.name.clone();
-        self.entries[index].pending_auto_open = false;
-        let Some(url) = self.browser_url(&name) else {
+    fn open_in_browser(&mut self, pidx: usize, index: usize) {
+        let name = self.projects[pidx].entries[index].config.name.clone();
+        self.projects[pidx].entries[index].pending_auto_open = false;
+        let Some(url) = browser_url(&self.projects[pidx], &name) else {
             return;
         };
         log::info!("auto-open {url}");
@@ -425,97 +585,144 @@ impl App {
         }
     }
 
-    /// A full URL for the browser, tunnel-mapped on remote projects.
-    fn browser_url(&self, name: &str) -> Option<String> {
-        let port = self.ports.get_port(name)?;
-        let local = self.port_map.get(&port).copied().unwrap_or(port);
-        match self.ports.get_url(name) {
-            Some(url) => Some(remap_url_port(url, port, local)),
-            None => Some(format!("http://localhost:{local}")),
-        }
-    }
-
-    /// The port/URL to show for a process: on remote projects, mapped
-    /// through the tunnels (the terminal shows the host's port; locally
-    /// that port is the forward's — possibly remapped).
-    fn display_badge(&self, name: &str) -> Option<String> {
-        let port = self.ports.get_port(name)?;
-        let local = self.port_map.get(&port).copied().unwrap_or(port);
-        match self.ports.get_url(name) {
-            Some(url) => Some(remap_url_port(url, port, local)),
-            None => Some(format!("port {local}")),
-        }
-    }
-
     fn update(&mut self, event: Event) -> Task<Event> {
         match event {
-            Event::Probed(Ok((name, configs, live_sessions))) => {
-                self.project_name = name.unwrap_or_else(|| self.location.base_name());
-                self.entries = processes::entries_from(configs);
-                self.phase = Phase::Ready;
-                self.boot_processes(&live_sessions)
+            Event::Probed { project, result } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                match result {
+                    Ok((name, configs, live_sessions)) => {
+                        let key = self.projects[pidx].key();
+                        if self.saved.get_name(&key).is_none() {
+                            if let Some(name) = name {
+                                self.projects[pidx].name = name;
+                            }
+                        }
+                        let merged = processes::merge_saved(configs, &self.saved, &key);
+                        self.projects[pidx].entries = processes::entries_from(merged);
+                        self.projects[pidx].phase = Phase::Ready;
+                        self.boot_processes(pidx, &live_sessions)
+                    }
+                    Err((message, retryable)) => {
+                        self.projects[pidx].phase = Phase::Failed(message, retryable);
+                        Task::none()
+                    }
+                }
             }
-            Event::Probed(Err((message, retryable))) => {
-                self.phase = Phase::Failed(message, retryable);
-                Task::none()
-            }
-            Event::RetryProbe => self.probe_task(),
-            Event::Select(index) => {
-                self.selected = index;
-                match self.entries.get(index).and_then(|e| e.terminal.as_ref()) {
+            Event::RetryProbe(project) => match self.project_index(project) {
+                Some(pidx) => self.probe_task(pidx),
+                None => Task::none(),
+            },
+            Event::SelectProcess { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                self.active = pidx;
+                self.projects[pidx].selected = index;
+                match self.projects[pidx]
+                    .entries
+                    .get(index)
+                    .and_then(|e| e.terminal.as_ref())
+                {
                     Some(term) => TerminalView::focus(term.widget_id().clone()),
                     None => Task::none(),
                 }
             }
-            Event::Start(index) | Event::Restart(index) => {
-                if self.entries[index].terminal.is_some() {
-                    self.stop(index);
+            Event::Start { project, index } | Event::Restart { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                if self.projects[pidx].entries[index].terminal.is_some() {
+                    self.stop(pidx, index);
                 }
-                self.start_fresh(index)
+                self.start_fresh(pidx, index)
             }
-            Event::Stop(index) => {
-                self.stop(index);
+            Event::Stop { project, index } => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.stop(pidx, index);
+                }
                 Task::none()
             }
-            Event::AddTerminal => self.add_terminal(),
-            Event::RestartDue { index, generation } => {
-                let due = self.entries.get(index).is_some_and(|e| {
+            Event::AddTerminal(project) => match self.project_index(project) {
+                Some(pidx) => self.add_terminal(pidx),
+                None => Task::none(),
+            },
+            Event::ToggleExpanded(project) => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.projects[pidx].expanded = !self.projects[pidx].expanded;
+                    let key = self.projects[pidx].key();
+                    self.saved.set_expanded(&key, self.projects[pidx].expanded);
+                    self.saved.save();
+                }
+                Task::none()
+            }
+            Event::CloseProject(project) => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.close_project(pidx);
+                }
+                Task::none()
+            }
+            Event::RestartDue {
+                project,
+                index,
+                generation,
+            } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let due = self.projects[pidx].entries.get(index).is_some_and(|e| {
                     e.restart_generation == generation
                         && matches!(e.status, Status::Restarting(_) | Status::Reconnecting(_))
                 });
-                if due { self.start(index) } else { Task::none() }
+                if due {
+                    self.start(pidx, index)
+                } else {
+                    Task::none()
+                }
             }
-            Event::PortsPollTick => {
-                let sessions: Vec<String> = self
+            Event::PortsPollTick(project) => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let sessions: Vec<String> = self.projects[pidx]
                     .entries
                     .iter()
                     .filter(|e| e.is_running())
                     .filter_map(|e| e.remote_session.clone())
                     .collect();
-                let host = self.location.host().map(String::from);
+                let host = self.projects[pidx].location.host().map(String::from);
                 match (host, sessions.is_empty()) {
                     (Some(host), false) => Task::perform(
                         tokio::task::spawn_blocking(move || {
                             remote::ports::session_ports(&host, &sessions)
                         }),
-                        |joined| Event::PortsPolled(joined.unwrap_or_default()),
+                        move |joined| Event::PortsPolled {
+                            project,
+                            session_ports: joined.unwrap_or_default(),
+                        },
                     ),
                     _ => {
-                        // Nothing running — idle at the slow cadence.
-                        self.poll_interval = POLL_SLOW;
-                        self.schedule_poll()
+                        self.projects[pidx].poll_interval = POLL_SLOW;
+                        self.schedule_poll(pidx)
                     }
                 }
             }
-            Event::PortsPolled(session_ports) => {
+            Event::PortsPolled {
+                project,
+                session_ports,
+            } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
                 // Everything the host-side walk found forwards 1:1
                 // (ensure_exact): remote dev servers bake their own port
-                // into URLs they serve, so a remapped forward would listen
-                // where nothing ever knocks. A taken local port is a hard
+                // into URLs they serve. A taken local port is a hard
                 // failure by design, not a remap.
                 let mut opened = false;
+                let proj = &mut self.projects[pidx];
                 for (session, ports) in &session_ports {
-                    let ours = self
+                    let ours = proj
                         .entries
                         .iter()
                         .any(|e| e.remote_session.as_deref() == Some(session));
@@ -523,13 +730,13 @@ impl App {
                         continue;
                     }
                     for &port in ports {
-                        if self.port_map.contains_key(&port) {
+                        if proj.port_map.contains_key(&port) {
                             continue;
                         }
-                        if let Some(tunnels) = &mut self.tunnels {
+                        if let Some(tunnels) = &mut proj.tunnels {
                             match tunnels.ensure_exact(port) {
                                 Some(local) => {
-                                    self.port_map.insert(port, local);
+                                    proj.port_map.insert(port, local);
                                     opened = true;
                                     log::info!("exact forward {port} for {session}");
                                 }
@@ -540,22 +747,32 @@ impl App {
                         }
                     }
                 }
-                // New forward → a run is settling: poll fast. Quiet → back
-                // off toward the slow cadence.
-                self.poll_interval = if opened {
+                proj.poll_interval = if opened {
                     POLL_FAST
                 } else {
-                    (self.poll_interval * 2).min(POLL_SLOW)
+                    (proj.poll_interval * 2).min(POLL_SLOW)
                 };
-                self.schedule_poll()
+                self.schedule_poll(pidx)
             }
-            Event::AutoOpenDue { index, generation } => {
-                let due = self
+            Event::AutoOpenDue {
+                project,
+                index,
+                generation,
+            } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let due = self.projects[pidx]
                     .entries
                     .get(index)
                     .is_some_and(|e| e.restart_generation == generation && e.pending_auto_open);
-                if due && self.ports.has_port(&self.entries[index].config.name) {
-                    self.open_in_browser(index);
+                let name = self.projects[pidx]
+                    .entries
+                    .get(index)
+                    .map(|e| e.config.name.clone())
+                    .unwrap_or_default();
+                if due && self.projects[pidx].ports.has_port(&name) {
+                    self.open_in_browser(pidx, index);
                 }
                 Task::none()
             }
@@ -564,17 +781,18 @@ impl App {
                 Task::none()
             }
             Event::ComposerSend => {
-                // The composer types into the selected terminal like the GTK
-                // composer_bar does via feed_child — local input beats ssh
-                // typing latency for remote agents.
+                // The composer types into the selected terminal like the
+                // GTK composer_bar does via feed_child — local input beats
+                // ssh typing latency for remote agents.
                 if !self.composer.is_empty() {
-                    let mut bytes = self.composer.clone().into_bytes();
-                    bytes.push(b'\r');
-                    if let Some(term) = self
-                        .entries
-                        .get_mut(self.selected)
-                        .and_then(|e| e.terminal.as_mut())
-                    {
+                    let selected = self
+                        .projects
+                        .get_mut(self.active)
+                        .and_then(|p| p.entries.get_mut(p.selected))
+                        .and_then(|e| e.terminal.as_mut());
+                    if let Some(term) = selected {
+                        let mut bytes = self.composer.clone().into_bytes();
+                        bytes.push(b'\r');
                         term.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
                             bytes,
                         )));
@@ -583,8 +801,110 @@ impl App {
                 }
                 Task::none()
             }
+            Event::OpenAddProject => {
+                self.add_project = Some(String::new());
+                Task::none()
+            }
+            Event::AddProjectInput(value) => {
+                self.add_project = Some(value);
+                Task::none()
+            }
+            Event::AddProjectCancel => {
+                self.add_project = None;
+                Task::none()
+            }
+            Event::AddProjectSubmit => {
+                let Some(input) = self.add_project.take() else {
+                    return Task::none();
+                };
+                let input = input.trim().to_string();
+                if input.is_empty() {
+                    return Task::none();
+                }
+                let key = normalize_key(&input);
+                if self.projects.iter().any(|p| p.key() == key) {
+                    return Task::none();
+                }
+                if !self.saved_has(&self.saved, &key) {
+                    self.saved.add(&key);
+                    self.saved.save();
+                }
+                let task = self.open_project(&key);
+                self.active = self.projects.len() - 1;
+                task
+            }
+            Event::OpenAddCommand { agent } => {
+                if self.active_project().is_some() {
+                    self.add_command = Some(AddCommandForm {
+                        name: String::new(),
+                        command: String::new(),
+                        agent,
+                    });
+                }
+                Task::none()
+            }
+            Event::AddCommandName(value) => {
+                if let Some(form) = &mut self.add_command {
+                    form.name = value;
+                }
+                Task::none()
+            }
+            Event::AddCommandCommand(value) => {
+                if let Some(form) = &mut self.add_command {
+                    form.command = value;
+                }
+                Task::none()
+            }
+            Event::AddCommandCancel => {
+                self.add_command = None;
+                Task::none()
+            }
+            Event::AddCommandSubmit => {
+                let Some(form) = self.add_command.take() else {
+                    return Task::none();
+                };
+                let (name, command) = (form.name.trim().to_string(), form.command.trim());
+                if name.is_empty() || command.is_empty() {
+                    self.add_command = Some(form);
+                    return Task::none();
+                }
+                let pidx = self.active;
+                if self.projects.get(pidx).is_none()
+                    || self.projects[pidx]
+                        .entries
+                        .iter()
+                        .any(|e| e.config.name == name)
+                {
+                    return Task::none();
+                }
+                let config = ProcessConfig {
+                    name,
+                    command: command.to_string(),
+                    working_dir: None,
+                    start_with_project: false,
+                    auto_restart: false,
+                    open_in_browser: false,
+                    restart_when_changed: Vec::new(),
+                    env: Default::default(),
+                    category: if form.agent {
+                        ProcessCategory::Agent
+                    } else {
+                        ProcessCategory::Command
+                    },
+                    auto_named: false,
+                    display_name: None,
+                };
+                // Persist as a custom command — survives restarts and
+                // overrides same-named detection, like the GTK dialogs.
+                let key = self.projects[pidx].key();
+                self.saved.add_custom_command(&key, config.clone());
+                self.saved.save();
+                self.projects[pidx].entries.push(ProcessEntry::new(config));
+                let index = self.projects[pidx].entries.len() - 1;
+                self.start_fresh(pidx, index)
+            }
             Event::Terminal(iced_term::Event::BackendCall(term_id, cmd)) => {
-                let Some(index) = self.entry_index_for_term(term_id) else {
+                let Some((pidx, index)) = self.entry_for_term(term_id) else {
                     return Task::none();
                 };
 
@@ -594,7 +914,7 @@ impl App {
                     match ev {
                         AEvent::Wakeup => rescan = true,
                         AEvent::ChildExit(code) => {
-                            self.entries[index].last_exit = Some(*code);
+                            self.projects[pidx].entries[index].last_exit = Some(*code);
                         }
                         AEvent::ClipboardStore(ty, data) if !data.is_empty() => {
                             // OSC 52 — agents' and tmux's copies; empty
@@ -611,7 +931,7 @@ impl App {
                 }
 
                 let action = {
-                    let entry = &mut self.entries[index];
+                    let entry = &mut self.projects[pidx].entries[index];
                     match entry.terminal.as_mut() {
                         Some(term) => term.handle(iced_term::Command::ProxyToBackend(cmd)),
                         None => iced_term::actions::Action::Ignore,
@@ -619,16 +939,17 @@ impl App {
                 };
 
                 let action_task = match action {
-                    iced_term::actions::Action::Shutdown => self.finalize_exit(index),
+                    iced_term::actions::Action::Shutdown => self.finalize_exit(pidx, index),
                     iced_term::actions::Action::PublishSelection(text) => {
                         iced::clipboard::write_primary(text)
                     }
                     iced_term::actions::Action::OpenUrl(url) => {
                         // Ctrl+click: the terminal shows the HOST's port —
                         // rewrite through the tunnel map, creating/reviving
-                        // the forward the click is about to use (ensure).
-                        let tunnels = &mut self.tunnels;
-                        let port_map = &mut self.port_map;
+                        // the forward the click is about to use.
+                        let project = &mut self.projects[pidx];
+                        let tunnels = &mut project.tunnels;
+                        let port_map = &mut project.port_map;
                         let rewritten = rewrite_clicked_url(&url, |port| {
                             let local = tunnels.as_mut()?.ensure(port)?;
                             port_map.insert(port, local);
@@ -644,7 +965,7 @@ impl App {
                 };
 
                 let scan_task = if rescan {
-                    self.rescan_ports(index)
+                    self.rescan_ports(pidx, index)
                 } else {
                     Task::none()
                 };
@@ -655,112 +976,146 @@ impl App {
     }
 
     fn view(&'_ self) -> Element<'_, Event> {
-        match &self.phase {
-            Phase::Loading => container(
-                text(format!("connecting to {}…", self.location.key()))
-                    .size(14)
-                    .color(DIM),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into(),
-            Phase::Failed(message, retryable) => {
-                let mut col = column![
-                    text(message)
-                        .size(14)
-                        .color(Color::from_rgb(0.87, 0.32, 0.32)),
-                ]
-                .spacing(12)
-                .align_x(iced::Alignment::Center);
-                if *retryable {
-                    col = col.push(action_button("⟳ retry", Event::RetryProbe));
-                }
-                container(col)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .into()
-            }
-            Phase::Ready => {
-                let sidebar = self.view_sidebar();
-                let main = self.view_main();
-                let status_bar = self.view_status_bar();
+        let sidebar = self.view_sidebar();
+        let main = self.view_main();
+        let status_bar = self.view_status_bar();
 
-                column![
-                    row![
-                        container(sidebar).width(240).height(Length::Fill),
-                        container(main).width(Length::Fill).height(Length::Fill),
-                    ]
-                    .spacing(2),
-                    status_bar,
-                ]
-                .into()
-            }
-        }
+        column![
+            row![
+                container(sidebar).width(260).height(Length::Fill),
+                container(main).width(Length::Fill).height(Length::Fill),
+            ]
+            .spacing(2),
+            status_bar,
+        ]
+        .into()
     }
 
     fn view_sidebar(&'_ self) -> Element<'_, Event> {
-        let mut header_row = row![
-            text(&self.project_name).size(15),
-            iced::widget::space::horizontal(),
-        ]
-        .spacing(6)
-        .align_y(iced::Alignment::Center);
-        if self.location.is_remote() {
-            // The remote accent hue — where this project lives.
-            header_row = header_row.push(
-                text("remote")
-                    .size(10)
-                    .color(Color::from_rgb(1.0, 0.81, 0.36)),
-            );
+        let mut col = column![].spacing(2).padding(8);
+
+        for (pidx, project) in self.projects.iter().enumerate() {
+            col = col.push(self.view_project_header(pidx, project));
+            if project.expanded {
+                match &project.phase {
+                    Phase::Loading => {
+                        col = col.push(
+                            container(text("connecting…").size(11).color(DIM)).padding([2, 18]),
+                        );
+                    }
+                    Phase::Failed(_, retryable) => {
+                        let mut r = row![text("unreachable").size(11).color(CRASHED)].spacing(6);
+                        if *retryable {
+                            r = r.push(
+                                button(text("retry").size(10))
+                                    .padding([0, 6])
+                                    .style(button::text)
+                                    .on_press(Event::RetryProbe(project.id)),
+                            );
+                        }
+                        col = col.push(container(r).padding([2, 18]));
+                    }
+                    Phase::Ready => {
+                        for (label, category) in [
+                            ("AGENTS", ProcessCategory::Agent),
+                            ("COMMANDS", ProcessCategory::Command),
+                            ("TERMINALS", ProcessCategory::Terminal),
+                        ] {
+                            let members: Vec<usize> = (0..project.entries.len())
+                                .filter(|&i| project.entries[i].config.category == category)
+                                .collect();
+                            if members.is_empty() && category != ProcessCategory::Terminal {
+                                continue;
+                            }
+                            let mut header = row![text(label).size(10).color(DIM)].spacing(6);
+                            if category == ProcessCategory::Terminal {
+                                header = header.push(
+                                    button(text("+").size(10))
+                                        .padding([0, 5])
+                                        .style(button::text)
+                                        .on_press(Event::AddTerminal(project.id)),
+                                );
+                            }
+                            col = col.push(container(header).padding([3, 14]));
+                            for i in members {
+                                col = col.push(self.view_row(pidx, i));
+                            }
+                        }
+                    }
+                }
+            }
         }
-        let mut col = column![header_row].spacing(4).padding(8);
 
-        for (label, category) in [
-            ("AGENTS", ProcessCategory::Agent),
-            ("COMMANDS", ProcessCategory::Command),
-            ("TERMINALS", ProcessCategory::Terminal),
-        ] {
-            let members: Vec<usize> = (0..self.entries.len())
-                .filter(|&i| self.entries[i].config.category == category)
-                .collect();
-            if members.is_empty() && category != ProcessCategory::Terminal {
-                continue;
-            }
-
-            let mut header = row![text(label).size(11).color(DIM)].spacing(6);
-            if category == ProcessCategory::Terminal {
-                header = header.push(
-                    button(text("+").size(11))
-                        .padding([0, 6])
-                        .style(button::text)
-                        .on_press(Event::AddTerminal),
-                );
-            }
-            col = col.push(container(header).padding([6, 2]));
-
-            for i in members {
-                col = col.push(self.view_row(i));
-            }
-        }
+        col = col.push(iced::widget::space::vertical());
+        col = col.push(
+            button(text("+ project").size(12))
+                .width(Length::Fill)
+                .style(button::text)
+                .on_press(Event::OpenAddProject),
+        );
 
         container(col)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.09, 0.09, 0.11))),
+                background: Some(iced::Background::Color(SIDEBAR_BG)),
                 ..Default::default()
             })
             .height(Length::Fill)
             .into()
     }
 
-    fn view_row(&'_ self, index: usize) -> Element<'_, Event> {
-        let entry = &self.entries[index];
+    fn view_project_header<'a>(
+        &'a self,
+        pidx: usize,
+        project: &'a ProjectState,
+    ) -> Element<'a, Event> {
+        // The accent hue says where the project lives (ui/accent.rs).
+        let accent = if project.location.is_remote() {
+            REMOTE_ACCENT
+        } else {
+            LOCAL_ACCENT
+        };
+        let chevron = if project.expanded { "▾" } else { "▸" };
+        let counter = format!("{}/{}", project.running(), project.entries.len());
+
+        let name_style = if pidx == self.active {
+            Color::WHITE
+        } else {
+            Color::from_rgb(0.8, 0.8, 0.82)
+        };
+
+        row![
+            button(
+                row![
+                    text(chevron).size(11).color(DIM),
+                    text("●").size(11).color(accent),
+                    text(&project.name).size(14).color(name_style),
+                    iced::widget::space::horizontal(),
+                    text(counter).size(10).color(DIM),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([4, 6])
+            .style(button::text)
+            .on_press(Event::ToggleExpanded(project.id)),
+            button(text("✕").size(10).color(DIM))
+                .padding([2, 4])
+                .style(button::text)
+                .on_press(Event::CloseProject(project.id)),
+        ]
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    fn view_row(&'_ self, pidx: usize, index: usize) -> Element<'_, Event> {
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
         let (dot_color, dot) = match entry.status {
-            Status::Running => (Color::from_rgb(0.30, 0.78, 0.40), "●"),
+            Status::Running => (RUNNING, "●"),
             Status::Stopped => (DIM, "○"),
-            Status::Crashed(_) => (Color::from_rgb(0.87, 0.32, 0.32), "●"),
-            Status::Restarting(_) | Status::Reconnecting(_) => {
-                (Color::from_rgb(0.92, 0.72, 0.25), "●")
-            }
+            Status::Crashed(_) => (CRASHED, "●"),
+            Status::Restarting(_) | Status::Reconnecting(_) => (WORKING, "●"),
         };
         let name = entry
             .config
@@ -776,8 +1131,8 @@ impl App {
         .spacing(6)
         .align_y(iced::Alignment::Center);
 
-        if let Some(port) = self.ports.get_port(&entry.config.name) {
-            let local = self.port_map.get(&port).copied().unwrap_or(port);
+        if let Some(port) = project.ports.get_port(&entry.config.name) {
+            let local = project.port_map.get(&port).copied().unwrap_or(port);
             content = content.push(text(local.to_string()).size(11).color(DIM));
         }
         match entry.status {
@@ -797,39 +1152,140 @@ impl App {
             _ => {}
         }
 
-        let style = if index == self.selected {
+        let selected = pidx == self.active && index == project.selected;
+        let style = if selected {
             button::secondary
         } else {
             button::text
         };
-        button(content)
-            .width(Length::Fill)
-            .padding([4, 8])
-            .style(style)
-            .on_press(Event::Select(index))
-            .into()
+        container(
+            button(content)
+                .width(Length::Fill)
+                .padding([3, 8])
+                .style(style)
+                .on_press(Event::SelectProcess {
+                    project: project.id,
+                    index,
+                }),
+        )
+        .padding([0, 10])
+        .into()
     }
 
     fn view_main(&'_ self) -> Element<'_, Event> {
-        let Some(entry) = self.entries.get(self.selected) else {
-            return container(text("no processes")).padding(16).into();
+        if let Some(form) = &self.add_command {
+            return self.view_add_command(form);
+        }
+        if let Some(input) = &self.add_project {
+            return view_add_project(input);
+        }
+
+        let Some(project) = self.active_project() else {
+            return container(
+                column![
+                    text("no projects").size(14).color(DIM),
+                    button(text("+ add project").size(13)).on_press(Event::OpenAddProject),
+                ]
+                .spacing(12)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
+        };
+
+        match &project.phase {
+            Phase::Loading => {
+                return container(
+                    text(format!("connecting to {}…", project.key()))
+                        .size(14)
+                        .color(DIM),
+                )
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into();
+            }
+            Phase::Failed(message, retryable) => {
+                let mut col = column![text(message).size(14).color(CRASHED)]
+                    .spacing(12)
+                    .align_x(iced::Alignment::Center);
+                if *retryable {
+                    col = col.push(action_button("⟳ retry", Event::RetryProbe(project.id)));
+                }
+                return container(col)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .into();
+            }
+            Phase::Ready => {}
+        }
+
+        let Some(entry) = project.entries.get(project.selected) else {
+            return container(
+                column![
+                    text("no processes").size(14).color(DIM),
+                    row![
+                        action_button("+ command", Event::OpenAddCommand { agent: false }),
+                        action_button("+ agent", Event::OpenAddCommand { agent: true }),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
         };
 
         let mut controls = row![text(&entry.config.name).size(14)]
             .spacing(8)
             .align_y(iced::Alignment::Center);
         controls = controls.push(iced::widget::space::horizontal());
+        controls = controls
+            .push(action_button(
+                "+ command",
+                Event::OpenAddCommand { agent: false },
+            ))
+            .push(action_button(
+                "+ agent",
+                Event::OpenAddCommand { agent: true },
+            ));
         match entry.status {
             Status::Running => {
                 controls = controls
-                    .push(action_button("⟳ restart", Event::Restart(self.selected)))
-                    .push(action_button("■ stop", Event::Stop(self.selected)));
+                    .push(action_button(
+                        "⟳ restart",
+                        Event::Restart {
+                            project: project.id,
+                            index: project.selected,
+                        },
+                    ))
+                    .push(action_button(
+                        "■ stop",
+                        Event::Stop {
+                            project: project.id,
+                            index: project.selected,
+                        },
+                    ));
             }
             Status::Restarting(_) | Status::Reconnecting(_) => {
-                controls = controls.push(action_button("■ cancel", Event::Stop(self.selected)));
+                controls = controls.push(action_button(
+                    "■ cancel",
+                    Event::Stop {
+                        project: project.id,
+                        index: project.selected,
+                    },
+                ));
             }
             Status::Stopped | Status::Crashed(_) => {
-                controls = controls.push(action_button("▶ start", Event::Start(self.selected)));
+                controls = controls.push(action_button(
+                    "▶ start",
+                    Event::Start {
+                        project: project.id,
+                        index: project.selected,
+                    },
+                ));
             }
         }
 
@@ -863,13 +1319,12 @@ impl App {
             container(body).width(Length::Fill).height(Length::Fill),
         ];
 
-        // The composer under agent terminals (GTK composer_bar parity):
-        // local typing, one atomic send — beats ssh keystroke latency.
+        // The composer under agent terminals (GTK composer_bar parity).
         if entry.config.category == ProcessCategory::Agent && entry.terminal.is_some() {
             col = col.push(
                 container(
                     row![
-                        iced::widget::text_input("message to agent — Enter sends", &self.composer)
+                        text_input("message to agent — Enter sends", &self.composer)
                             .on_input(Event::ComposerChanged)
                             .on_submit(Event::ComposerSend)
                             .size(13),
@@ -885,19 +1340,57 @@ impl App {
         col.into()
     }
 
+    fn view_add_command(&'_ self, form: &'_ AddCommandForm) -> Element<'_, Event> {
+        let title = if form.agent {
+            "add agent"
+        } else {
+            "add command"
+        };
+        container(
+            column![
+                text(title).size(16),
+                text_input("name (e.g. web)", &form.name)
+                    .on_input(Event::AddCommandName)
+                    .size(14)
+                    .width(420),
+                text_input("command (e.g. npm run dev)", &form.command)
+                    .on_input(Event::AddCommandCommand)
+                    .on_submit(Event::AddCommandSubmit)
+                    .size(14)
+                    .width(420),
+                row![
+                    action_button("add & start", Event::AddCommandSubmit),
+                    action_button("cancel", Event::AddCommandCancel),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .align_x(iced::Alignment::Center),
+        )
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
     fn view_status_bar(&'_ self) -> Element<'_, Event> {
-        let running = self.entries.iter().filter(|e| e.is_running()).count();
-        let left = format!(
-            "{} — {running}/{} running",
-            self.project_name,
-            self.entries.len()
-        );
-        let badge = self
-            .entries
-            .get(self.selected)
-            .and_then(|e| self.display_badge(&e.config.name))
-            .map(|b| format!("● {b}"))
-            .unwrap_or_default();
+        let (left, badge) = match self.active_project() {
+            Some(project) => {
+                let left = format!(
+                    "{} — {}/{} running",
+                    project.name,
+                    project.running(),
+                    project.entries.len()
+                );
+                let badge = project
+                    .entries
+                    .get(project.selected)
+                    .and_then(|e| display_badge(project, &e.config.name))
+                    .map(|b| format!("● {b}"))
+                    .unwrap_or_default();
+                (left, badge)
+            }
+            None => (String::from("no projects"), String::new()),
+        };
 
         container(
             row![
@@ -914,8 +1407,9 @@ impl App {
 
     fn subscription(&self) -> Subscription<Event> {
         let subs: Vec<_> = self
-            .entries
+            .projects
             .iter()
+            .flat_map(|p| p.entries.iter())
             .filter_map(|e| e.terminal.as_ref())
             .map(|t| t.subscription())
             .collect();
@@ -923,7 +1417,59 @@ impl App {
     }
 }
 
-const DIM: Color = Color::from_rgb(0.55, 0.55, 0.58);
+fn view_add_project(input: &str) -> Element<'_, Event> {
+    container(
+        column![
+            text("add project").size(16),
+            text_input("/path/to/project  or  ssh://host/path", input)
+                .on_input(Event::AddProjectInput)
+                .on_submit(Event::AddProjectSubmit)
+                .size(14)
+                .width(460),
+            row![
+                action_button("open", Event::AddProjectSubmit),
+                action_button("cancel", Event::AddProjectCancel),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12)
+        .align_x(iced::Alignment::Center),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .into()
+}
+
+/// Canonical project key from user input: ssh URLs pass through, local
+/// paths canonicalize (relative ones against the cwd).
+fn normalize_key(input: &str) -> String {
+    match ProjectLocation::parse(input) {
+        ProjectLocation::Local(p) => ProjectLocation::Local(p.canonicalize().unwrap_or(p)).key(),
+        remote => remote.key(),
+    }
+}
+
+/// The port/URL to show for a process: on remote projects, mapped through
+/// the tunnels (the terminal shows the host's port; locally that port is
+/// the forward's — possibly remapped).
+fn display_badge(project: &ProjectState, name: &str) -> Option<String> {
+    let port = project.ports.get_port(name)?;
+    let local = project.port_map.get(&port).copied().unwrap_or(port);
+    match project.ports.get_url(name) {
+        Some(url) => Some(remap_url_port(url, port, local)),
+        None => Some(format!("port {local}")),
+    }
+}
+
+/// A full URL for the browser, tunnel-mapped on remote projects.
+fn browser_url(project: &ProjectState, name: &str) -> Option<String> {
+    let port = project.ports.get_port(name)?;
+    let local = project.port_map.get(&port).copied().unwrap_or(port);
+    match project.ports.get_url(name) {
+        Some(url) => Some(remap_url_port(url, port, local)),
+        None => Some(format!("http://localhost:{local}")),
+    }
+}
 
 fn action_button(label: &str, event: Event) -> button::Button<'_, Event> {
     button(text(label).size(12))

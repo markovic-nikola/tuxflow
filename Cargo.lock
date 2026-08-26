@@ -4855,6 +4855,7 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "arboard",
+ "dirs",
  "env_logger",
  "iced",
  "iced_term",

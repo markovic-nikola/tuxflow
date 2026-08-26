@@ -63,10 +63,16 @@ impl SavedProjects {
         }
         match toml::to_string_pretty(self) {
             Ok(content) => {
-                if let Err(e) = fs::write(&path, content) {
-                    log::error!("Failed to write saved projects: {e}");
-                } else {
-                    log::debug!("Saved projects list to {}", path.display());
+                // Atomic: write a sibling tmp file, then rename over the
+                // target. Two writers can race (the GTK app and the iced
+                // shell share this file), and a reader must never see a
+                // torn half-write — parsing one as "empty workspace" and
+                // saving it back is how a workspace gets wiped.
+                let tmp = path.with_extension("toml.tmp");
+                let result = fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, &path));
+                match result {
+                    Ok(()) => log::debug!("Saved projects list to {}", path.display()),
+                    Err(e) => log::error!("Failed to write saved projects: {e}"),
                 }
             }
             Err(e) => log::error!("Failed to serialize saved projects: {e}"),

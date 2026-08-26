@@ -54,7 +54,7 @@ tuxflow-core/              # GUI-independent (no GTK/iced/VTE types allowed)
     util/port_detector.rs  # Regex scan terminal output for ports/URLs
   tests/                   # config, detector, log buffer, port detector, projects roundtrip, remote fs
   examples/                # detector_check, port_scan_check, remote_ports_check
-tuxflow-iced/              # The iced shell (M4: multi-project workspace, projects.toml, forms, theming)
+tuxflow-iced/              # The iced shell (M5 wip: search, shortcuts, palette; design direction C)
 vendor/iced_term/          # Hardened iced_term fork (MIT) — VENDOR.md documents every patch
 spike/iced-term-spike/     # Frozen spike record (own workspace; README = VTE-parity scorecard)
 src/                       # The GTK app — package `tuxflow` (root)

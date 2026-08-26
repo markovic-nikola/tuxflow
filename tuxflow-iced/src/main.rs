@@ -7,6 +7,7 @@
 //! ports, tunnels and poll cadence. Add project / add command / add agent
 //! run as inline forms; closing a project detaches its remote sessions.
 
+mod keys;
 mod processes;
 mod theme;
 
@@ -19,7 +20,7 @@ use alacritty_terminal::index::Line;
 use alacritty_terminal::term::ClipboardType;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Size, Subscription, Task};
-use iced_term::{BackendCommand, TerminalView};
+use iced_term::{BackendCommand, SearchDirection, TerminalView};
 use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::remote::probe::ProbeError;
@@ -27,6 +28,7 @@ use tuxflow_core::remote::tunnel::TunnelManager;
 use tuxflow_core::remote::{self, ProjectLocation};
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
+use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
 use theme::{CRASHED, DIM, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT, TEXT_SECONDARY, accent_for};
 
@@ -105,7 +107,18 @@ struct App {
     /// Index of the project owning the main pane.
     active: usize,
     saved: SavedProjects,
+    app_keys: AppKeys,
+    font_size: f32,
+    scrollback: usize,
     composer: String,
+    search_open: bool,
+    search_query: String,
+    search_hit: Option<bool>,
+    search_input: iced::widget::Id,
+    palette_open: bool,
+    palette_query: String,
+    palette_index: usize,
+    palette_input: iced::widget::Id,
     add_project: Option<String>,
     add_command: Option<AddCommandForm>,
     next_project_id: u64,
@@ -158,6 +171,15 @@ enum Event {
     },
     ComposerChanged(String),
     ComposerSend,
+    SearchQueryChanged(String),
+    SearchStep(SearchDirection),
+    SearchClose,
+    PaletteInput(String),
+    PaletteSubmit,
+    PaletteSelect {
+        project: u64,
+        index: usize,
+    },
     /// Ignored-status keys — the widget consumed everything it wanted
     /// (Ctrl+Shift+V with TEXT on the clipboard never reaches here).
     Hotkey(iced::keyboard::Event),
@@ -185,6 +207,7 @@ enum Event {
 
 impl App {
     fn new() -> (Self, Task<Event>) {
+        let settings = tuxflow_core::config::settings::AppSettings::load();
         let saved = SavedProjects::load();
         // Insurance: keep a .bak of the last known-good (non-empty)
         // workspace before this process ever saves. One wipe was enough.
@@ -198,7 +221,19 @@ impl App {
             projects: Vec::new(),
             active: 0,
             saved,
+            app_keys: AppKeys::from_settings(&settings.keybindings),
+            font_size: (settings.appearance.font_size as f32).clamp(8.0, 32.0),
+            scrollback: settings.appearance.scrollback_lines as usize,
             composer: String::new(),
+            // Headless design/debug hook: force panels open for screenshots.
+            search_open: std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("search"),
+            search_query: String::new(),
+            search_hit: None,
+            search_input: iced::widget::Id::unique(),
+            palette_open: std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("palette"),
+            palette_query: String::new(),
+            palette_index: 0,
+            palette_input: iced::widget::Id::unique(),
             add_project: None,
             add_command: None,
             next_project_id: 0,
@@ -364,11 +399,22 @@ impl App {
         let id = self.next_term_id;
         self.next_term_id += 1;
 
+        let reservations = self.app_keys.reservations();
+        let font_size = self.font_size;
+        let scrollback = self.scrollback;
         let project = &mut self.projects[pidx];
-        let settings = processes::spawn_settings(&project.location, &mut project.entries[index]);
+        let settings = processes::spawn_settings(
+            &project.location,
+            &mut project.entries[index],
+            font_size,
+            scrollback,
+        );
         let entry = &mut project.entries[index];
         match iced_term::Terminal::new(id, settings) {
-            Ok(term) => {
+            Ok(mut term) => {
+                // Reserve the app's chords before the first keystroke —
+                // the stock bindings would type them into the shell.
+                term.handle(iced_term::Command::AddBindings(reservations));
                 let focus = TerminalView::focus(term.widget_id().clone());
                 entry.terminal = Some(term);
                 entry.term_id = Some(id);
@@ -593,6 +639,151 @@ impl App {
         } else {
             Task::none()
         }
+    }
+
+    /// Dispatch a matched app shortcut.
+    fn apply_action(&mut self, action: AppAction) -> Task<Event> {
+        match action {
+            AppAction::TerminalSearch => {
+                self.search_open = true;
+                iced::widget::operation::focus(self.search_input.clone())
+            }
+            AppAction::CommandPalette => {
+                self.palette_open = true;
+                self.palette_query.clear();
+                self.palette_index = 0;
+                iced::widget::operation::focus(self.palette_input.clone())
+            }
+            AppAction::PrevProcess => self.step_process(-1),
+            AppAction::NextProcess => self.step_process(1),
+            AppAction::PrevProject => self.step_project(-1),
+            AppAction::NextProject => self.step_project(1),
+            AppAction::NewTerminal => match self.projects.get(self.active) {
+                Some(_) => self.add_terminal(self.active),
+                None => Task::none(),
+            },
+            AppAction::CloseProcess => self.close_selected_process(),
+            AppAction::FontIncrease => self.change_font(1.0),
+            AppAction::FontDecrease => self.change_font(-1.0),
+        }
+    }
+
+    fn step_process(&mut self, delta: i32) -> Task<Event> {
+        let Some(project) = self.projects.get_mut(self.active) else {
+            return Task::none();
+        };
+        let n = project.entries.len();
+        if n == 0 {
+            return Task::none();
+        }
+        project.selected = ((project.selected as i32 + delta).rem_euclid(n as i32)) as usize;
+        self.focus_selected_terminal()
+    }
+
+    fn step_project(&mut self, delta: i32) -> Task<Event> {
+        let n = self.projects.len();
+        if n == 0 {
+            return Task::none();
+        }
+        self.active = ((self.active as i32 + delta).rem_euclid(n as i32)) as usize;
+        self.focus_selected_terminal()
+    }
+
+    /// Close = GTK's "Close Agent/Terminal": ad-hoc terminals disappear,
+    /// anything else just stops.
+    fn close_selected_process(&mut self) -> Task<Event> {
+        let Some(project) = self.projects.get(self.active) else {
+            return Task::none();
+        };
+        let (pidx, index) = (self.active, project.selected);
+        let Some(entry) = self.projects[pidx].entries.get(index) else {
+            return Task::none();
+        };
+        let is_adhoc_terminal =
+            entry.config.category == ProcessCategory::Terminal && entry.config.auto_named;
+        self.stop(pidx, index);
+        if is_adhoc_terminal {
+            self.projects[pidx].entries.remove(index);
+            let n = self.projects[pidx].entries.len();
+            if n > 0 {
+                self.projects[pidx].selected = index.min(n - 1);
+            } else {
+                self.projects[pidx].selected = 0;
+            }
+        }
+        Task::none()
+    }
+
+    fn change_font(&mut self, delta: f32) -> Task<Event> {
+        self.font_size = (self.font_size + delta).clamp(8.0, 32.0);
+        let size = self.font_size;
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if let Some(term) = entry.terminal.as_mut() {
+                    term.handle(iced_term::Command::ChangeFont(
+                        iced_term::settings::FontSettings {
+                            size,
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Route a search command to the active selected terminal and record
+    /// whether it found anything (the bar shows "no match").
+    fn send_search(&mut self, cmd: BackendCommand) {
+        let Some(project) = self.projects.get_mut(self.active) else {
+            return;
+        };
+        let selected = project.selected;
+        if let Some(term) = project
+            .entries
+            .get_mut(selected)
+            .and_then(|e| e.terminal.as_mut())
+        {
+            let action = term.handle(iced_term::Command::ProxyToBackend(cmd));
+            if let iced_term::actions::Action::SearchResult(found) = action {
+                self.search_hit = Some(found);
+            }
+        }
+    }
+
+    fn focus_selected_terminal(&self) -> Task<Event> {
+        match self
+            .projects
+            .get(self.active)
+            .and_then(|p| p.entries.get(p.selected))
+            .and_then(|e| e.terminal.as_ref())
+        {
+            Some(term) => TerminalView::focus(term.widget_id().clone()),
+            None => Task::none(),
+        }
+    }
+
+    fn close_palette(&mut self) -> Task<Event> {
+        self.palette_open = false;
+        self.palette_query.clear();
+        self.palette_index = 0;
+        self.focus_selected_terminal()
+    }
+
+    /// (project id, entry index) pairs matching the palette query, in
+    /// sidebar order. Case-insensitive substring over "project process".
+    fn palette_matches(&self) -> Vec<(u64, usize)> {
+        let needle = self.palette_query.to_lowercase();
+        let mut out = Vec::new();
+        for project in &self.projects {
+            for (i, entry) in project.entries.iter().enumerate() {
+                let hay = format!("{} {}", project.name, entry.config.name).to_lowercase();
+                if needle.is_empty() || hay.contains(&needle) {
+                    out.push((project.id, i));
+                }
+            }
+        }
+        out
     }
 
     /// Ctrl+Shift+V with an image-only clipboard — the GTK app's flow,
@@ -857,6 +1048,36 @@ impl App {
                 Task::none()
             }
             Event::Hotkey(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                // Palette navigation first (its input consumes typing but
+                // not Esc/arrows).
+                if self.palette_open {
+                    return match key.as_ref() {
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
+                            self.close_palette()
+                        }
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp) => {
+                            self.palette_index = self.palette_index.saturating_sub(1);
+                            Task::none()
+                        }
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown) => {
+                            let max = self.palette_matches().len().saturating_sub(1);
+                            self.palette_index = (self.palette_index + 1).min(max);
+                            Task::none()
+                        }
+                        _ => Task::none(),
+                    };
+                }
+                if self.search_open
+                    && matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    )
+                {
+                    return self.update(Event::SearchClose);
+                }
+                if let Some(action) = self.app_keys.action_for(&key, modifiers) {
+                    return self.apply_action(action);
+                }
                 match key.as_ref() {
                     // Reaching here means the widget found no TEXT to paste
                     // — the clipboard holds an image (or nothing).
@@ -871,6 +1092,55 @@ impl App {
                 }
             }
             Event::Hotkey(_) => Task::none(),
+            Event::SearchQueryChanged(query) => {
+                self.search_query = query;
+                if self.search_query.is_empty() {
+                    self.search_hit = None;
+                    self.send_search(BackendCommand::SearchClear);
+                } else {
+                    let cmd = BackendCommand::SearchNext(
+                        self.search_query.clone(),
+                        SearchDirection::Left,
+                    );
+                    self.send_search(cmd);
+                }
+                Task::none()
+            }
+            Event::SearchStep(direction) => {
+                if !self.search_query.is_empty() {
+                    let cmd = BackendCommand::SearchNext(self.search_query.clone(), direction);
+                    self.send_search(cmd);
+                }
+                Task::none()
+            }
+            Event::SearchClose => {
+                self.search_open = false;
+                self.search_query.clear();
+                self.search_hit = None;
+                self.send_search(BackendCommand::SearchClear);
+                self.focus_selected_terminal()
+            }
+            Event::PaletteInput(value) => {
+                self.palette_query = value;
+                self.palette_index = 0;
+                Task::none()
+            }
+            Event::PaletteSubmit => {
+                let target = self.palette_matches().get(self.palette_index).copied();
+                match target {
+                    Some((project, index)) => {
+                        let close = self.close_palette();
+                        let select = self.update(Event::SelectProcess { project, index });
+                        Task::batch([close, select])
+                    }
+                    None => self.close_palette(),
+                }
+            }
+            Event::PaletteSelect { project, index } => {
+                let close = self.close_palette();
+                let select = self.update(Event::SelectProcess { project, index });
+                Task::batch([close, select])
+            }
             Event::ImagePasted {
                 project,
                 term,
@@ -1120,7 +1390,90 @@ impl App {
         ]
         .height(Length::Fill);
 
-        column![body, hline(), self.view_status_bar()].into()
+        let base: Element<'_, Event> = column![body, hline(), self.view_status_bar()].into();
+
+        if self.palette_open {
+            iced::widget::stack![base, self.view_palette()].into()
+        } else {
+            base
+        }
+    }
+
+    /// The command palette: a dimmed backdrop with a centered card —
+    /// type to filter every process across every project, Enter jumps.
+    fn view_palette(&'_ self) -> Element<'_, Event> {
+        let matches = self.palette_matches();
+        let mut list = column![].spacing(1);
+        for (row_i, (project_id, index)) in matches.iter().take(12).enumerate() {
+            let Some(project) = self.projects.iter().find(|p| p.id == *project_id) else {
+                continue;
+            };
+            let Some(entry) = project.entries.get(*index) else {
+                continue;
+            };
+            let remote = project.location.is_remote();
+            let accent = accent_for(remote);
+            let dot_color = match entry.status {
+                Status::Running => accent,
+                Status::Stopped => STOPPED,
+                Status::Crashed(_) => CRASHED,
+                Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+            };
+            list = list.push(
+                button(
+                    row![
+                        text("\u{25cf}").size(10).color(dot_color),
+                        text(&project.name).size(12).color(DIM),
+                        text(&entry.config.name).size(13).color(TEXT),
+                        iced::widget::space::horizontal(),
+                    ]
+                    .spacing(9)
+                    .align_y(iced::Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([6, 12])
+                .style(theme::process_row(accent, row_i == self.palette_index))
+                .on_press(Event::PaletteSelect {
+                    project: *project_id,
+                    index: *index,
+                }),
+            );
+        }
+
+        let card = container(
+            column![
+                text_input("jump to a process\u{2026}", &self.palette_query)
+                    .id(self.palette_input.clone())
+                    .on_input(Event::PaletteInput)
+                    .on_submit(Event::PaletteSubmit)
+                    .style(theme::input(LOCAL_ACCENT))
+                    .padding([8, 14])
+                    .size(14),
+                list,
+            ]
+            .spacing(10)
+            .width(560),
+        )
+        .padding(12)
+        .style(theme::form_card);
+
+        container(card)
+            .center_x(Length::Fill)
+            .padding(iced::Padding {
+                top: 90.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.4,
+                ))),
+                ..Default::default()
+            })
+            .into()
     }
 
     fn view_sidebar(&'_ self) -> Element<'_, Event> {
@@ -1538,8 +1891,48 @@ impl App {
                 .width(Length::Fill)
                 .style(theme::chrome),
             hline(),
-            container(body).width(Length::Fill).height(Length::Fill),
         ];
+
+        if self.search_open {
+            let hint: Element<'_, Event> = match self.search_hit {
+                Some(false) => text("no match").size(11).color(CRASHED).into(),
+                _ => text("").size(11).into(),
+            };
+            col = col
+                .push(
+                    container(
+                        row![
+                            text_input("search scrollback (regex)\u{2026}", &self.search_query)
+                                .id(self.search_input.clone())
+                                .on_input(Event::SearchQueryChanged)
+                                .on_submit(Event::SearchStep(SearchDirection::Left))
+                                .style(theme::input(accent))
+                                .padding([5, 12])
+                                .size(12.5),
+                            hint,
+                            button(text("\u{25b4}").size(12))
+                                .padding([3, 9])
+                                .style(theme::pill_button(accent))
+                                .on_press(Event::SearchStep(SearchDirection::Left)),
+                            button(text("\u{25be}").size(12))
+                                .padding([3, 9])
+                                .style(theme::pill_button(accent))
+                                .on_press(Event::SearchStep(SearchDirection::Right)),
+                            button(text("\u{00d7}").size(11))
+                                .padding([3, 8])
+                                .style(theme::ghost(CRASHED))
+                                .on_press(Event::SearchClose),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding([6, 10])
+                    .style(theme::chrome),
+                )
+                .push(hline());
+        }
+
+        col = col.push(container(body).width(Length::Fill).height(Length::Fill));
 
         if entry.config.category == ProcessCategory::Agent && entry.terminal.is_some() {
             let placeholder = format!("message to {}\u{2026}", entry.config.name);

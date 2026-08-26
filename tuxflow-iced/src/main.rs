@@ -17,7 +17,7 @@ use alacritty_terminal::event::Event as AEvent;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::ClipboardType;
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Size, Subscription, Task};
 use iced_term::{BackendCommand, TerminalView};
 use tuxflow_core::config::projects::SavedProjects;
@@ -28,7 +28,7 @@ use tuxflow_core::remote::{self, ProjectLocation};
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
 use processes::{ProcessEntry, Status, plan_after_exit};
-use theme::{CRASHED, DIM, LOCAL_ACCENT, REMOTE_ACCENT, RUNNING, SIDEBAR_BG, WORKING};
+use theme::{CRASHED, DIM, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT, TEXT_SECONDARY, accent_for};
 
 /// Ports-poll cadence: fast while a run is settling (a new forward just
 /// opened), backed off once nothing new appears (GTK behavior).
@@ -44,6 +44,7 @@ fn main() -> iced::Result {
     alacritty_terminal::tty::setup_env();
 
     iced::application(App::new, App::update, App::view)
+        .theme(|_: &App| iced::Theme::Dark)
         .title(|app: &App| match app.active_project() {
             Some(p) => format!("TuxFlow — {}", p.name),
             None => String::from("TuxFlow"),
@@ -1086,164 +1087,200 @@ impl App {
     }
 
     fn view(&'_ self) -> Element<'_, Event> {
-        let sidebar = self.view_sidebar();
-        let main = self.view_main();
-        let status_bar = self.view_status_bar();
-
-        column![
-            row![
-                container(sidebar).width(260).height(Length::Fill),
-                container(main).width(Length::Fill).height(Length::Fill),
-            ]
-            .spacing(2),
-            status_bar,
+        let body = row![
+            self.view_sidebar(),
+            vline(),
+            container(self.view_main())
+                .width(Length::Fill)
+                .height(Length::Fill),
         ]
-        .into()
+        .height(Length::Fill);
+
+        column![body, hline(), self.view_status_bar()].into()
     }
 
     fn view_sidebar(&'_ self) -> Element<'_, Event> {
-        let mut col = column![].spacing(2).padding(8);
-
+        let mut col = column![].spacing(6).padding([8, 6]);
         for (pidx, project) in self.projects.iter().enumerate() {
-            col = col.push(self.view_project_header(pidx, project));
-            if project.expanded {
-                match &project.phase {
-                    Phase::Loading => {
-                        col = col.push(
-                            container(text("connecting…").size(11).color(DIM)).padding([2, 18]),
+            col = col.push(self.view_project_block(pidx, project));
+        }
+
+        let add = button(
+            text("+ project")
+                .size(12)
+                .width(Length::Fill)
+                .align_x(iced::Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding([5, 8])
+        .style(theme::chip(LOCAL_ACCENT, TEXT_SECONDARY))
+        .on_press(Event::OpenAddProject);
+
+        container(column![
+            scrollable(col).height(Length::Fill).width(Length::Fill),
+            container(add).padding(8),
+        ])
+        .width(264)
+        .height(Length::Fill)
+        .style(theme::sidebar)
+        .into()
+    }
+
+    /// One project: its accent rail, header row, and (expanded) sections.
+    fn view_project_block<'a>(
+        &'a self,
+        pidx: usize,
+        project: &'a ProjectState,
+    ) -> Element<'a, Event> {
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
+        let has_running = project.running() > 0;
+
+        // 24px initials square (.project-icon).
+        let initials: String = project
+            .name
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(2)
+            .collect::<String>()
+            .to_uppercase();
+        let icon = container(text(initials).size(9).font(bold()))
+            .center_x(24)
+            .center_y(24)
+            .style(theme::icon_square(accent, remote));
+
+        // The running project's name lights in its accent.
+        let name_color = if has_running { accent } else { TEXT };
+        let counter = format!("{}/{}", project.running(), project.entries.len());
+
+        let header = row![
+            button(
+                row![
+                    icon,
+                    text(&project.name).size(13).font(bold()).color(name_color),
+                    iced::widget::space::horizontal(),
+                    text(counter).size(10).color(DIM),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([3, 6])
+            .style(theme::project_row(accent, remote))
+            .on_press(Event::ToggleExpanded(project.id)),
+            button(text("\u{00d7}").size(11))
+                .padding([2, 6])
+                .style(theme::chip(accent, CRASHED))
+                .on_press(Event::CloseProject(project.id)),
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center);
+
+        let mut block = column![header].spacing(1);
+
+        if project.expanded {
+            match &project.phase {
+                Phase::Loading => {
+                    block = block.push(
+                        container(text("connecting\u{2026}").size(11).color(DIM)).padding([2, 18]),
+                    );
+                }
+                Phase::Failed(_, retryable) => {
+                    let mut r = row![text("unreachable").size(11).color(CRASHED)].spacing(6);
+                    if *retryable {
+                        r = r.push(
+                            button(text("retry").size(10))
+                                .padding([0, 6])
+                                .style(theme::chip(accent, TEXT_SECONDARY))
+                                .on_press(Event::RetryProbe(project.id)),
                         );
                     }
-                    Phase::Failed(_, retryable) => {
-                        let mut r = row![text("unreachable").size(11).color(CRASHED)].spacing(6);
-                        if *retryable {
-                            r = r.push(
-                                button(text("retry").size(10))
-                                    .padding([0, 6])
-                                    .style(button::text)
-                                    .on_press(Event::RetryProbe(project.id)),
+                    block = block.push(container(r).padding([2, 18]));
+                }
+                Phase::Ready => {
+                    for (label, category) in [
+                        ("AGENTS", ProcessCategory::Agent),
+                        ("COMMANDS", ProcessCategory::Command),
+                        ("TERMINALS", ProcessCategory::Terminal),
+                    ] {
+                        let members: Vec<usize> = (0..project.entries.len())
+                            .filter(|&i| project.entries[i].config.category == category)
+                            .collect();
+                        if members.is_empty() && category != ProcessCategory::Terminal {
+                            continue;
+                        }
+                        let mut header =
+                            row![text(label).size(10).font(bold()).color(DIM)].spacing(6);
+                        if category == ProcessCategory::Terminal {
+                            header = header.push(
+                                button(text("+").size(10))
+                                    .padding([0, 5])
+                                    .style(theme::chip(accent, TEXT_SECONDARY))
+                                    .on_press(Event::AddTerminal(project.id)),
                             );
                         }
-                        col = col.push(container(r).padding([2, 18]));
-                    }
-                    Phase::Ready => {
-                        for (label, category) in [
-                            ("AGENTS", ProcessCategory::Agent),
-                            ("COMMANDS", ProcessCategory::Command),
-                            ("TERMINALS", ProcessCategory::Terminal),
-                        ] {
-                            let members: Vec<usize> = (0..project.entries.len())
-                                .filter(|&i| project.entries[i].config.category == category)
-                                .collect();
-                            if members.is_empty() && category != ProcessCategory::Terminal {
-                                continue;
-                            }
-                            let mut header = row![text(label).size(10).color(DIM)].spacing(6);
-                            if category == ProcessCategory::Terminal {
-                                header = header.push(
-                                    button(text("+").size(10))
-                                        .padding([0, 5])
-                                        .style(button::text)
-                                        .on_press(Event::AddTerminal(project.id)),
-                                );
-                            }
-                            col = col.push(container(header).padding([3, 14]));
-                            for i in members {
-                                col = col.push(self.view_row(pidx, i));
-                            }
+                        block = block.push(container(header).padding(iced::Padding {
+                            top: 4.0,
+                            right: 14.0,
+                            bottom: 1.0,
+                            left: 16.0,
+                        }));
+                        for i in members {
+                            block = block.push(self.view_row(pidx, i));
                         }
                     }
                 }
             }
         }
 
-        col = col.push(iced::widget::space::vertical());
-        col = col.push(
-            button(text("+ project").size(12))
-                .width(Length::Fill)
-                .style(button::text)
-                .on_press(Event::OpenAddProject),
-        );
-
-        container(col)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(SIDEBAR_BG)),
-                ..Default::default()
+        // The 2px location rail: outer paints the rail color, the inner
+        // block repaints the sidebar surface 2px further right.
+        container(container(block).width(Length::Fill).style(theme::sidebar))
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 2.0,
             })
-            .height(Length::Fill)
+            .style(move |_| theme::rail(accent, has_running, project.expanded, remote))
             .into()
-    }
-
-    fn view_project_header<'a>(
-        &'a self,
-        pidx: usize,
-        project: &'a ProjectState,
-    ) -> Element<'a, Event> {
-        // The accent hue says where the project lives (ui/accent.rs).
-        let accent = if project.location.is_remote() {
-            REMOTE_ACCENT
-        } else {
-            LOCAL_ACCENT
-        };
-        let chevron = if project.expanded { "▾" } else { "▸" };
-        let counter = format!("{}/{}", project.running(), project.entries.len());
-
-        let name_style = if pidx == self.active {
-            Color::WHITE
-        } else {
-            Color::from_rgb(0.8, 0.8, 0.82)
-        };
-
-        row![
-            button(
-                row![
-                    text(chevron).size(11).color(DIM),
-                    text("●").size(11).color(accent),
-                    text(&project.name).size(14).color(name_style),
-                    iced::widget::space::horizontal(),
-                    text(counter).size(10).color(DIM),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([4, 6])
-            .style(button::text)
-            .on_press(Event::ToggleExpanded(project.id)),
-            button(text("✕").size(10).color(DIM))
-                .padding([2, 4])
-                .style(button::text)
-                .on_press(Event::CloseProject(project.id)),
-        ]
-        .align_y(iced::Alignment::Center)
-        .into()
     }
 
     fn view_row(&'_ self, pidx: usize, index: usize) -> Element<'_, Event> {
         let project = &self.projects[pidx];
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
         let entry = &project.entries[index];
+
+        // Running takes the project's accent; the rest are semantic.
         let (dot_color, dot) = match entry.status {
-            Status::Running => (RUNNING, "●"),
-            Status::Stopped => (DIM, "○"),
-            Status::Crashed(_) => (CRASHED, "●"),
-            Status::Restarting(_) | Status::Reconnecting(_) => (WORKING, "●"),
+            Status::Running => (accent, "\u{25cf}"),
+            Status::Stopped => (STOPPED, "\u{25cb}"),
+            Status::Crashed(_) => (CRASHED, "\u{25cf}"),
+            Status::Restarting(_) | Status::Reconnecting(_) => (RESTARTING, "\u{25cf}"),
         };
         let name = entry
             .config
             .display_name
             .as_deref()
             .unwrap_or(&entry.config.name);
+        let name_color = if entry.is_running() {
+            TEXT
+        } else {
+            TEXT_SECONDARY
+        };
 
         let mut content = row![
-            text(dot).size(12).color(dot_color),
-            text(name).size(13),
+            text(dot).size(11).color(dot_color),
+            text(name).size(13).color(name_color),
             iced::widget::space::horizontal(),
         ]
-        .spacing(6)
+        .spacing(7)
         .align_y(iced::Alignment::Center);
 
         if let Some(port) = project.ports.get_port(&entry.config.name) {
             let local = project.port_map.get(&port).copied().unwrap_or(port);
-            content = content.push(text(local.to_string()).size(11).color(DIM));
+            content = content.push(text(local.to_string()).size(10).color(DIM));
         }
         match entry.status {
             Status::Restarting(attempt) => {
@@ -1252,33 +1289,37 @@ impl App {
                         "retry {attempt}/{}",
                         processes::MAX_RESTART_ATTEMPTS
                     ))
-                    .size(10)
-                    .color(DIM),
+                    .size(9)
+                    .color(RESTARTING),
                 );
             }
             Status::Reconnecting(attempt) => {
-                content = content.push(text(format!("reconnect {attempt}")).size(10).color(DIM));
+                content = content.push(
+                    text(format!("reconnect {attempt}"))
+                        .size(9)
+                        .color(RESTARTING),
+                );
             }
             _ => {}
         }
 
         let selected = pidx == self.active && index == project.selected;
-        let style = if selected {
-            button::secondary
-        } else {
-            button::text
-        };
         container(
             button(content)
                 .width(Length::Fill)
-                .padding([3, 8])
-                .style(style)
+                .padding([4, 8])
+                .style(theme::process_row(accent, selected))
                 .on_press(Event::SelectProcess {
                     project: project.id,
                     index,
                 }),
         )
-        .padding([0, 10])
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 4.0,
+            bottom: 0.0,
+            left: 12.0,
+        })
         .into()
     }
 
@@ -1293,38 +1334,51 @@ impl App {
         let Some(project) = self.active_project() else {
             return container(
                 column![
-                    text("no projects").size(14).color(DIM),
-                    button(text("+ add project").size(13)).on_press(Event::OpenAddProject),
+                    text("no projects yet").size(14).color(DIM),
+                    button(text("+ add project").size(13))
+                        .padding([6, 14])
+                        .style(theme::primary_chip(LOCAL_ACCENT))
+                        .on_press(Event::OpenAddProject),
                 ]
-                .spacing(12)
+                .spacing(14)
                 .align_x(iced::Alignment::Center),
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
+            .style(theme::terminal_pane)
             .into();
         };
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
 
         match &project.phase {
             Phase::Loading => {
                 return container(
-                    text(format!("connecting to {}…", project.key()))
+                    text(format!("connecting to {}\u{2026}", project.key()))
                         .size(14)
                         .color(DIM),
                 )
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
+                .style(theme::terminal_pane)
                 .into();
             }
             Phase::Failed(message, retryable) => {
                 let mut col = column![text(message).size(14).color(CRASHED)]
-                    .spacing(12)
+                    .spacing(14)
                     .align_x(iced::Alignment::Center);
                 if *retryable {
-                    col = col.push(action_button("⟳ retry", Event::RetryProbe(project.id)));
+                    col = col.push(
+                        button(text("\u{27f3} retry").size(12))
+                            .padding([5, 12])
+                            .style(theme::primary_chip(accent))
+                            .on_press(Event::RetryProbe(project.id)),
+                    );
                 }
                 return container(col)
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
+                    .style(theme::terminal_pane)
                     .into();
             }
             Phase::Ready => {}
@@ -1335,115 +1389,173 @@ impl App {
                 column![
                     text("no processes").size(14).color(DIM),
                     row![
-                        action_button("+ command", Event::OpenAddCommand { agent: false }),
-                        action_button("+ agent", Event::OpenAddCommand { agent: true }),
+                        button(text("+ command").size(12))
+                            .padding([5, 12])
+                            .style(theme::primary_chip(accent))
+                            .on_press(Event::OpenAddCommand { agent: false }),
+                        button(text("+ agent").size(12))
+                            .padding([5, 12])
+                            .style(theme::primary_chip(accent))
+                            .on_press(Event::OpenAddCommand { agent: true }),
                     ]
                     .spacing(8),
                 ]
-                .spacing(12)
+                .spacing(14)
                 .align_x(iced::Alignment::Center),
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
+            .style(theme::terminal_pane)
             .into();
         };
 
-        let mut controls = row![text(&entry.config.name).size(14)]
-            .spacing(8)
-            .align_y(iced::Alignment::Center);
-        controls = controls.push(iced::widget::space::horizontal());
+        // Toolbar: identity on the left, quiet chips on the right.
+        let (status_color, status_word) = match &entry.status {
+            Status::Running => (accent, String::from("running")),
+            Status::Stopped => (STOPPED, String::from("stopped")),
+            Status::Crashed(Some(code)) => (CRASHED, format!("crashed \u{00b7} exit {code}")),
+            Status::Crashed(None) => (CRASHED, String::from("crashed")),
+            Status::Restarting(n) => (
+                RESTARTING,
+                format!("restarting {n}/{}", processes::MAX_RESTART_ATTEMPTS),
+            ),
+            Status::Reconnecting(n) => (RESTARTING, format!("reconnecting \u{00b7} attempt {n}")),
+        };
+        let mut controls = row![
+            text("\u{25cf}").size(11).color(status_color),
+            text(&entry.config.name).size(14).font(bold()),
+            text(status_word).size(11).color(TEXT_SECONDARY),
+            iced::widget::space::horizontal(),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+
         controls = controls
-            .push(action_button(
-                "+ command",
-                Event::OpenAddCommand { agent: false },
-            ))
-            .push(action_button(
-                "+ agent",
-                Event::OpenAddCommand { agent: true },
-            ));
+            .push(
+                button(text("+ command").size(12))
+                    .padding([4, 10])
+                    .style(theme::chip(accent, TEXT_SECONDARY))
+                    .on_press(Event::OpenAddCommand { agent: false }),
+            )
+            .push(
+                button(text("+ agent").size(12))
+                    .padding([4, 10])
+                    .style(theme::chip(accent, TEXT_SECONDARY))
+                    .on_press(Event::OpenAddCommand { agent: true }),
+            );
         match entry.status {
             Status::Running => {
                 controls = controls
-                    .push(action_button(
-                        "⟳ restart",
-                        Event::Restart {
-                            project: project.id,
-                            index: project.selected,
-                        },
-                    ))
-                    .push(action_button(
-                        "■ stop",
-                        Event::Stop {
-                            project: project.id,
-                            index: project.selected,
-                        },
-                    ));
+                    .push(
+                        button(text("\u{27f3} restart").size(12))
+                            .padding([4, 10])
+                            .style(theme::chip(accent, accent))
+                            .on_press(Event::Restart {
+                                project: project.id,
+                                index: project.selected,
+                            }),
+                    )
+                    .push(
+                        button(text("\u{25a0} stop").size(12))
+                            .padding([4, 10])
+                            .style(theme::chip(accent, CRASHED))
+                            .on_press(Event::Stop {
+                                project: project.id,
+                                index: project.selected,
+                            }),
+                    );
             }
             Status::Restarting(_) | Status::Reconnecting(_) => {
-                controls = controls.push(action_button(
-                    "■ cancel",
-                    Event::Stop {
-                        project: project.id,
-                        index: project.selected,
-                    },
-                ));
+                controls = controls.push(
+                    button(text("\u{25a0} cancel").size(12))
+                        .padding([4, 10])
+                        .style(theme::chip(accent, CRASHED))
+                        .on_press(Event::Stop {
+                            project: project.id,
+                            index: project.selected,
+                        }),
+                );
             }
             Status::Stopped | Status::Crashed(_) => {
-                controls = controls.push(action_button(
-                    "▶ start",
-                    Event::Start {
-                        project: project.id,
-                        index: project.selected,
-                    },
-                ));
+                controls = controls.push(
+                    button(text("\u{25b6} start").size(12))
+                        .padding([4, 10])
+                        .style(theme::primary_chip(accent))
+                        .on_press(Event::Start {
+                            project: project.id,
+                            index: project.selected,
+                        }),
+                );
             }
         }
 
         let body: Element<'_, Event> = match &entry.terminal {
-            Some(term) => TerminalView::show(term).map(Event::Terminal),
+            Some(term) => container(TerminalView::show(term).map(Event::Terminal))
+                .padding(iced::Padding {
+                    top: 6.0,
+                    right: 2.0,
+                    bottom: 4.0,
+                    left: 8.0,
+                })
+                .style(theme::terminal_pane)
+                .into(),
             None => {
                 let label = match entry.status {
                     Status::Crashed(Some(code)) => {
-                        format!("crashed (exit {code}) — ▶ to start again")
+                        format!("crashed with exit {code} \u{2014} start again when ready")
                     }
-                    Status::Crashed(None) => String::from("crashed — ▶ to start again"),
+                    Status::Crashed(None) => {
+                        String::from("crashed \u{2014} start again when ready")
+                    }
                     Status::Restarting(attempt) => format!(
-                        "restarting (attempt {attempt}/{})…",
+                        "restarting \u{00b7} attempt {attempt}/{}",
                         processes::MAX_RESTART_ATTEMPTS
                     ),
                     Status::Reconnecting(attempt) => format!(
-                        "connection lost — reconnecting (attempt {attempt})… \
-                         the process keeps running on the host"
+                        "connection lost \u{2014} reconnecting (attempt {attempt}). \
+                         The process keeps running on the host."
                     ),
-                    _ => String::from("stopped — ▶ to start"),
+                    _ => String::from("not running"),
                 };
-                container(text(label).size(14).color(DIM))
+                container(text(label).size(13).color(DIM))
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
+                    .style(theme::terminal_pane)
                     .into()
             }
         };
 
         let mut col = column![
-            container(controls).padding([4, 8]),
+            container(controls)
+                .padding([6, 10])
+                .width(Length::Fill)
+                .style(theme::chrome),
+            hline(),
             container(body).width(Length::Fill).height(Length::Fill),
         ];
 
-        // The composer under agent terminals (GTK composer_bar parity).
+        // The composer under agent terminals (GTK composer_bar).
         if entry.config.category == ProcessCategory::Agent && entry.terminal.is_some() {
-            col = col.push(
+            let placeholder = format!("message to {} \u{2014} Enter sends", entry.config.name);
+            col = col.push(hline()).push(
                 container(
                     row![
-                        text_input("message to agent — Enter sends", &self.composer)
+                        text_input(&placeholder, &self.composer)
                             .on_input(Event::ComposerChanged)
                             .on_submit(Event::ComposerSend)
+                            .style(theme::input(accent))
+                            .padding([6, 10])
                             .size(13),
-                        action_button("send", Event::ComposerSend),
+                        button(text("send").size(12))
+                            .padding([6, 14])
+                            .style(theme::primary_chip(accent))
+                            .on_press(Event::ComposerSend),
                     ]
                     .spacing(6)
                     .align_y(iced::Alignment::Center),
                 )
-                .padding([4, 8]),
+                .padding([6, 8])
+                .style(theme::chrome),
             );
         }
 
@@ -1451,42 +1563,51 @@ impl App {
     }
 
     fn view_add_command(&'_ self, form: &'_ AddCommandForm) -> Element<'_, Event> {
+        let accent = self
+            .active_project()
+            .map(|p| accent_for(p.location.is_remote()))
+            .unwrap_or(LOCAL_ACCENT);
         let title = if form.agent {
             "add agent"
         } else {
             "add command"
         };
-        container(
+        form_card(
+            accent,
             column![
-                text(title).size(16),
-                text_input("name (e.g. web)", &form.name)
+                text(title).size(16).font(bold()),
+                text_input("name \u{2014} e.g. web", &form.name)
                     .on_input(Event::AddCommandName)
-                    .size(14)
-                    .width(420),
-                text_input("command (e.g. npm run dev)", &form.command)
+                    .style(theme::input(accent))
+                    .padding([7, 10])
+                    .size(13),
+                text_input("command \u{2014} e.g. npm run dev", &form.command)
                     .on_input(Event::AddCommandCommand)
                     .on_submit(Event::AddCommandSubmit)
-                    .size(14)
-                    .width(420),
+                    .style(theme::input(accent))
+                    .padding([7, 10])
+                    .size(13),
                 row![
-                    action_button("add & start", Event::AddCommandSubmit),
-                    action_button("cancel", Event::AddCommandCancel),
+                    button(text("add & start").size(12))
+                        .padding([6, 14])
+                        .style(theme::primary_chip(accent))
+                        .on_press(Event::AddCommandSubmit),
+                    button(text("cancel").size(12))
+                        .padding([6, 14])
+                        .style(theme::chip(accent, TEXT_SECONDARY))
+                        .on_press(Event::AddCommandCancel),
                 ]
                 .spacing(8),
             ]
-            .spacing(12)
-            .align_x(iced::Alignment::Center),
+            .spacing(14),
         )
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .into()
     }
 
     fn view_status_bar(&'_ self) -> Element<'_, Event> {
-        let (left, badge) = match self.active_project() {
+        let (left, badge, accent) = match self.active_project() {
             Some(project) => {
                 let left = format!(
-                    "{} — {}/{} running",
+                    "{} \u{2014} {}/{} running",
                     project.name,
                     project.running(),
                     project.entries.len()
@@ -1495,24 +1616,34 @@ impl App {
                     .entries
                     .get(project.selected)
                     .and_then(|e| display_badge(project, &e.config.name))
-                    .map(|b| format!("● {b}"))
                     .unwrap_or_default();
-                (left, badge)
+                (left, badge, accent_for(project.location.is_remote()))
             }
-            None => (String::from("no projects"), String::new()),
+            None => (String::from("no projects"), String::new(), LOCAL_ACCENT),
         };
 
-        container(
-            row![
-                text(left).size(12),
-                iced::widget::space::horizontal(),
-                text(badge).size(12),
-            ]
-            .spacing(8),
-        )
-        .padding([4, 8])
-        .width(Length::Fill)
-        .into()
+        let mut bar = row![
+            text(left).size(11).color(TEXT_SECONDARY),
+            iced::widget::space::horizontal(),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if !badge.is_empty() {
+            bar = bar.push(
+                row![
+                    text("\u{25cf}").size(9).color(accent),
+                    text(badge).size(11).color(TEXT_SECONDARY),
+                ]
+                .spacing(5)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+
+        container(bar)
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(theme::chrome)
+            .into()
     }
 
     fn subscription(&self) -> Subscription<Event> {
@@ -1548,26 +1679,40 @@ fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
 }
 
 fn view_add_project(input: &str) -> Element<'_, Event> {
-    container(
+    form_card(
+        LOCAL_ACCENT,
         column![
-            text("add project").size(16),
+            text("add project").size(16).font(bold()),
             text_input("/path/to/project  or  ssh://host/path", input)
                 .on_input(Event::AddProjectInput)
                 .on_submit(Event::AddProjectSubmit)
-                .size(14)
-                .width(460),
+                .style(theme::input(LOCAL_ACCENT))
+                .padding([7, 10])
+                .size(13),
             row![
-                action_button("open", Event::AddProjectSubmit),
-                action_button("cancel", Event::AddProjectCancel),
+                button(text("open").size(12))
+                    .padding([6, 14])
+                    .style(theme::primary_chip(LOCAL_ACCENT))
+                    .on_press(Event::AddProjectSubmit),
+                button(text("cancel").size(12))
+                    .padding([6, 14])
+                    .style(theme::chip(LOCAL_ACCENT, TEXT_SECONDARY))
+                    .on_press(Event::AddProjectCancel),
             ]
             .spacing(8),
         ]
-        .spacing(12)
-        .align_x(iced::Alignment::Center),
+        .spacing(14),
     )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .into()
+}
+
+/// Centered card on the terminal surface (.project-detail-card).
+fn form_card(accent: Color, content: iced::widget::Column<'_, Event>) -> Element<'_, Event> {
+    let _ = accent;
+    container(container(content.width(420)).padding(24).style(theme::card))
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(theme::terminal_pane)
+        .into()
 }
 
 /// Canonical project key from user input: ssh URLs pass through, local
@@ -1601,13 +1746,6 @@ fn browser_url(project: &ProjectState, name: &str) -> Option<String> {
     }
 }
 
-fn action_button(label: &str, event: Event) -> button::Button<'_, Event> {
-    button(text(label).size(12))
-        .padding([2, 8])
-        .style(button::secondary)
-        .on_press(event)
-}
-
 /// Displayed grid as trimmed lines — the detector's input, like VTE's
 /// `text_range_format` feed in the GTK app.
 fn visible_text(term: &iced_term::Terminal) -> String {
@@ -1626,4 +1764,29 @@ fn visible_text(term: &iced_term::Terminal) -> String {
         .map(|l| l.trim_end())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn bold() -> iced::Font {
+    iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
+    }
+}
+
+/// 1px hairline (style.css alpha(@borders, .3)) — horizontal.
+fn hline() -> Element<'static, Event> {
+    container(column![])
+        .width(Length::Fill)
+        .height(1)
+        .style(theme::hairline)
+        .into()
+}
+
+/// 1px hairline — vertical.
+fn vline() -> Element<'static, Event> {
+    container(column![])
+        .width(1)
+        .height(Length::Fill)
+        .style(theme::hairline)
+        .into()
 }

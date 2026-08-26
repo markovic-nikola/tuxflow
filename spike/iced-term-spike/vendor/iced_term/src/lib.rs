@@ -9,6 +9,7 @@ mod theme;
 mod view;
 
 pub use alacritty_terminal::event::Event as AlacrittyEvent;
+pub use alacritty_terminal::index::Direction as SearchDirection;
 pub use alacritty_terminal::index::Point as AlacrittyPoint;
 pub use alacritty_terminal::selection::SelectionType;
 pub use alacritty_terminal::term::TermMode;

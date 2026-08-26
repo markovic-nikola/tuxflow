@@ -235,6 +235,57 @@ fn url_regex_hover_match() {
     );
 }
 
+/// Scrollback search (VTE `search_set_regex`/`find_next` parity): a regex
+/// match in history is found, focused for highlighting, and scrolled into
+/// view; repeats wrap; invalid patterns and clears are safe.
+#[test]
+fn scrollback_search_scrolls_to_match_and_wraps() {
+    use alacritty_terminal::index::Direction;
+
+    let mut probe = Probe::spawn(r#"printf 'needle-alpha\n'; seq 1 100; sleep 2"#);
+    assert!(probe.wait(5, |text, _, _| text.contains("100")));
+
+    // The needle scrolled out of the 50-line viewport long ago.
+    assert!(!probe.visible_text().contains("needle-alpha"));
+
+    let action = probe
+        .backend
+        .handle(Command::SearchNext("needle-[a-z]+".into(), Direction::Left));
+    assert_eq!(action, Action::SearchResult(true));
+    probe.backend.sync();
+    let content = probe.backend.renderable_content();
+    assert!(
+        content.display_offset > 0,
+        "viewport did not scroll into history"
+    );
+    assert!(
+        content.search_match.is_some(),
+        "no focused match to highlight"
+    );
+    assert!(
+        probe.visible_text().contains("needle-alpha"),
+        "match not scrolled into view; got:\n{}",
+        probe.visible_text()
+    );
+
+    // Sole match: stepping again wraps around and finds it again.
+    let action = probe
+        .backend
+        .handle(Command::SearchNext("needle-[a-z]+".into(), Direction::Left));
+    assert_eq!(action, Action::SearchResult(true));
+
+    // A regex the user is mid-typing must not panic or match.
+    let action = probe
+        .backend
+        .handle(Command::SearchNext("(".into(), Direction::Left));
+    assert_eq!(action, Action::SearchResult(false));
+
+    // Clearing drops the highlight.
+    probe.backend.handle(Command::SearchClear);
+    probe.backend.sync();
+    assert!(probe.backend.renderable_content().search_match.is_none());
+}
+
 /// A finished mouse selection surfaces its text for PRIMARY (VTE publishes
 /// the selection internally; here it must round-trip as an Action). The
 /// multi-line case pins the newline handling — the naive cell-walk this

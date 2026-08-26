@@ -12,7 +12,7 @@ use alacritty_terminal::term::ClipboardType;
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{button, column, container, responsive, row, text, text_input};
 use iced::{Element, Length, Size, Subscription, Task, window};
-use iced_term::{BackendCommand, TerminalView};
+use iced_term::{BackendCommand, SearchDirection, TerminalView};
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,6 +77,9 @@ struct App {
     panes_created: usize,
     focus: Option<pane_grid::Pane>,
     composer: String,
+    search_open: bool,
+    search_query: String,
+    search_input: iced::widget::Id,
     log: VecDeque<String>,
 }
 
@@ -95,6 +98,10 @@ enum Event {
     ComposerChanged(String),
     ComposerSend,
     Scrape,
+    Hotkey(iced::keyboard::Event),
+    SearchQueryChanged(String),
+    SearchStep(SearchDirection),
+    SearchClose,
 }
 
 impl App {
@@ -160,6 +167,11 @@ impl App {
                 panes_created,
                 focus: None,
                 composer: String::new(),
+                // Headless smoke hook, like TUXFLOW_SPIKE_STRESS: render
+                // the search bar without a synthetic Ctrl+Shift+F.
+                search_open: std::env::var("TUXFLOW_SPIKE_SEARCH").is_ok(),
+                search_query: String::new(),
+                search_input: iced::widget::Id::unique(),
                 log: VecDeque::new(),
             },
             Task::none(),
@@ -246,6 +258,9 @@ impl App {
                         ));
                         iced::clipboard::write_primary(text)
                     }
+                    // Search results only arrive via send_search, which
+                    // consumes them; nothing to do on the event path.
+                    iced_term::actions::Action::SearchResult(_) => Task::none(),
                     iced_term::actions::Action::Ignore => Task::none(),
                 };
                 Task::batch([side_task, proxy_task])
@@ -269,6 +284,50 @@ impl App {
                 }
                 Task::none()
             }
+            Event::Hotkey(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                match key.as_ref() {
+                    // Ctrl+Shift+F opens scrollback search on the focused
+                    // terminal (VTE search overlay parity).
+                    iced::keyboard::Key::Character(c)
+                        if c.eq_ignore_ascii_case("f")
+                            && modifiers.control()
+                            && modifiers.shift() =>
+                    {
+                        self.search_open = true;
+                        iced::widget::operation::focus(self.search_input.clone())
+                    }
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                        if self.search_open =>
+                    {
+                        self.close_search()
+                    }
+                    _ => Task::none(),
+                }
+            }
+            Event::Hotkey(_) => Task::none(),
+            Event::SearchQueryChanged(query) => {
+                self.search_query = query;
+                // Incremental: each keystroke re-runs the search from the
+                // visible edge (a changed pattern restarts in the backend).
+                if self.search_query.is_empty() {
+                    self.send_search(BackendCommand::SearchClear);
+                } else {
+                    let cmd = BackendCommand::SearchNext(
+                        self.search_query.clone(),
+                        SearchDirection::Left,
+                    );
+                    self.send_search(cmd);
+                }
+                Task::none()
+            }
+            Event::SearchStep(direction) => {
+                if !self.search_query.is_empty() {
+                    let cmd = BackendCommand::SearchNext(self.search_query.clone(), direction);
+                    self.send_search(cmd);
+                }
+                Task::none()
+            }
+            Event::SearchClose => self.close_search(),
             Event::Scrape => {
                 // Port/URL detection parity: read displayed text from the
                 // grid (VTE equivalent: contents-changed + text_range_format).
@@ -325,6 +384,32 @@ impl App {
                 Task::none()
             }
             _ => Task::none(),
+        }
+    }
+
+    /// Route a search command to the focused terminal and log the outcome.
+    fn send_search(&mut self, cmd: BackendCommand) {
+        if let Some(id) = self.focused_terminal_id() {
+            if let Some(tab) = self.tabs.get_mut(&id) {
+                let action = tab.handle(iced_term::Command::ProxyToBackend(cmd));
+                if let iced_term::actions::Action::SearchResult(found) = action {
+                    self.log(format!(
+                        "search: {}",
+                        if found { "match focused" } else { "no match" }
+                    ));
+                }
+            }
+        }
+    }
+
+    fn close_search(&mut self) -> Task<Event> {
+        self.search_open = false;
+        self.search_query.clear();
+        self.send_search(BackendCommand::SearchClear);
+        // Hand the keyboard back to the terminal.
+        match self.focused_terminal_id().and_then(|id| self.tabs.get(&id)) {
+            Some(tab) => TerminalView::focus(tab.widget_id().clone()),
+            None => Task::none(),
         }
     }
 
@@ -429,21 +514,45 @@ impl App {
         ]
         .spacing(2);
 
-        column![
+        let mut root = column![
             container(pane_grid)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .padding(4),
-            container(composer).padding([0, 4]),
-            container(status).padding(4),
         ]
-        .spacing(4)
-        .into()
+        .spacing(4);
+
+        if self.search_open {
+            let search_bar = row![
+                text_input(
+                    "search scrollback (regex) — Enter/▲ = older, ▼ = newer, Esc closes",
+                    &self.search_query
+                )
+                .id(self.search_input.clone())
+                .on_input(Event::SearchQueryChanged)
+                .on_submit(Event::SearchStep(SearchDirection::Left))
+                .size(14),
+                button(text("▲").size(14)).on_press(Event::SearchStep(SearchDirection::Left)),
+                button(text("▼").size(14)).on_press(Event::SearchStep(SearchDirection::Right)),
+                button(text("✕").size(14)).on_press(Event::SearchClose),
+            ]
+            .spacing(6);
+            root = root.push(container(search_bar).padding([0, 4]));
+        }
+
+        root.push(container(composer).padding([0, 4]))
+            .push(container(status).padding(4))
+            .into()
     }
 
     fn subscription(&self) -> Subscription<Event> {
         let subscriptions: Vec<_> = self.tabs.values().map(|tab| tab.subscription()).collect();
-        Subscription::batch(subscriptions).map(Event::Terminal)
+        Subscription::batch([
+            Subscription::batch(subscriptions).map(Event::Terminal),
+            // Ignored-status keys only — a key the focused widget consumed
+            // (terminal input, search typing) never reaches the hotkeys.
+            iced::keyboard::listen().map(Event::Hotkey),
+        ])
     }
 }
 

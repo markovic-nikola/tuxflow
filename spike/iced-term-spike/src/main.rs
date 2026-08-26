@@ -80,6 +80,7 @@ struct App {
     search_open: bool,
     search_query: String,
     search_input: iced::widget::Id,
+    pasted_images: usize,
     log: VecDeque<String>,
 }
 
@@ -172,6 +173,7 @@ impl App {
                 search_open: std::env::var("TUXFLOW_SPIKE_SEARCH").is_ok(),
                 search_query: String::new(),
                 search_input: iced::widget::Id::unique(),
+                pasted_images: 0,
                 log: VecDeque::new(),
             },
             Task::none(),
@@ -296,6 +298,17 @@ impl App {
                         self.search_open = true;
                         iced::widget::operation::focus(self.search_input.clone())
                     }
+                    // Ctrl+Shift+V lands here ONLY when the widget found no
+                    // text to paste (a consumed key never reaches the
+                    // ignored-status listener) — the image fallback slots in
+                    // without touching the widget's text path.
+                    iced::keyboard::Key::Character(c)
+                        if c.eq_ignore_ascii_case("v")
+                            && modifiers.control()
+                            && modifiers.shift() =>
+                    {
+                        self.paste_clipboard_image()
+                    }
                     iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
                         if self.search_open =>
                     {
@@ -385,6 +398,42 @@ impl App {
             }
             _ => Task::none(),
         }
+    }
+
+    /// The TuxFlow paste-PNG story, local half: clipboard image → PNG file →
+    /// path typed into the terminal (agents treat image paths as
+    /// attachments). iced's clipboard tasks are text-only, so the raw image
+    /// comes via arboard — the demo's proof that gap 3 is app-level work,
+    /// not a framework wall.
+    fn paste_clipboard_image(&mut self) -> Task<Event> {
+        let image = arboard::Clipboard::new()
+            .and_then(|mut cb| cb.get_image())
+            .map_err(|e| e.to_string());
+        let result = image.and_then(|img| {
+            let path = std::env::temp_dir().join(format!(
+                ".tuxflow-img-{}-{}.png",
+                std::process::id(),
+                self.pasted_images
+            ));
+            encode_png(img.width, img.height, &img.bytes, &path).map_err(|e| e.to_string())?;
+            Ok(path)
+        });
+        match result {
+            Ok(path) => {
+                self.pasted_images += 1;
+                let line = path.display().to_string();
+                self.log(format!("image paste → typed {line}"));
+                if let Some(id) = self.focused_terminal_id() {
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        tab.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
+                            line.into_bytes(),
+                        )));
+                    }
+                }
+            }
+            Err(err) => self.log(format!("image paste: {err}")),
+        }
+        Task::none()
     }
 
     /// Route a search command to the focused terminal and log the outcome.
@@ -575,6 +624,22 @@ fn visible_text(tab: &iced_term::Terminal) -> String {
         .join("\n")
 }
 
+/// RGBA8 → PNG on disk (arboard hands over raw RGBA).
+fn encode_png(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(rgba)?;
+    Ok(())
+}
+
 /// Stand-in for util/port_detector.rs — just enough to prove the data source.
 fn find_local_url(line: &str) -> Option<&str> {
     let start = line
@@ -583,4 +648,37 @@ fn find_local_url(line: &str) -> Option<&str> {
     let rest = &line[start..];
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some(&rest[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_png;
+
+    /// The clipboard half of image paste needs a real session; the
+    /// encode-to-disk half doesn't — pin it: what arboard hands over (raw
+    /// RGBA8) must come back byte-identical from the written PNG.
+    #[test]
+    fn png_encode_roundtrip() {
+        #[rustfmt::skip]
+        let rgba: Vec<u8> = vec![
+            255, 0, 0, 255,   0, 255, 0, 255,
+            0, 0, 255, 255,   255, 255, 255, 128,
+        ];
+        let path = std::env::temp_dir().join(format!(
+            ".tuxflow-spike-png-test-{}.png",
+            std::process::id()
+        ));
+        encode_png(2, 2, &rgba, &path).expect("png encode failed");
+
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!((info.width, info.height), (2, 2));
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+        assert_eq!(&buf[..info.buffer_size()], rgba.as_slice());
+    }
 }

@@ -143,7 +143,10 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
         | backend::Command::Scroll(_)
         | backend::Command::Resize(..)
         | backend::Command::SelectStart(..)
-        | backend::Command::SelectUpdate(_) => true,
+        | backend::Command::SelectUpdate(_)
+        // Search scrolls to the match and moves the highlight.
+        | backend::Command::SearchNext(..)
+        | backend::Command::SearchClear => true,
         backend::Command::ProcessAlacrittyEvent(event) => {
             matches!(event, AlacrittyEvent::Wakeup | AlacrittyEvent::Exit)
         },

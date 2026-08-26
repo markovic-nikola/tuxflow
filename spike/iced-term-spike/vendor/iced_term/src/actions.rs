@@ -6,6 +6,8 @@ pub enum Action {
     /// the PRIMARY selection (VTE does this internally; iced clipboard tasks
     /// live at the application layer, so it surfaces as an action).
     PublishSelection(String),
+    /// Outcome of a `SearchNext` command — whether a match is now focused.
+    SearchResult(bool),
     #[default]
     Ignore,
 }

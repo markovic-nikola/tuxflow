@@ -5,7 +5,9 @@ use alacritty_terminal::event::{
 };
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Indexed, Scroll};
-use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
+use alacritty_terminal::index::{
+    Boundary, Column, Direction, Line, Point, Side,
+};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
@@ -34,6 +36,12 @@ pub enum Command {
     /// A selection gesture ended (button release). Extracts the selected
     /// text so the embedder can publish it to PRIMARY.
     SelectRelease,
+    /// Find the next scrollback match for a regex (VTE `search_set_regex`
+    /// + `search_find_next/previous` parity). A changed pattern restarts
+    /// from the visible edge; a repeated one advances, wrapping around.
+    SearchNext(String, Direction),
+    /// Drop the active search and its highlight.
+    SearchClear,
     ProcessLink(LinkAction, Point),
     MouseReport(MouseButton, Modifiers, Point, bool),
     ProcessAlacrittyEvent(Event),
@@ -142,6 +150,15 @@ pub struct Backend {
     notifier: Notifier,
     last_content: RenderableContent,
     pub(crate) url_regex: RegexSearch,
+    search: Option<SearchState>,
+}
+
+/// Active scrollback search: the compiled regex is cached across
+/// next/previous steps and recompiled only when the pattern changes.
+struct SearchState {
+    pattern: String,
+    regex: RegexSearch,
+    focused: Option<Match>,
 }
 
 impl Backend {
@@ -177,6 +194,7 @@ impl Backend {
             cursor: cursor.clone(),
             hovered_hyperlink: None,
             hovered_url: None,
+            search_match: None,
         };
 
         let term = Arc::new(FairMutex::new(term));
@@ -194,6 +212,7 @@ impl Backend {
             notifier,
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
+            search: None,
         })
     }
 
@@ -250,6 +269,12 @@ impl Backend {
                     }
                 }
             },
+            Command::SearchNext(pattern, direction) => {
+                action = self.search_next(&mut term, pattern, direction);
+            },
+            Command::SearchClear => {
+                self.search = None;
+            },
             Command::ProcessLink(link_action, point) => {
                 self.process_link_action(&term, link_action, point);
             },
@@ -259,6 +284,67 @@ impl Backend {
         };
 
         action
+    }
+
+    fn search_next(
+        &mut self,
+        terminal: &mut Term<EventProxy>,
+        pattern: String,
+        direction: Direction,
+    ) -> Action {
+        // (Re)compile on pattern change. An unfinishable regex — the user
+        // mid-typing `(` — reports "no match" instead of erroring.
+        if self.search.as_ref().is_none_or(|s| s.pattern != pattern) {
+            self.search =
+                RegexSearch::new(&pattern).ok().map(|regex| SearchState {
+                    pattern,
+                    regex,
+                    focused: None,
+                });
+        }
+        let Some(search) = &mut self.search else {
+            return Action::SearchResult(false);
+        };
+
+        let display_offset = terminal.grid().display_offset() as i32;
+        let origin = match &search.focused {
+            // Step past the focused match so "next" advances.
+            // Boundary::None wraps at the grid edges — the same idiom
+            // search_next itself uses, so a lone match keeps being found.
+            Some(m) => match direction {
+                Direction::Right => m.end().add(&*terminal, Boundary::None, 1),
+                Direction::Left => m.start().sub(&*terminal, Boundary::None, 1),
+            },
+            // Fresh pattern: start at the visible edge facing the search
+            // direction, so the nearest match is found first.
+            None => match direction {
+                Direction::Right => {
+                    Point::new(Line(-display_offset), Column(0))
+                },
+                Direction::Left => Point::new(
+                    Line(terminal.screen_lines() as i32 - 1 - display_offset),
+                    terminal.last_column(),
+                ),
+            },
+        };
+
+        match terminal.search_next(
+            &mut search.regex,
+            origin,
+            direction,
+            Side::Left,
+            None,
+        ) {
+            Some(m) => {
+                terminal.scroll_to_point(*m.start());
+                search.focused = Some(m);
+                Action::SearchResult(true)
+            },
+            None => {
+                search.focused = None;
+                Action::SearchResult(false)
+            },
+        }
     }
 
     fn process_link_action(
@@ -529,6 +615,8 @@ impl Backend {
         self.last_content.cursor = cursor.clone();
         self.last_content.terminal_mode = *terminal.mode();
         self.last_content.terminal_size = self.size;
+        self.last_content.search_match =
+            self.search.as_ref().and_then(|s| s.focused.clone());
     }
 
     pub fn renderable_content(&self) -> &RenderableContent {
@@ -576,6 +664,9 @@ pub struct RenderableContent {
     pub cursor_point: Point,
     pub hovered_hyperlink: Option<RangeInclusive<Point>>,
     pub hovered_url: Option<String>,
+    /// The focused scrollback-search match (absolute grid coordinates,
+    /// like the cells themselves) — the view highlights it.
+    pub search_match: Option<RangeInclusive<Point>>,
     pub selectable_range: Option<SelectionRange>,
     pub cursor: Cell,
     pub terminal_mode: TermMode,
@@ -590,6 +681,7 @@ impl Default for RenderableContent {
             cursor_point: Point::default(),
             hovered_hyperlink: None,
             hovered_url: None,
+            search_match: None,
             selectable_range: None,
             cursor: Cell::default(),
             terminal_mode: TermMode::empty(),

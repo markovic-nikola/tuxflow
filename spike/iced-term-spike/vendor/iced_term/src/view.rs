@@ -615,6 +615,12 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                         || content
                             .selectable_range
                             .is_some_and(|r| r.contains(indexed.point))
+                        // The focused search match highlights like a
+                        // selection.
+                        || content
+                            .search_match
+                            .as_ref()
+                            .is_some_and(|r| r.contains(&indexed.point))
                     {
                         std::mem::swap(&mut fg, &mut bg);
                     }

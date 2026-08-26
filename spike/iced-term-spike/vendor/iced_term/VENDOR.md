@@ -122,3 +122,20 @@ marks something VTE gives TuxFlow that stock iced_term does not.
      newline→CR normalization otherwise. Upstream wrote clipboard bytes
      raw, so pasting into an app that requested bracketed paste typed the
      content as keystrokes.
+8. **Scrollback search** (gap 1 of the README's migration work list — VTE
+   `search_set_regex`/`find_next` parity). alacritty ships the engine
+   (`RegexSearch`, `Term::search_next` with built-in wrap-around,
+   `scroll_to_point`); this patch is the missing plumbing:
+   - `Command::SearchNext(pattern, direction)` / `Command::SearchClear`.
+     A changed pattern recompiles and restarts from the visible edge
+     facing the search direction (so the nearest match wins); a repeated
+     one advances past the focused match, `Boundary::None` wrapping at the
+     grid edges — the same idiom `search_next` uses internally, so a lone
+     match keeps being found. An uncompilable regex (the user mid-typing
+     `(`) reports "no match" instead of erroring.
+   - The focused match lands in `RenderableContent.search_match`
+     (absolute grid coordinates, like the cells); the view highlights it
+     with the selection's fg/bg swap. `Action::SearchResult(bool)` tells
+     the embedder whether anything was found.
+   - Search commands classify as content-changing (they scroll and move
+     the highlight), so the existing sync/redraw pipeline covers them.

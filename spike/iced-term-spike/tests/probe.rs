@@ -6,10 +6,12 @@
 
 use alacritty_terminal::event::Event as AEvent;
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::selection::SelectionType;
 use alacritty_terminal::term::ClipboardType;
 use iced::Size;
 use iced::keyboard::Modifiers;
 use iced_term::TermMode;
+use iced_term::actions::Action;
 use iced_term::backend::{Backend, Command, LinkAction, MouseButton};
 use iced_term::settings::BackendSettings;
 use std::time::{Duration, Instant};
@@ -231,6 +233,37 @@ fn url_regex_hover_match() {
         probe.backend.renderable_content().hovered_url.as_deref(),
         Some("http://localhost:5173/x")
     );
+}
+
+/// A finished mouse selection surfaces its text for PRIMARY (VTE publishes
+/// the selection internally; here it must round-trip as an Action). The
+/// multi-line case pins the newline handling — the naive cell-walk this
+/// replaced glued lines together.
+#[test]
+fn selection_release_publishes_text() {
+    let mut probe = Probe::spawn(r#"printf "abc def\nghi"; sleep 2"#);
+    assert!(probe.wait(5, |text, _, _| text.contains("ghi")));
+
+    // Default TerminalSize has 1.0×1.0 cells, so pixels == grid coords:
+    // drag from (0,0) to line 1, column 2 (right side → inclusive).
+    probe
+        .backend
+        .handle(Command::SelectStart(SelectionType::Simple, (0.0, 0.0)));
+    probe.backend.handle(Command::SelectUpdate((2.9, 1.0)));
+    let action = probe.backend.handle(Command::SelectRelease);
+    assert_eq!(
+        action,
+        Action::PublishSelection("abc def\nghi".into()),
+        "selection text did not round-trip; visible:\n{}",
+        probe.visible_text()
+    );
+
+    // A plain click (empty selection) must not publish anything.
+    probe
+        .backend
+        .handle(Command::SelectStart(SelectionType::Simple, (0.0, 0.0)));
+    let action = probe.backend.handle(Command::SelectRelease);
+    assert_eq!(action, Action::Ignore);
 }
 
 /// Resize reflows the PTY and the grid (TuxFlow's wrap-rejoin logic reads

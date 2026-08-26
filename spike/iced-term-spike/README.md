@@ -35,9 +35,9 @@ those needs.
 
 ### Confirmed by code inspection
 
-- **Copy/paste bindings** — Ctrl+Shift+C/V default on Linux, same as TuxFlow's VTE setup.
-- **Selection** — drag/word/line selection implemented in the widget; copy writes the Standard clipboard.
-- **PRIMARY selection** — iced 0.14 has `clipboard::write_primary`/`read_primary` tasks; the demo app routes OSC 52 `Selection`-type copies there. Auto-publishing *drag selections* to PRIMARY (VTE does this) needs a small fork addition — the plumbing exists.
+- **Copy/paste bindings** — Ctrl+Shift+C/V default on Linux, same as TuxFlow's VTE setup. Paste respects bracketed-paste mode (fork patch 7; upstream wrote raw bytes).
+- **Selection** — drag/word/line selection implemented in the widget; copy extracts via alacritty's `selection_to_string` (multi-line copies keep their newlines — fork patch 7).
+- **PRIMARY selection** — ~~needs a small fork addition~~ done (fork patch 7): a finished selection gesture surfaces as `Action::PublishSelection` → `clipboard::write_primary`, middle-click pastes PRIMARY, and OSC 52 `Selection`-type copies route there too. Pinned by the `selection_release_publishes_text` probe.
 - **Exit caveat** — a signal-killed child yields `Exit` without a code (VTE reports a waitpid status). Auto-restart logic would treat "no code" as abnormal exit; workable.
 - **TERM is the embedder's job** — found live when `top` couldn't enter the alternate screen: nothing in the stack sets `TERM` for the PTY children (VTE does this for you). The demo app now calls `alacritty_terminal::tty::setup_env()` like Alacritty's `main()` does.
 
@@ -70,7 +70,9 @@ failure found was diagnosed to root cause and fixed in the fork the same day
       embedders must call `tty::setup_env()`; also note `top` never uses the
       alternate screen, so scrollback-during-top is correct in VTE too.)
 - [x] Selection: drag/double/triple-click, Ctrl+Shift+C/V, bracketed paste —
-      pass. Middle-click PRIMARY gap confirmed as scored.
+      pass. Middle-click PRIMARY gap confirmed as scored — then closed after
+      the walkthrough (fork patch 7): selections auto-publish to PRIMARY,
+      middle-click pastes it.
 - [x] Composer → focused terminal — pass.
 - [x] **OSC 52, both routes** — pass: plain ssh and tmux-mediated
       (`set-clipboard on`) copies land in the local clipboard, decoded, with

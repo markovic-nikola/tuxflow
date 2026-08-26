@@ -457,11 +457,15 @@ mod tests {
     /// reset on every restart.
     #[test]
     fn custom_command_overrides_same_named_detection() {
+        // Struct literals, never the mutator methods: those auto-save to
+        // the REAL ~/.config/tuxflow/projects.toml, and a test run once
+        // wiped Nikola's actual workspace that way.
         let mut saved = SavedProjects::default();
         let mut edited = pc("web");
         edited.open_in_browser = true;
-        saved.add_custom_command("k", edited);
-        saved.add_custom_command("k", pc("extra"));
+        saved
+            .custom_commands
+            .insert("k".into(), vec![edited, pc("extra")]);
 
         let merged = merge_saved(vec![pc("web"), pc("api")], &saved, "k");
         let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
@@ -474,9 +478,10 @@ mod tests {
     #[test]
     fn deleted_processes_stay_deleted() {
         let mut saved = SavedProjects::default();
-        saved.add_deleted_process("k", "api");
-        saved.add_deleted_process("k", "mine");
-        saved.add_custom_command("k", pc("mine"));
+        saved
+            .deleted_processes
+            .insert("k".into(), vec!["api".into(), "mine".into()]);
+        saved.custom_commands.insert("k".into(), vec![pc("mine")]);
 
         let merged = merge_saved(vec![pc("web"), pc("api")], &saved, "k");
         let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
@@ -487,7 +492,9 @@ mod tests {
     #[test]
     fn saved_order_applies() {
         let mut saved = SavedProjects::default();
-        saved.set_process_order("k", vec!["api".into(), "web".into()]);
+        saved
+            .process_order
+            .insert("k".into(), vec!["api".into(), "web".into()]);
 
         let merged = merge_saved(vec![pc("web"), pc("api"), pc("new")], &saved, "k");
         let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();

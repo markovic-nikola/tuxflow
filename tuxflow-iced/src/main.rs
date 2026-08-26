@@ -185,10 +185,19 @@ enum Event {
 
 impl App {
     fn new() -> (Self, Task<Event>) {
+        let saved = SavedProjects::load();
+        // Insurance: keep a .bak of the last known-good (non-empty)
+        // workspace before this process ever saves. One wipe was enough.
+        if !saved.directories.is_empty() {
+            if let Some(dir) = dirs::config_dir() {
+                let file = dir.join("tuxflow/projects.toml");
+                let _ = std::fs::copy(&file, file.with_extension("toml.bak"));
+            }
+        }
         let mut app = App {
             projects: Vec::new(),
             active: 0,
-            saved: SavedProjects::load(),
+            saved,
             composer: String::new(),
             add_project: None,
             add_command: None,

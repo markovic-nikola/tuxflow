@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use tuxflow::detect::detector::detect_stacks;
+use tuxflow_core::detect::detector::detect_stacks;
 
 #[test]
 fn detect_nodejs_npm() {

@@ -1,4 +1,4 @@
-use tuxflow::config::projects::SavedProjects;
+use tuxflow_core::config::projects::SavedProjects;
 
 /// Serialising the same state twice must produce byte-identical TOML.
 ///

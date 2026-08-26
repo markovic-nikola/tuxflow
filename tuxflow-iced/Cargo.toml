@@ -1,0 +1,13 @@
+[package]
+name = "tuxflow-iced"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "TuxFlow's iced shell — the GNOME-stack exit, built on the vendored iced_term fork"
+
+[dependencies]
+tuxflow-core = { path = "../tuxflow-core" }
+iced_term = { path = "../vendor/iced_term" }
+iced = "0.14.0"
+alacritty_terminal = "0.25.1"

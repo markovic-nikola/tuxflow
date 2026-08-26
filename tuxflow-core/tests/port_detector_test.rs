@@ -1,4 +1,4 @@
-use tuxflow::util::port_detector::PortDetector;
+use tuxflow_core::util::port_detector::PortDetector;
 
 #[test]
 fn detect_http_url() {
@@ -395,7 +395,7 @@ fn sticky_does_not_overwrite() {
 
 #[test]
 fn remap_url_port_replaces_exact_port_only() {
-    use tuxflow::util::port_detector::remap_url_port;
+    use tuxflow_core::util::port_detector::remap_url_port;
     assert_eq!(
         remap_url_port("http://localhost:3000/", 3000, 4123),
         "http://localhost:4123/"
@@ -423,7 +423,7 @@ fn remap_url_port_replaces_exact_port_only() {
 
 #[test]
 fn clicked_url_rewrites_through_tunnel_map() {
-    use tuxflow::util::port_detector::rewrite_clicked_url;
+    use tuxflow_core::util::port_detector::rewrite_clicked_url;
     // Remapped forward: the printed port must become the local end.
     assert_eq!(
         rewrite_clicked_url("http://localhost:8000/login", |p| {
@@ -460,7 +460,7 @@ fn clicked_url_rewrites_through_tunnel_map() {
 
 #[test]
 fn clicked_url_leaves_foreign_and_portless_urls_alone() {
-    use tuxflow::util::port_detector::rewrite_clicked_url;
+    use tuxflow_core::util::port_detector::rewrite_clicked_url;
     // Public URLs mean what they say — the lookup must not even run,
     // or the click would spawn a tunnel to a port nothing local needs.
     assert_eq!(

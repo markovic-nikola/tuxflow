@@ -106,6 +106,44 @@ pub struct IntegrationSettings {
     pub mcp_enabled: bool,
 }
 
+/// Editor choices shown in Settings → Tools, as (command, label). Shared
+/// by both shells so the dropdowns can't drift apart.
+pub const EDITOR_CHOICES: &[(&str, &str)] = &[
+    ("xdg-open", "System Default (xdg-open)"),
+    ("code", "VS Code (code)"),
+    ("cursor", "Cursor (cursor)"),
+    ("codium", "VSCodium (codium)"),
+    ("zed", "Zed (zed)"),
+    ("nvim", "Neovim (nvim)"),
+    ("vim", "Vim (vim)"),
+    ("hx", "Helix (hx)"),
+    ("nano", "Nano (nano)"),
+    ("emacs", "Emacs (emacs)"),
+    ("kate", "Kate (kate)"),
+    ("gedit", "GNOME Text Editor (gedit)"),
+    ("sublime_text", "Sublime Text (sublime_text)"),
+    ("idea", "IntelliJ IDEA (idea)"),
+];
+
+/// Terminal-app choices shown in Settings → Tools, as (command, label).
+pub const TERMINAL_CHOICES: &[(&str, &str)] = &[
+    ("xdg-open", "System Default (xdg-open)"),
+    ("gnome-terminal", "GNOME Terminal (gnome-terminal)"),
+    ("konsole", "Konsole (konsole)"),
+    ("alacritty", "Alacritty (alacritty)"),
+    ("kitty", "Kitty (kitty)"),
+    ("ghostty", "Ghostty (ghostty)"),
+    ("wezterm", "WezTerm (wezterm)"),
+    ("foot", "Foot (foot)"),
+    ("tilix", "Tilix (tilix)"),
+    ("xfce4-terminal", "Xfce Terminal (xfce4-terminal)"),
+    ("mate-terminal", "MATE Terminal (mate-terminal)"),
+    ("terminator", "Terminator (terminator)"),
+    ("st", "st (st)"),
+    ("urxvt", "urxvt (urxvt)"),
+    ("xterm", "xterm (xterm)"),
+];
+
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {

@@ -10,6 +10,7 @@
 mod keys;
 mod notify;
 mod processes;
+mod settings_ui;
 mod theme;
 
 use std::collections::HashMap;
@@ -32,6 +33,7 @@ use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_cl
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
 use theme::{CRASHED, DIM, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT, TEXT_SECONDARY, accent_for};
+use tuxflow_core::config::settings::AppSettings;
 
 /// Ports-poll cadence: fast while a run is settling (a new forward just
 /// opened), backed off once nothing new appears (GTK behavior).
@@ -40,22 +42,44 @@ const POLL_SLOW: Duration = Duration::from_secs(30);
 /// Provisional badges get this long to firm up before auto-open fires.
 const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
 
+/// GTK sidebar parity: AdwOverlaySplitView sizes the sidebar at a quarter
+/// of the window, clamped to the GTK app's min/max (window.rs: 220–400).
+const SIDEBAR_FRACTION: f32 = 0.25;
+const SIDEBAR_MIN: f32 = 220.0;
+const SIDEBAR_MAX: f32 = 400.0;
+
 fn main() -> iced::Result {
     env_logger::init();
     // VTE set TERM for its children silently; on this stack it is the
     // embedder's job (spike finding — top/less break without it).
     alacritty_terminal::tty::setup_env();
 
+    // GTK parity: reopen with the last session's geometry, saved on close.
+    // Position is X11 — Wayland ignores Specific placement and only honors
+    // size and maximized. A saved position is passed even when maximized so
+    // the window maximizes on the monitor it was closed on.
+    let window = tuxflow_core::config::settings::AppSettings::load().window;
     iced::application(App::new, App::update, App::view)
         .theme(|_: &App| iced::Theme::Dark)
         .title(|app: &App| match app.active_project() {
             Some(p) => format!("TuxFlow — {}", p.name),
             None => String::from("TuxFlow"),
         })
-        .window_size(Size {
-            width: 1280.0,
-            height: 760.0,
+        .window(iced::window::Settings {
+            size: Size {
+                width: window.width.max(1) as f32,
+                height: window.height.max(1) as f32,
+            },
+            maximized: window.maximized,
+            position: match (window.x, window.y) {
+                (Some(x), Some(y)) => {
+                    iced::window::Position::Specific(iced::Point::new(x as f32, y as f32))
+                }
+                _ => iced::window::Position::Default,
+            },
+            ..Default::default()
         })
+        .exit_on_close_request(false)
         .subscription(App::subscription)
         .run()
 }
@@ -117,9 +141,12 @@ struct App {
     active: usize,
     saved: SavedProjects,
     app_keys: AppKeys,
-    notifications: tuxflow_core::config::settings::NotificationSettings,
-    font_size: f32,
-    scrollback: usize,
+    /// The shared settings.toml — this shell's single authority. The
+    /// settings view mutates it and saves immediately on every change,
+    /// like the GTK dialog's per-row save points.
+    settings: AppSettings,
+    /// Settings view state; `Some` = the main pane shows settings.
+    settings_ui: Option<settings_ui::State>,
     composer: String,
     search_open: bool,
     search_query: String,
@@ -131,6 +158,15 @@ struct App {
     palette_input: iced::widget::Id,
     add_project: Option<String>,
     add_command: Option<ProcessForm>,
+    /// Live window geometry, saved on close. The sidebar takes a fraction
+    /// of the width (GTK parity). Position stays `None` until the first
+    /// Moved event — Wayland never sends one, and an untracked position
+    /// must not overwrite the saved one.
+    window_size: Size,
+    window_pos: Option<iced::Point>,
+    /// Bumped on every move/resize; the debounced save only fires for the
+    /// newest generation, so a drag writes once, not per pixel.
+    geometry_gen: u64,
     next_project_id: u64,
     next_term_id: u64,
 }
@@ -142,6 +178,19 @@ type ProbeResult = Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (St
 #[derive(Debug, Clone)]
 enum Event {
     Terminal(iced_term::Event),
+    WindowResized(Size),
+    WindowMoved(iced::Point),
+    WindowCloseRequested(iced::window::Id),
+    WindowClose {
+        id: iced::window::Id,
+        maximized: bool,
+    },
+    /// Debounced geometry persistence — `make dev-iced` kills the process
+    /// on rebuild, so waiting for a clean close would lose every move.
+    GeometrySettled(u64),
+    SaveGeometry(bool),
+    OpenSettings,
+    SettingsMsg(settings_ui::Msg),
     Probed {
         project: u64,
         result: ProbeResult,
@@ -230,7 +279,11 @@ enum Event {
 
 impl App {
     fn new() -> (Self, Task<Event>) {
-        let settings = tuxflow_core::config::settings::AppSettings::load();
+        let settings = AppSettings::load();
+        theme::set_accents(
+            &settings.appearance.local_accent_color,
+            &settings.appearance.remote_accent_color,
+        );
         let saved = SavedProjects::load();
         // Insurance: keep a .bak of the last known-good (non-empty)
         // workspace before this process ever saves. One wipe was enough.
@@ -245,9 +298,7 @@ impl App {
             active: 0,
             saved,
             app_keys: AppKeys::from_settings(&settings.keybindings),
-            notifications: settings.notifications.clone(),
-            font_size: (settings.appearance.font_size as f32).clamp(8.0, 32.0),
-            scrollback: settings.appearance.scrollback_lines as usize,
+            settings_ui: None,
             composer: String::new(),
             // Headless design/debug hook: force panels open for screenshots.
             search_open: std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("search"),
@@ -260,8 +311,15 @@ impl App {
             palette_input: iced::widget::Id::unique(),
             add_project: None,
             add_command: None,
+            window_size: Size {
+                width: settings.window.width.max(1) as f32,
+                height: settings.window.height.max(1) as f32,
+            },
+            window_pos: None,
+            geometry_gen: 0,
             next_project_id: 0,
             next_term_id: 0,
+            settings,
         };
 
         let mut tasks = Vec::new();
@@ -284,7 +342,7 @@ impl App {
         };
         // GTK sidebar parity: recently used projects first (stable for
         // never-used ones, which keep their saved order).
-        if settings.sidebar.recent_first {
+        if app.settings.sidebar.recent_first {
             let mut indexed: Vec<(usize, String)> = keys.into_iter().enumerate().collect();
             let saved = &app.saved;
             indexed.sort_by_key(|(i, k)| (std::cmp::Reverse(saved.get_last_used(k)), *i));
@@ -295,6 +353,9 @@ impl App {
         }
         if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("edit") {
             tasks.push(Task::done(Event::OpenEditProcess));
+        }
+        if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("settings") {
+            tasks.push(Task::done(Event::OpenSettings));
         }
         tasks.push(Task::done(Event::GitTick));
 
@@ -436,14 +497,16 @@ impl App {
         self.next_term_id += 1;
 
         let reservations = self.app_keys.reservations();
-        let font_size = self.font_size;
-        let scrollback = self.scrollback;
+        let font = self.term_font();
+        let scrollback = self.settings.appearance.scrollback_lines as usize;
+        let palette = theme::terminal_palette(&self.settings.appearance.terminal_theme);
         let project = &mut self.projects[pidx];
         let settings = processes::spawn_settings(
             &project.location,
             &mut project.entries[index],
-            font_size,
+            font,
             scrollback,
+            palette,
         );
         let entry = &mut project.entries[index];
         match iced_term::Terminal::new(id, settings) {
@@ -602,17 +665,17 @@ impl App {
         let name = entry.config.name.clone();
         match &entry.status {
             Status::Crashed(code) => {
-                notify::crash(&self.notifications, &project_name, &name, *code)
+                notify::crash(&self.settings.notifications, &project_name, &name, *code)
             }
             Status::Restarting(attempt) => {
-                notify::auto_restart(&self.notifications, &project_name, &name, *attempt)
+                notify::auto_restart(&self.settings.notifications, &project_name, &name, *attempt)
             }
             Status::Reconnecting(_) if !entry.outage_notified => {
                 entry.outage_notified = true;
                 notify::disconnect(&project_name, &name);
             }
             Status::Stopped if !stopping_was => {
-                notify::finish(&self.notifications, &project_name, &name)
+                notify::finish(&self.settings.notifications, &project_name, &name)
             }
             _ => {}
         }
@@ -771,6 +834,26 @@ impl App {
             AppAction::FontDecrease => self.change_font(-1.0),
             AppAction::MoveProcessUp => self.move_selected(-1),
             AppAction::MoveProcessDown => self.move_selected(1),
+            AppAction::Settings => {
+                self.settings_ui = Some(settings_ui::State::new(&self.settings));
+                Task::none()
+            }
+            AppAction::SelectProcessN(n) => {
+                if let Some(project) = self.projects.get_mut(self.active)
+                    && (n as usize) <= project.entries.len()
+                {
+                    project.selected = n as usize - 1;
+                    return self.focus_selected_terminal();
+                }
+                Task::none()
+            }
+            AppAction::SelectProjectN(n) => {
+                if (n as usize) <= self.projects.len() {
+                    self.active = n as usize - 1;
+                    return self.focus_selected_terminal();
+                }
+                Task::none()
+            }
         }
     }
 
@@ -820,21 +903,73 @@ impl App {
         Task::none()
     }
 
-    fn change_font(&mut self, delta: f32) -> Task<Event> {
-        self.font_size = (self.font_size + delta).clamp(8.0, 32.0);
-        let size = self.font_size;
+    /// The terminal font per current settings. `Font::with_name` wants
+    /// `&'static str`; family changes are rare, so leaking one small
+    /// string per change is the accepted iced idiom.
+    fn term_font(&self) -> iced_term::settings::FontSettings {
+        let a = &self.settings.appearance;
+        let family = if a.font_family.is_empty() || a.font_family == "Monospace" {
+            iced::font::Family::Monospace
+        } else {
+            iced::font::Family::Name(Box::leak(a.font_family.clone().into_boxed_str()))
+        };
+        let weight = match a.font_weight {
+            0..=149 => iced::font::Weight::Thin,
+            150..=249 => iced::font::Weight::ExtraLight,
+            250..=349 => iced::font::Weight::Light,
+            350..=449 => iced::font::Weight::Normal,
+            450..=549 => iced::font::Weight::Medium,
+            550..=649 => iced::font::Weight::Semibold,
+            650..=749 => iced::font::Weight::Bold,
+            750..=849 => iced::font::Weight::ExtraBold,
+            _ => iced::font::Weight::Black,
+        };
+        iced_term::settings::FontSettings {
+            size: (a.font_size as f32).clamp(6.0, 32.0),
+            // GTK's line_height 1.0 is "normal"; iced_term's normal is a
+            // 1.3 scale factor — map proportionally.
+            scale_factor: ((a.line_height as f32) * 1.3).clamp(1.0, 2.6),
+            font_type: iced::Font {
+                family,
+                weight,
+                ..iced::Font::MONOSPACE
+            },
+        }
+    }
+
+    /// Push the current font settings into every live terminal.
+    fn broadcast_font(&mut self) {
+        let font = self.term_font();
         for project in &mut self.projects {
             for entry in &mut project.entries {
                 if let Some(term) = entry.terminal.as_mut() {
-                    term.handle(iced_term::Command::ChangeFont(
-                        iced_term::settings::FontSettings {
-                            size,
-                            ..Default::default()
-                        },
-                    ));
+                    term.handle(iced_term::Command::ChangeFont(font.clone()));
                 }
             }
         }
+    }
+
+    /// Push the current terminal color scheme into every live terminal.
+    fn broadcast_theme(&mut self) {
+        let name = self.settings.appearance.terminal_theme.clone();
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if let Some(term) = entry.terminal.as_mut() {
+                    term.handle(iced_term::Command::ChangeTheme(Box::new(
+                        theme::terminal_palette(&name),
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Ctrl+= / Ctrl+- — persisted, so the size survives a relaunch (the
+    /// GTK app saves it from its settings dialog the same way).
+    fn change_font(&mut self, delta: f32) -> Task<Event> {
+        let a = &mut self.settings.appearance;
+        a.font_size = ((a.font_size as f32 + delta).clamp(8.0, 32.0)) as u32;
+        self.settings.save();
+        self.broadcast_font();
         Task::none()
     }
 
@@ -964,6 +1099,39 @@ impl App {
 
     fn update(&mut self, event: Event) -> Task<Event> {
         match event {
+            Event::WindowResized(size) => {
+                self.window_size = size;
+                self.debounce_geometry_save()
+            }
+            Event::WindowMoved(point) => {
+                self.window_pos = Some(point);
+                self.debounce_geometry_save()
+            }
+            Event::GeometrySettled(generation) => {
+                if generation != self.geometry_gen {
+                    return Task::none();
+                }
+                iced::window::latest()
+                    .and_then(|id| iced::window::is_maximized(id).map(Event::SaveGeometry))
+            }
+            Event::SaveGeometry(maximized) => {
+                self.save_window_state(maximized);
+                Task::none()
+            }
+            Event::OpenSettings => {
+                self.settings_ui = Some(settings_ui::State::new(&self.settings));
+                Task::none()
+            }
+            Event::SettingsMsg(msg) => self.handle_settings(msg),
+            Event::WindowCloseRequested(id) => {
+                // Maximized is queryable only, so fetch it before saving.
+                iced::window::is_maximized(id)
+                    .map(move |maximized| Event::WindowClose { id, maximized })
+            }
+            Event::WindowClose { id, maximized } => {
+                self.save_window_state(maximized);
+                iced::window::close(id)
+            }
             Event::Probed { project, result } => {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
@@ -1041,6 +1209,15 @@ impl App {
             Event::ToggleExpanded(project) => {
                 if let Some(pidx) = self.project_index(project) {
                     self.projects[pidx].expanded = !self.projects[pidx].expanded;
+                    // GTK parity: single-expand collapses the others when
+                    // one opens.
+                    if self.projects[pidx].expanded && self.settings.sidebar.single_project_expand {
+                        for (i, p) in self.projects.iter_mut().enumerate() {
+                            if i != pidx {
+                                p.expanded = false;
+                            }
+                        }
+                    }
                     let key = self.projects[pidx].key();
                     self.saved.set_expanded(&key, self.projects[pidx].expanded);
                     self.saved.save();
@@ -1180,6 +1357,22 @@ impl App {
                 Task::none()
             }
             Event::Hotkey(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                // Hotkey capture owns the keyboard while recording.
+                if let Some(state) = &mut self.settings_ui
+                    && let Some(action) = state.capturing
+                {
+                    return self.finish_capture(action, &key, modifiers);
+                }
+                // Esc closes settings like it closes the other panels.
+                if self.settings_ui.is_some()
+                    && matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    )
+                {
+                    self.settings_ui = None;
+                    return Task::none();
+                }
                 // Palette navigation first (its input consumes typing but
                 // not Esc/arrows).
                 if self.palette_open {
@@ -1747,11 +1940,23 @@ impl App {
         .style(theme::pill_button(LOCAL_ACCENT))
         .on_press(Event::OpenAddProject);
 
+        // The GTK header bar's gear, relocated: this shell has no header.
+        let gear = button(text("\u{2699}").size(14))
+            .padding([4, 9])
+            .style(theme::ghost(LOCAL_ACCENT))
+            .on_press(Event::OpenSettings);
+
         container(column![
-            scrollable(col).height(Length::Fill).width(Length::Fill),
-            container(add).padding([8, 10]),
+            scrollable(col)
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::new().width(4).scroller_width(4),
+                ))
+                .style(theme::overlay_scrollbar)
+                .height(Length::Fill)
+                .width(Length::Fill),
+            container(row![add, gear].spacing(6).align_y(iced::Alignment::Center)).padding([8, 10]),
         ])
-        .width(268)
+        .width((self.window_size.width * SIDEBAR_FRACTION).clamp(SIDEBAR_MIN, SIDEBAR_MAX))
         .height(Length::Fill)
         .style(theme::ground)
         .into()
@@ -1786,8 +1991,7 @@ impl App {
             button(
                 row![
                     icon,
-                    text(&project.name).size(13).font(bold()).color(TEXT),
-                    iced::widget::space::horizontal(),
+                    clipped_label(text(&project.name).size(13).font(bold()).color(TEXT)),
                     container(text(counter).size(10))
                         .padding([2, 8])
                         .style(theme::pill),
@@ -1886,11 +2090,16 @@ impl App {
 
         let mut content = row![
             text(dot).size(10).color(dot_color),
-            text(name).size(12.5),
-            iced::widget::space::horizontal(),
+            clipped_label(text(name).size(12.5)),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
+
+        // Ctrl+1..9 hints (settings-gated) on the active project's rows —
+        // the chords the digit switcher actually honors.
+        if self.settings.sidebar.show_keybind_hints && pidx == self.active && index < 9 {
+            content = content.push(text(format!("\u{2303}{}", index + 1)).size(9).color(DIM));
+        }
 
         if let Some(port) = project.ports.get_port(&entry.config.name) {
             let local = project.port_map.get(&port).copied().unwrap_or(port);
@@ -1934,6 +2143,9 @@ impl App {
     }
 
     fn view_main(&'_ self) -> Element<'_, Event> {
+        if let Some(state) = &self.settings_ui {
+            return settings_ui::view(state, &self.settings).map(Event::SettingsMsg);
+        }
         if let Some(form) = &self.add_command {
             return self.view_add_command(form);
         }
@@ -2047,8 +2259,7 @@ impl App {
             container(text(status_word).size(10.5))
                 .padding([3, 10])
                 .style(theme::status_pill(status_color)),
-            text(title).size(11).color(DIM),
-            iced::widget::space::horizontal(),
+            clipped_label(text(title).size(11).color(DIM)),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
@@ -2211,7 +2422,10 @@ impl App {
 
         col = col.push(container(body).width(Length::Fill).height(Length::Fill));
 
-        if entry.config.category == ProcessCategory::Agent && entry.terminal.is_some() {
+        if entry.config.category == ProcessCategory::Agent
+            && entry.terminal.is_some()
+            && self.settings.tools.agent_composer
+        {
             let placeholder = format!("message to {}\u{2026}", entry.config.name);
             col = col.push(hline()).push(
                 container(
@@ -2401,6 +2615,319 @@ impl App {
             .into()
     }
 
+    /// Arm (or re-arm) the debounced geometry save: one write ~1 s after
+    /// the last move/resize. Without it, only a clean close would save —
+    /// and `make dev-iced` (cargo watch) kills the process on rebuild.
+    fn debounce_geometry_save(&mut self) -> Task<Event> {
+        self.geometry_gen += 1;
+        let generation = self.geometry_gen;
+        Task::perform(tokio::time::sleep(Duration::from_secs(1)), move |_| {
+            Event::GeometrySettled(generation)
+        })
+    }
+
+    /// A capture-mode keypress from the hotkeys page: bind it, or report
+    /// the conflict, GTK-style.
+    fn finish_capture(
+        &mut self,
+        action: tuxflow_core::config::keybindings::ShortcutAction,
+        key: &iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Event> {
+        use iced::keyboard::Key;
+        let Some(state) = &mut self.settings_ui else {
+            return Task::none();
+        };
+        // Esc cancels; lone modifiers keep listening.
+        if matches!(key.as_ref(), Key::Named(iced::keyboard::key::Named::Escape)) {
+            state.capturing = None;
+            return Task::none();
+        }
+        let Some(display) = keys::chord_string(key, modifiers) else {
+            return Task::none();
+        };
+        // Conflict: some *other* action already holds this chord.
+        let conflict = tuxflow_core::config::keybindings::action_metadata()
+            .into_iter()
+            .find(|(other, _, _)| {
+                *other != action && self.settings.keybindings.get(*other) == display
+            });
+        if let Some((_, holder, _)) = conflict {
+            state.capturing = None;
+            state.conflict = Some((action, holder));
+            return Task::none();
+        }
+        state.capturing = None;
+        state.conflict = None;
+        self.settings.keybindings.set(action, display);
+        self.settings.save();
+        self.rebuild_keys();
+        Task::none()
+    }
+
+    /// New chords take effect now: rebuild the matcher and re-reserve in
+    /// every live terminal (reservations are additive; a stale reservation
+    /// maps to an app action that no longer matches, which is inert).
+    fn rebuild_keys(&mut self) {
+        self.app_keys = AppKeys::from_settings(&self.settings.keybindings);
+        let reservations = self.app_keys.reservations();
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if let Some(term) = entry.terminal.as_mut() {
+                    term.handle(iced_term::Command::AddBindings(reservations.clone()));
+                }
+            }
+        }
+    }
+
+    /// One settings change: mutate, save immediately (GTK-dialog manners),
+    /// and apply live wherever this shell has the consumer.
+    fn handle_settings(&mut self, msg: settings_ui::Msg) -> Task<Event> {
+        use settings_ui::Msg;
+        // Interacting clears stale capture feedback.
+        if let Some(state) = &mut self.settings_ui
+            && !matches!(msg, Msg::Capture(_))
+        {
+            state.conflict = None;
+        }
+        match msg {
+            Msg::Close => {
+                self.settings_ui = None;
+                return self.focus_selected_terminal();
+            }
+            Msg::Page(page) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.page = page;
+                    state.capturing = None;
+                    state.copied = None;
+                    state.sound_error = None;
+                }
+                return Task::none();
+            }
+            Msg::ColorScheme(label) => {
+                self.settings.appearance.theme = label.to_lowercase();
+            }
+            Msg::AccentApp(label) => {
+                self.settings.appearance.accent_color = accent_name_for_label(label);
+            }
+            Msg::AccentLocal(label) => {
+                self.settings.appearance.local_accent_color = accent_name_for_label(label);
+                self.apply_accents();
+            }
+            Msg::AccentRemote(label) => {
+                self.settings.appearance.remote_accent_color = accent_name_for_label(label);
+                self.apply_accents();
+            }
+            Msg::TermTheme(label) => {
+                let idx = tuxflow_core::config::palette::theme_choices()
+                    .iter()
+                    .position(|l| *l == label)
+                    .unwrap_or(0);
+                self.settings.appearance.terminal_theme =
+                    tuxflow_core::config::palette::theme_name(idx as u32).to_string();
+                self.broadcast_theme();
+            }
+            Msg::FontFamilyDraft(value) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.font_family_draft = value;
+                }
+                return Task::none();
+            }
+            Msg::FontFamilyApply => {
+                if let Some(state) = &self.settings_ui {
+                    let family = state.font_family_draft.trim();
+                    self.settings.appearance.font_family = if family.is_empty() {
+                        String::from("Monospace")
+                    } else {
+                        family.to_string()
+                    };
+                }
+                self.broadcast_font();
+            }
+            Msg::FontSize(v) => {
+                self.settings.appearance.font_size = v;
+                self.broadcast_font();
+            }
+            Msg::FontWeight(v) => {
+                self.settings.appearance.font_weight = v;
+                self.broadcast_font();
+            }
+            Msg::BoldWeight(v) => {
+                self.settings.appearance.bold_font_weight = v;
+            }
+            Msg::LineHeight(v) => {
+                self.settings.appearance.line_height = v;
+                self.broadcast_font();
+            }
+            Msg::LetterSpacing(v) => {
+                self.settings.appearance.letter_spacing = v;
+            }
+            Msg::Scrollback(v) => {
+                self.settings.appearance.scrollback_lines = v;
+            }
+            Msg::SingleExpand(v) => {
+                self.settings.sidebar.single_project_expand = v;
+                if v {
+                    self.collapse_all_but_active();
+                }
+            }
+            Msg::AutoHide(v) => self.settings.sidebar.auto_hide_sidebar = v,
+            Msg::KeybindHints(v) => self.settings.sidebar.show_keybind_hints = v,
+            Msg::RecentFirst(v) => {
+                self.settings.sidebar.recent_first = v;
+                if v {
+                    self.sort_projects_recent_first();
+                }
+            }
+            Msg::NotifyCrash(v) => self.settings.notifications.on_crash = v,
+            Msg::NotifyRestart(v) => self.settings.notifications.on_auto_restart = v,
+            Msg::NotifyFileWatch(v) => self.settings.notifications.on_file_watch_restart = v,
+            Msg::NotifyFinish(v) => self.settings.notifications.on_process_finish = v,
+            Msg::NotifyAgentIdle(v) => self.settings.notifications.on_agent_idle = v,
+            Msg::NotifySilenceFallback(v) => {
+                self.settings.notifications.on_agent_idle_silence_fallback = v;
+            }
+            Msg::IdleThreshold(v) => self.settings.notifications.agent_idle_silence_seconds = v,
+            Msg::SuppressFocused(v) => self.settings.notifications.suppress_when_focused = v,
+            Msg::SoundEnabled(v) => self.settings.notifications.sound_enabled = v,
+            Msg::Sound(label) => {
+                if let Some(id) = sound_id_for_label(label) {
+                    self.settings.notifications.sound_name = id;
+                }
+            }
+            Msg::AgentSound(agent, label) => {
+                let value = sound_id_for_label(label);
+                match agent {
+                    0 => self.settings.notifications.claude_sound_name = value,
+                    1 => self.settings.notifications.codex_sound_name = value,
+                    _ => self.settings.notifications.gemini_sound_name = value,
+                }
+            }
+            Msg::TestNotification => {
+                notify::test(&self.settings.notifications);
+                return Task::none();
+            }
+            Msg::PreviewSound(agent) => {
+                let n = &self.settings.notifications;
+                let id = match agent {
+                    Some(0) => n.claude_sound_name.clone(),
+                    Some(1) => n.codex_sound_name.clone(),
+                    Some(_) => n.gemini_sound_name.clone(),
+                    None => None,
+                }
+                .unwrap_or_else(|| n.sound_name.clone());
+                let result = tuxflow_core::util::sounds::play_sound(&id);
+                if let Some(state) = &mut self.settings_ui {
+                    state.sound_error = result.err();
+                }
+                return Task::none();
+            }
+            Msg::Capture(action) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.conflict = None;
+                    state.capturing = Some(action);
+                }
+                return Task::none();
+            }
+            Msg::ResetKeys => {
+                self.settings.keybindings =
+                    tuxflow_core::config::keybindings::KeybindingsSettings::default();
+                self.rebuild_keys();
+            }
+            Msg::Composer(v) => self.settings.tools.agent_composer = v,
+            Msg::RemoteMic(v) => self.settings.tools.remote_microphone = v,
+            Msg::Editor(label) => {
+                if let Some((cmd, _)) = tuxflow_core::config::settings::EDITOR_CHOICES
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                {
+                    self.settings.tools.default_editor = cmd.to_string();
+                }
+            }
+            Msg::ReuseEditor(v) => self.settings.tools.reuse_editor_window = v,
+            Msg::TerminalApp(label) => {
+                if let Some((cmd, _)) = tuxflow_core::config::settings::TERMINAL_CHOICES
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                {
+                    self.settings.tools.default_terminal = cmd.to_string();
+                }
+            }
+            Msg::McpEnabled(v) => self.settings.integrations.mcp_enabled = v,
+            Msg::ToggleSetup(idx) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.setup_open = if state.setup_open == Some(idx) {
+                        None
+                    } else {
+                        Some(idx)
+                    };
+                    state.copied = None;
+                }
+                return Task::none();
+            }
+            Msg::CopySetup(tool, config) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.copied = Some(tool);
+                }
+                return iced::clipboard::write(config.to_string());
+            }
+            Msg::OpenSource => {
+                if let Err(e) = open::that("https://github.com/markovic-nikola/tuxflow") {
+                    log::warn!("open source url: {e}");
+                }
+                return Task::none();
+            }
+        }
+        self.settings.save();
+        Task::none()
+    }
+
+    fn apply_accents(&mut self) {
+        theme::set_accents(
+            &self.settings.appearance.local_accent_color,
+            &self.settings.appearance.remote_accent_color,
+        );
+    }
+
+    /// Single-expand just switched on: only the active project stays open.
+    fn collapse_all_but_active(&mut self) {
+        for (i, project) in self.projects.iter_mut().enumerate() {
+            project.expanded = i == self.active;
+        }
+    }
+
+    /// Live re-sort for the recent-first toggle (project ids keep timers
+    /// safe — only the vec order changes).
+    fn sort_projects_recent_first(&mut self) {
+        let active_id = self.projects.get(self.active).map(|p| p.id);
+        let saved = &self.saved;
+        self.projects
+            .sort_by_key(|p| std::cmp::Reverse(saved.get_last_used(&p.key())));
+        if let Some(id) = active_id
+            && let Some(idx) = self.projects.iter().position(|p| p.id == id)
+        {
+            self.active = idx;
+        }
+    }
+
+    /// GTK-parity close save: reload from disk first (the GTK app may have
+    /// saved while we ran — don't clobber its edits), then write only the
+    /// window geometry. A maximized close keeps the last normal size and
+    /// position on disk, so unmaximizing after relaunch restores them.
+    fn save_window_state(&self, maximized: bool) {
+        let mut settings = tuxflow_core::config::settings::AppSettings::load();
+        settings.window.maximized = maximized;
+        if !maximized {
+            settings.window.width = self.window_size.width as i32;
+            settings.window.height = self.window_size.height as i32;
+            if let Some(pos) = self.window_pos {
+                settings.window.x = Some(pos.x as i32);
+                settings.window.y = Some(pos.y as i32);
+            }
+        }
+        settings.save();
+    }
+
     fn subscription(&self) -> Subscription<Event> {
         let subs: Vec<_> = self
             .projects
@@ -2414,6 +2941,16 @@ impl App {
             // Ignored-status keys only — anything a focused widget consumed
             // never reaches the hotkeys.
             iced::keyboard::listen().map(Event::Hotkey),
+            iced::window::resize_events().map(|(_, size)| Event::WindowResized(size)),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Window(iced::window::Event::Moved(point)) => {
+                    Some(Event::WindowMoved(point))
+                }
+                _ => None,
+            }),
+            // exit_on_close_request(false): the close button routes through
+            // update so geometry gets saved first (GTK parity).
+            iced::window::close_requests().map(Event::WindowCloseRequested),
         ])
     }
 }
@@ -2479,6 +3016,36 @@ fn normalize_key(input: &str) -> String {
         ProjectLocation::Local(p) => ProjectLocation::Local(p.canonicalize().unwrap_or(p)).key(),
         remote => remote.key(),
     }
+}
+
+/// Palette label ("Green") back to its settings name ("green").
+fn accent_name_for_label(label: &str) -> String {
+    tuxflow_core::config::palette::ACCENT_COLORS
+        .iter()
+        .find(|c| c.label == label)
+        .map(|c| c.name)
+        .unwrap_or(tuxflow_core::config::palette::FALLBACK_LOCAL)
+        .to_string()
+}
+
+/// Sound label ("Sound 3") back to its id ("sound3"); "(Use default)" and
+/// unknown labels clear the override.
+fn sound_id_for_label(label: &str) -> Option<String> {
+    tuxflow_core::util::sounds::BUNDLED_SOUNDS
+        .iter()
+        .find(|b| b.label == label)
+        .map(|b| b.id.to_string())
+}
+
+/// A row label that soaks up the slack: it takes the leftover width and
+/// clips a too-long name at the edge, instead of wrapping or shoving the
+/// chips to its right out of the row (text paints past its bounds unless a
+/// clipping container cuts it).
+fn clipped_label(label: iced::widget::Text<'_>) -> Element<'_, Event> {
+    container(label.wrapping(text::Wrapping::None))
+        .width(Length::Fill)
+        .clip(true)
+        .into()
 }
 
 /// The port/URL to show for a process: on remote projects, mapped through

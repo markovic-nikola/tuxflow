@@ -4,118 +4,13 @@ use gtk4::gdk;
 use libadwaita as adw;
 
 use crate::config::settings::AppearanceSettings;
-
-struct AccentColor {
-    name: &'static str,
-    label: &'static str,
-    bg: &'static str,
-    fg: &'static str,
-    /// Text-weight accent, used against dark surfaces. Doubles as the
-    /// sidebar hue for local/remote projects, which is why a few entries
-    /// are tuned brighter than their `bg`: the sidebar reads them as text
-    /// and thin borders, not as filled buttons.
-    accent: &'static str,
-    /// Same hue darkened for light surfaces. `accent` is tuned for dark mode
-    /// and lands at 2-3:1 against libadwaita's light sidebar (#ebebeb) — these
-    /// hit ~4.2:1 while keeping the hue recognisable. `bg`/`fg` need no
-    /// variant: they are a filled button, not text, and already pair.
-    accent_light: &'static str,
-}
-
-const ACCENT_COLORS: &[AccentColor] = &[
-    AccentColor {
-        name: "green",
-        label: "Green",
-        bg: "#2ea043",
-        fg: "#ffffff",
-        // The sidebar's running-green since day one, and 6.7:1 on the dark
-        // sidebar where a button-weight #3fb950 only manages 4.2:1.
-        accent: "#73c991",
-        accent_light: "#1a7f37",
-    },
-    AccentColor {
-        name: "blue",
-        label: "Blue",
-        bg: "#3584e4",
-        fg: "#ffffff",
-        accent: "#5d9de9",
-        accent_light: "#1c6dcf",
-    },
-    AccentColor {
-        name: "purple",
-        label: "Purple",
-        bg: "#9141ac",
-        fg: "#ffffff",
-        accent: "#bd83d0",
-        accent_light: "#9141ac",
-    },
-    AccentColor {
-        name: "teal",
-        label: "Teal",
-        bg: "#2190a4",
-        fg: "#ffffff",
-        accent: "#27a8c0",
-        accent_light: "#1b7888",
-    },
-    AccentColor {
-        name: "orange",
-        label: "Orange",
-        bg: "#e66100",
-        fg: "#ffffff",
-        accent: "#ff6c00",
-        accent_light: "#b84e00",
-    },
-    AccentColor {
-        name: "red",
-        label: "Red",
-        bg: "#e01b24",
-        fg: "#ffffff",
-        accent: "#ee7379",
-        accent_light: "#db1a23",
-    },
-    AccentColor {
-        name: "pink",
-        label: "Pink",
-        bg: "#d56199",
-        fg: "#ffffff",
-        accent: "#db79a9",
-        accent_light: "#c5347a",
-    },
-    AccentColor {
-        name: "yellow",
-        label: "Yellow",
-        bg: "#c88800",
-        fg: "#ffffff",
-        // TuxFlow's logo gold — the default remote-project accent. On light
-        // surfaces it measures 1.24:1, hence the very different companion.
-        accent: "#ffce5c",
-        accent_light: "#9a6700",
-    },
-    AccentColor {
-        name: "slate",
-        label: "Slate",
-        bg: "#6e8898",
-        fg: "#ffffff",
-        accent: "#869ca9",
-        accent_light: "#5b7280",
-    },
-];
-
-/// Palette names used when a settings file omits or misspells a choice.
-/// `AppearanceSettings::default` carries the same names — it cannot reach
-/// them from here, since `config` builds without `ui` (see src/lib.rs).
-const FALLBACK_LOCAL: &str = "green";
-const FALLBACK_REMOTE: &str = "yellow";
-
-/// Status-dot hues that carry a fixed meaning rather than a chosen one,
-/// as (name, dark, light). They still need the light twin: both ambers
-/// measure ~2.2:1 on the light sidebar, under even the 3:1 that a dot has
-/// to clear. Running/stopped/crashed aren't here — running follows the
-/// project's accent, and the other two read in both schemes as they are.
-const STATUS_COLORS: &[(&str, &str, &str)] = &[
-    ("status_working", "#e0a030", "#b06a00"),
-    ("status_restarting", "#cca700", "#8a6f00"),
-];
+// The palette data (and its contrast tests) lives in core so both shells
+// share one authoritative set of hues; this module is the GTK half —
+// turning names into `@define-color` CSS at USER priority and re-rendering
+// when the scheme flips.
+use tuxflow_core::config::palette::{
+    ACCENT_COLORS, FALLBACK_LOCAL, FALLBACK_REMOTE, STATUS_COLORS,
+};
 
 /// The three accent choices in play: the app-wide accent plus the two
 /// sidebar hues that tell local and remote projects apart.
@@ -168,10 +63,7 @@ fn watch_color_scheme() {
 /// falls back to the shipped default rather than to nothing — the CSS
 /// colour has to be defined or the whole rule is skipped by GTK.
 fn sidebar_color(name: &str, fallback: &str, dark: bool) -> &'static str {
-    let by_name = |n: &str| ACCENT_COLORS.iter().find(|c| c.name == n);
-    let c = by_name(name)
-        .or_else(|| by_name(fallback))
-        .expect("fallback accent is in the palette");
+    let c = tuxflow_core::config::palette::accent_by_name(name, fallback);
     if dark { c.accent } else { c.accent_light }
 }
 
@@ -222,97 +114,17 @@ fn render() {
     });
 }
 
-pub fn color_choices() -> Vec<&'static str> {
-    ACCENT_COLORS.iter().map(|c| c.label).collect()
-}
-
-pub fn color_index(name: &str) -> u32 {
-    ACCENT_COLORS
-        .iter()
-        .position(|c| c.name == name)
-        .unwrap_or(0) as u32
-}
-
-pub fn color_name(index: u32) -> &'static str {
-    ACCENT_COLORS
-        .get(index as usize)
-        .map(|c| c.name)
-        .unwrap_or("green")
-}
+pub use tuxflow_core::config::palette::{
+    accent_choices as color_choices, accent_index as color_index, accent_name as color_name,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Relative luminance / WCAG contrast, so the palette's readability is
-    /// asserted rather than eyeballed.
-    fn luminance(hex: &str) -> f64 {
-        let h = hex.trim_start_matches('#');
-        let chan = |i: usize| {
-            let v = u8::from_str_radix(&h[i..i + 2], 16).expect("hex pair") as f64 / 255.0;
-            if v <= 0.03928 {
-                v / 12.92
-            } else {
-                ((v + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * chan(0) + 0.7152 * chan(2) + 0.0722 * chan(4)
-    }
-
-    fn contrast(a: &str, b: &str) -> f64 {
-        let (x, y) = (luminance(a), luminance(b));
-        let (hi, lo) = if x > y { (x, y) } else { (y, x) };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
-    /// The surface these are read against. `.sidebar` is
-    /// `alpha(@window_bg_color, 0.97)`, which screenshots measure as
-    /// #fafafa light / #222226 dark — both further from the foreground
-    /// than the values below, so asserting against these keeps a margin.
-    const LIGHT_SIDEBAR: &str = "#ebebeb";
-    const DARK_SIDEBAR: &str = "#303030";
-    /// Text-sized UI needs 4.5:1; allow a hair under for the derived hues.
-    const MIN_CONTRAST: f64 = 4.0;
-    /// A status dot is a graphic, not text — WCAG asks 3:1 of it.
-    const MIN_DOT_CONTRAST: f64 = 3.0;
-
-    #[test]
-    fn every_accent_is_readable_in_both_schemes() {
-        for c in ACCENT_COLORS {
-            let dark = contrast(c.accent, DARK_SIDEBAR);
-            let light = contrast(c.accent_light, LIGHT_SIDEBAR);
-            assert!(
-                dark >= MIN_CONTRAST,
-                "{} dark accent {} is {dark:.2}:1 on {DARK_SIDEBAR}",
-                c.name,
-                c.accent
-            );
-            assert!(
-                light >= MIN_CONTRAST,
-                "{} light accent {} is {light:.2}:1 on {LIGHT_SIDEBAR}",
-                c.name,
-                c.accent_light
-            );
-        }
-    }
-
-    /// The fixed status hues have no picker to escape a bad scheme with,
-    /// so they carry the same burden of proof as the palette.
-    #[test]
-    fn status_dots_are_visible_in_both_schemes() {
-        for (name, dark_hex, light_hex) in STATUS_COLORS {
-            let dark = contrast(dark_hex, DARK_SIDEBAR);
-            let light = contrast(light_hex, LIGHT_SIDEBAR);
-            assert!(
-                dark >= MIN_DOT_CONTRAST,
-                "{name} dark {dark_hex} is {dark:.2}:1 on {DARK_SIDEBAR}"
-            );
-            assert!(
-                light >= MIN_DOT_CONTRAST,
-                "{name} light {light_hex} is {light:.2}:1 on {LIGHT_SIDEBAR}"
-            );
-        }
-    }
+    // The contrast assertions (accents and status dots against both
+    // sidebar schemes) moved to core with the data they test —
+    // tuxflow-core/src/config/palette.rs. What stays here is the CSS half.
 
     fn accents(app: &str, local: &str, remote: &str) -> Accents {
         Accents {

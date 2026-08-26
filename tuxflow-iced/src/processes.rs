@@ -180,8 +180,9 @@ pub fn merge_saved(
 pub fn spawn_settings(
     location: &ProjectLocation,
     entry: &mut ProcessEntry,
-    font_size: f32,
+    font: iced_term::settings::FontSettings,
     scrollback: usize,
+    palette: iced_term::ColorPalette,
 ) -> iced_term::settings::Settings {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
     let config = &entry.config;
@@ -252,11 +253,8 @@ pub fn spawn_settings(
             scrolling_history: scrollback.max(1000),
             ..Default::default()
         },
-        font: iced_term::settings::FontSettings {
-            size: font_size,
-            ..Default::default()
-        },
-        theme: iced_term::settings::ThemeSettings::new(Box::new(crate::theme::terminal_palette())),
+        font,
+        theme: iced_term::settings::ThemeSettings::new(Box::new(palette)),
     }
 }
 

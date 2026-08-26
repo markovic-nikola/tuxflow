@@ -1095,22 +1095,7 @@ impl SettingsWindow {
 
         let s = settings.borrow();
 
-        let editors: &[(&str, &str)] = &[
-            ("xdg-open", "System Default (xdg-open)"),
-            ("code", "VS Code (code)"),
-            ("cursor", "Cursor (cursor)"),
-            ("codium", "VSCodium (codium)"),
-            ("zed", "Zed (zed)"),
-            ("nvim", "Neovim (nvim)"),
-            ("vim", "Vim (vim)"),
-            ("hx", "Helix (hx)"),
-            ("nano", "Nano (nano)"),
-            ("emacs", "Emacs (emacs)"),
-            ("kate", "Kate (kate)"),
-            ("gedit", "GNOME Text Editor (gedit)"),
-            ("sublime_text", "Sublime Text (sublime_text)"),
-            ("idea", "IntelliJ IDEA (idea)"),
-        ];
+        let editors = crate::config::settings::EDITOR_CHOICES;
         let editor_labels: Vec<&str> = editors.iter().map(|(_, label)| *label).collect();
         let editor_row = adw::ComboRow::builder()
             .title("Default Editor")
@@ -1146,23 +1131,7 @@ impl SettingsWindow {
         });
         group.add(&reuse_row);
 
-        let terminals: &[(&str, &str)] = &[
-            ("xdg-open", "System Default (xdg-open)"),
-            ("gnome-terminal", "GNOME Terminal (gnome-terminal)"),
-            ("konsole", "Konsole (konsole)"),
-            ("alacritty", "Alacritty (alacritty)"),
-            ("kitty", "Kitty (kitty)"),
-            ("ghostty", "Ghostty (ghostty)"),
-            ("wezterm", "WezTerm (wezterm)"),
-            ("foot", "Foot (foot)"),
-            ("tilix", "Tilix (tilix)"),
-            ("xfce4-terminal", "Xfce Terminal (xfce4-terminal)"),
-            ("mate-terminal", "MATE Terminal (mate-terminal)"),
-            ("terminator", "Terminator (terminator)"),
-            ("st", "st (st)"),
-            ("urxvt", "urxvt (urxvt)"),
-            ("xterm", "xterm (xterm)"),
-        ];
+        let terminals = crate::config::settings::TERMINAL_CHOICES;
         let terminal_labels: Vec<&str> = terminals.iter().map(|(_, label)| *label).collect();
         let terminal_row = adw::ComboRow::builder()
             .title("Default Terminal")
@@ -1220,33 +1189,13 @@ impl SettingsWindow {
 
         mcp_group.add(&mcp_enabled);
 
-        // Exposed MCP tools
+        // Exposed MCP tools — copy shared with the iced shell (core mcp::setup).
+        use tuxflow_core::mcp::setup;
         let mcp_tools = adw::ExpanderRow::builder()
             .title("Exposed MCP tools")
-            .subtitle("7 tools")
+            .subtitle(&format!("{} tools", setup::EXPOSED_TOOLS.len()))
             .build();
-        let tools = [
-            (
-                "list_processes",
-                "List all managed processes with their current status",
-            ),
-            (
-                "get_project_info",
-                "Get project overview with running/total counts",
-            ),
-            (
-                "get_process_status",
-                "Get detailed status of a process (PID, uptime, restarts)",
-            ),
-            (
-                "get_process_logs",
-                "Get recent terminal output from a process",
-            ),
-            ("restart_process", "Restart a managed process"),
-            ("stop_process", "Stop a running process"),
-            ("start_process", "Start a stopped process"),
-        ];
-        for (name, desc) in &tools {
+        for (name, desc) in setup::EXPOSED_TOOLS {
             let row = adw::ActionRow::builder()
                 .title(*name)
                 .subtitle(*desc)
@@ -1255,120 +1204,22 @@ impl SettingsWindow {
         }
         mcp_group.add(&mcp_tools);
 
-        // Setup: CLI tools
         let cli_setup = adw::ExpanderRow::builder()
             .title("Setup: CLI tools")
             .subtitle("Claude Code, Codex, OpenCode, Gemini CLI, Amp, Aider")
             .build();
-
-        let mcp_config = r#"{
-  "mcpServers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}"#;
-        let claude_code_config = r#"Per-project: add to .mcp.json
-Global: add to ~/.claude/settings.json
-
-{
-  "mcpServers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}
-
-Auto-detects which project you're in.
-If tuxflow-mcp is not in PATH, use the full path."#;
-        Self::add_setup_row(
-            &cli_setup,
-            "Claude Code",
-            ".mcp.json or ~/.claude/settings.json",
-            claude_code_config,
-        );
-
-        let codex_config = r#"codex --mcp-config '{"tuxflow":{"command":"tuxflow-mcp"}}'
-Or add to ~/.codex/config.toml under [mcp]"#;
-        Self::add_setup_row(
-            &cli_setup,
-            "Codex",
-            "CLI flag or ~/.codex/config.toml",
-            codex_config,
-        );
-        Self::add_setup_row(&cli_setup, "OpenCode", ".opencode/mcp.json", mcp_config);
-
-        let gemini_config = r#"gemini --mcp '{"tuxflow":{"command":"tuxflow-mcp"}}'
-Or add to ~/.gemini/settings.json under mcpServers"#;
-        Self::add_setup_row(
-            &cli_setup,
-            "Gemini CLI",
-            "CLI flag or ~/.gemini/settings.json",
-            gemini_config,
-        );
-        Self::add_setup_row(&cli_setup, "Amp", ".amp/mcp.json", mcp_config);
-
-        let aider_config = r#"Add to .aider.conf.yml:
-mcp-servers:
-  - command: tuxflow-mcp"#;
-        Self::add_setup_row(&cli_setup, "Aider", ".aider.conf.yml", aider_config);
+        for (tool, location, config) in setup::CLI_SETUP {
+            Self::add_setup_row(&cli_setup, tool, location, config);
+        }
         mcp_group.add(&cli_setup);
 
-        // Setup: IDEs & apps
         let ide_setup = adw::ExpanderRow::builder()
             .title("Setup: IDEs and apps")
             .subtitle("VS Code, Cursor, Windsurf, Zed, Cline, Claude Desktop")
             .build();
-
-        let vscode_config = r#"Add to .vscode/mcp.json:
-{
-  "servers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}"#;
-        Self::add_setup_row(&ide_setup, "VS Code", ".vscode/mcp.json", vscode_config);
-
-        let cursor_config = r#"Add to .cursor/mcp.json:
-{
-  "mcpServers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}"#;
-        Self::add_setup_row(&ide_setup, "Cursor", ".cursor/mcp.json", cursor_config);
-        Self::add_setup_row(&ide_setup, "Windsurf", ".windsurf/mcp.json", cursor_config);
-
-        let zed_config = r#"Add to Zed settings.json:
-{
-  "context_servers": {
-    "tuxflow": {
-      "command": { "path": "tuxflow-mcp" }
-    }
-  }
-}"#;
-        Self::add_setup_row(&ide_setup, "Zed", "Zed settings.json", zed_config);
-
-        let cline_config = r#"Add via Cline settings:
-  Command: tuxflow-mcp"#;
-        Self::add_setup_row(&ide_setup, "Cline", "Cline settings panel", cline_config);
-
-        let desktop_config = r#"Add to claude_desktop_config.json:
-{
-  "mcpServers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}"#;
-        Self::add_setup_row(
-            &ide_setup,
-            "Claude Desktop",
-            "claude_desktop_config.json",
-            desktop_config,
-        );
+        for (tool, location, config) in setup::IDE_SETUP {
+            Self::add_setup_row(&ide_setup, tool, location, config);
+        }
         mcp_group.add(&ide_setup);
 
         page.add(&mcp_group);

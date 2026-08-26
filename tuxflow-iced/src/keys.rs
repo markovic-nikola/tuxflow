@@ -1,6 +1,6 @@
 //! App-level keyboard shortcuts, honoring the user's keybinding strings
-//! from the shared settings.toml (read-only — that file belongs to both
-//! shells and this one never writes it).
+//! from the shared settings.toml (the settings window edits them; this
+//! module parses and matches them).
 //!
 //! Every chord the app handles is also RESERVED in each terminal via the
 //! fork's `BindingAction::Passthrough`: the stock bindings map the whole
@@ -16,6 +16,7 @@ use tuxflow_core::config::keybindings::KeybindingsSettings;
 pub enum AppAction {
     TerminalSearch,
     CommandPalette,
+    Settings,
     PrevProcess,
     NextProcess,
     PrevProject,
@@ -26,6 +27,10 @@ pub enum AppAction {
     FontDecrease,
     MoveProcessUp,
     MoveProcessDown,
+    /// Ctrl+1..9 — the GTK app's fixed process switcher.
+    SelectProcessN(u8),
+    /// Alt+1..9 — the GTK app's fixed project switcher.
+    SelectProjectN(u8),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -46,9 +51,10 @@ pub struct AppKeys {
 
 impl AppKeys {
     pub fn from_settings(kb: &KeybindingsSettings) -> Self {
-        let sources: [(&String, AppAction); 10] = [
+        let sources: [(&String, AppAction); 11] = [
             (&kb.terminal_search, AppAction::TerminalSearch),
             (&kb.command_palette, AppAction::CommandPalette),
+            (&kb.settings, AppAction::Settings),
             (&kb.prev_process, AppAction::PrevProcess),
             (&kb.next_process, AppAction::NextProcess),
             (&kb.prev_project, AppAction::PrevProject),
@@ -74,6 +80,24 @@ impl AppKeys {
             if let Some(chord) = parse(raw) {
                 bindings.push((chord, action));
             }
+        }
+        // The GTK app's fixed switchers: Ctrl+N processes, Alt+N projects.
+        for n in 1..=9u8 {
+            let digit = ChordKey::Char(n.to_string());
+            bindings.push((
+                Chord {
+                    modifiers: Modifiers::CTRL,
+                    key: digit.clone(),
+                },
+                AppAction::SelectProcessN(n),
+            ));
+            bindings.push((
+                Chord {
+                    modifiers: Modifiers::ALT,
+                    key: digit,
+                },
+                AppAction::SelectProjectN(n),
+            ));
         }
         Self { bindings }
     }
@@ -137,6 +161,67 @@ fn chord_matches(chord: &ChordKey, key: &Key) -> bool {
     }
 }
 
+/// The inverse of `parse`, for the settings capture UI: a pressed key +
+/// modifiers as the settings string form, or `None` for what a chord
+/// can't express (modifier-only presses, media keys &c.). The output must
+/// round-trip through `parse` — that's what the unit test pins.
+pub fn chord_string(key: &Key, modifiers: Modifiers) -> Option<String> {
+    let key_part = match key.as_ref() {
+        Key::Named(n) => match n {
+            Named::ArrowUp => "Up".to_string(),
+            Named::ArrowDown => "Down".to_string(),
+            Named::ArrowLeft => "Left".to_string(),
+            Named::ArrowRight => "Right".to_string(),
+            Named::Space => "Space".to_string(),
+            Named::Enter => "Return".to_string(),
+            Named::Tab => "Tab".to_string(),
+            Named::Backspace => "Backspace".to_string(),
+            Named::Delete => "Delete".to_string(),
+            Named::Home => "Home".to_string(),
+            Named::End => "End".to_string(),
+            Named::PageUp => "PageUp".to_string(),
+            Named::PageDown => "PageDown".to_string(),
+            Named::F1 => "F1".to_string(),
+            Named::F2 => "F2".to_string(),
+            Named::F3 => "F3".to_string(),
+            Named::F4 => "F4".to_string(),
+            Named::F5 => "F5".to_string(),
+            Named::F6 => "F6".to_string(),
+            Named::F7 => "F7".to_string(),
+            Named::F8 => "F8".to_string(),
+            Named::F9 => "F9".to_string(),
+            Named::F10 => "F10".to_string(),
+            Named::F11 => "F11".to_string(),
+            Named::F12 => "F12".to_string(),
+            _ => return None,
+        },
+        Key::Character(c) => {
+            // A chord needs a real modifier or a function key — a bare
+            // letter would shadow typing everywhere.
+            if c.chars().count() != 1 {
+                return None;
+            }
+            c.to_uppercase()
+        }
+        Key::Unidentified => return None,
+    };
+    let mut out = String::new();
+    if modifiers.control() {
+        out.push_str("Ctrl+");
+    }
+    if modifiers.alt() {
+        out.push_str("Alt+");
+    }
+    if modifiers.shift() {
+        out.push_str("Shift+");
+    }
+    if out.is_empty() && !key_part.starts_with('F') {
+        return None;
+    }
+    out.push_str(&key_part);
+    Some(out)
+}
+
 /// Parse the settings string form ("Ctrl+Shift+F", "Ctrl+=", "Ctrl+Up").
 fn parse(raw: &str) -> Option<Chord> {
     let parts: Vec<&str> = raw.split('+').map(str::trim).collect();
@@ -194,9 +279,58 @@ mod tests {
 
     #[test]
     fn default_chords_parse() {
-        // All ten shipped defaults must parse — a silent drop means a
+        // All shipped defaults must parse — a silent drop means a
         // shortcut the GTK app honors and this shell ignores.
-        assert_eq!(keys().bindings.len(), 12);
+        // 11 settings-backed + 2 reorder built-ins + 18 digit switchers.
+        assert_eq!(keys().bindings.len(), 31);
+    }
+
+    #[test]
+    fn digit_switchers_match() {
+        let keys = keys();
+        let key: LogicalKey = LogicalKey::Character("3".into());
+        assert_eq!(
+            keys.action_for(&key, Modifiers::CTRL),
+            Some(AppAction::SelectProcessN(3))
+        );
+        assert_eq!(
+            keys.action_for(&key, Modifiers::ALT),
+            Some(AppAction::SelectProjectN(3))
+        );
+    }
+
+    #[test]
+    fn chord_string_round_trips_through_parse() {
+        let cases: [(LogicalKey, Modifiers, &str); 4] = [
+            (
+                LogicalKey::Character("f".into()),
+                Modifiers::CTRL | Modifiers::SHIFT,
+                "Ctrl+Shift+F",
+            ),
+            (
+                LogicalKey::Named(Named::ArrowUp),
+                Modifiers::CTRL,
+                "Ctrl+Up",
+            ),
+            (LogicalKey::Character(",".into()), Modifiers::CTRL, "Ctrl+,"),
+            (
+                LogicalKey::Character("c".into()),
+                Modifiers::CTRL | Modifiers::ALT,
+                "Ctrl+Alt+C",
+            ),
+        ];
+        for (key, mods, want) in cases {
+            let s = chord_string(&key, mods).expect("expressible chord");
+            assert_eq!(s, want);
+            let chord = parse(&s).expect("round-trips");
+            assert_eq!(chord.modifiers, mods);
+            assert!(chord_matches(&chord.key, &key));
+        }
+        // Inexpressible: bare letters and lone modifiers.
+        assert_eq!(
+            chord_string(&LogicalKey::Character("x".into()), Modifiers::empty()),
+            None
+        );
     }
 
     #[test]

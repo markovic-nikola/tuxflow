@@ -8,7 +8,7 @@ use crate::config::schema::{ProcessCategory, ProcessConfig, TuxFlowConfig};
 use crate::detect::detector::{self, DetectedStack};
 use crate::process::manager::{ProcessManager, ProcessManagerRef};
 use crate::remote::ProjectLocation;
-use crate::remote::fs::{ProjectFs, SshFs};
+use crate::remote::fs::SshFs;
 use crate::util::icon_detector;
 use crate::watcher::file_watcher::FileWatcher;
 
@@ -68,79 +68,35 @@ pub struct RemoteProbe {
     pub icon_path: Option<String>,
 }
 
-/// Why a remote probe failed — decides whether retrying makes sense.
-#[derive(Debug, Clone)]
-pub enum ProbeError {
-    /// ssh couldn't reach or authenticate to the host. Transient: the
-    /// startup loader retries these in the background.
-    Unreachable(String),
-    /// The host answered but the project itself is bad (missing directory,
-    /// broken config). Retrying won't help.
-    Invalid(String),
-}
-
-impl std::fmt::Display for ProbeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Unreachable(msg) | Self::Invalid(msg) => f.write_str(msg),
-        }
-    }
-}
+// The probe policy (Unreachable = retryable vs Invalid) lives in core
+// since M2 of the migration — both shells share it.
+pub use tuxflow_core::remote::probe::ProbeError;
 
 /// Probe a remote project dir over ssh: read tuxflow.toml or run stack
-/// detection, and (when `fetch_icon`) pull a project icon into the local
-/// cache. Blocking — call from a worker thread, never the GTK main thread.
+/// detection (shared core probe), and (when `fetch_icon`) pull a project
+/// icon into the local cache — the GTK-only half, since only this shell
+/// renders cached icons today. Blocking — call from a worker thread,
+/// never the GTK main thread.
 pub fn probe_remote(
     host: &str,
     dir: &str,
     conservative: bool,
     fetch_icon: bool,
 ) -> Result<RemoteProbe, ProbeError> {
-    // Held for the whole probe (existence check, session list, config read,
-    // icon fetch), so a workspace load can't open more ssh channels than the
-    // host's MaxSessions allows. Dropped when the probe returns.
-    let _permit = crate::remote::ssh_permit();
-
-    match crate::remote::fs::remote_dir_exists(host, dir) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err(ProbeError::Invalid(format!(
-                "No such directory on {host}: {dir}"
-            )));
-        }
-        Err(e) => return Err(ProbeError::Unreachable(e)),
-    }
-    let live_sessions = crate::remote::list_live_sessions(host);
-    let fs = SshFs::new(host, dir);
+    let probe = tuxflow_core::remote::probe::probe_remote(host, dir, conservative)?;
     let icon_path = if fetch_icon {
+        // Own permit: the core probe released its on return, and the icon
+        // fetch opens ssh channels of its own.
+        let _permit = crate::remote::ssh_permit();
+        let fs = SshFs::new(host, dir);
         fetch_remote_icon(host, dir, &fs)
     } else {
         None
     };
-    if let Ok(content) = fs.read_to_string("tuxflow.toml") {
-        return match loader::load_config_str(&content) {
-            Ok(config) => Ok(RemoteProbe {
-                config: Some(config),
-                stacks: Vec::new(),
-                live_sessions,
-                icon_path,
-            }),
-            Err(e) => {
-                return Err(ProbeError::Invalid(format!(
-                    "Failed to parse tuxflow.toml on {host}: {e}"
-                )));
-            }
-        };
-    }
-    let stacks = if conservative {
-        detector::detect_stacks_conservative_fs(&fs)
-    } else {
-        detector::detect_stacks_fs(&fs)
-    };
     Ok(RemoteProbe {
-        config: None,
-        stacks,
-        live_sessions,
+        config: probe.config,
+        stacks: probe.stacks,
+        live_sessions: probe.live_sessions,
         icon_path,
     })
 }

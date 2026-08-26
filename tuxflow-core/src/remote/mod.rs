@@ -1,6 +1,7 @@
 pub mod fs;
 pub mod mic;
 pub mod ports;
+pub mod probe;
 pub mod tunnel;
 pub mod vite;
 

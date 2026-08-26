@@ -52,6 +52,29 @@ impl Terminal {
         let theme = Theme::new(settings.theme);
         let font = TermFont::new(settings.font);
 
+        let mut backend =
+            backend::Backend::new(id, backend_event_tx, settings.backend)?;
+
+        // Real cell metrics from birth. TerminalSize defaults to 1×1 px
+        // cells, and any output synced before the widget's first resize
+        // (a reattached tmux session replays instantly) would render the
+        // whole grid mashed into an 80×50 PIXEL corner — normal-size
+        // glyphs at collapsed positions. Seed an 80×24 grid with the
+        // font's true advance/line-height instead.
+        let measure = font.measure;
+        log::info!(
+            "terminal {id}: cell metrics {:.2}x{:.2}",
+            measure.width,
+            measure.height
+        );
+        backend.handle(backend::Command::Resize(
+            Some(iced_core::Size::new(
+                measure.width * 80.0,
+                measure.height * 24.0,
+            )),
+            Some(measure),
+        ));
+
         Ok(Self {
             id,
             widget_id: iced::widget::Id::unique(),
@@ -59,11 +82,7 @@ impl Terminal {
             theme,
             bindings: BindingsLayout::default(),
             cache: Cache::default(),
-            backend: backend::Backend::new(
-                id,
-                backend_event_tx,
-                settings.backend,
-            )?,
+            backend,
             backend_event_rx: Arc::new(Mutex::new(backend_event_rx)),
         })
     }

@@ -76,9 +76,15 @@ impl<'a> TerminalView<'a> {
         layout: iced_graphics::core::Layout<'_>,
         shell: &mut iced_graphics::core::Shell<'_, Event>,
     ) {
+        // iced reuses widget state by TYPE at a tree position — showing a
+        // DIFFERENT terminal in the same slot (a process switcher) inherits
+        // the previous terminal's recorded size, and "size unchanged" would
+        // silently skip the new terminal's resize forever. Track which
+        // terminal the size was sent to, not just the size.
         let layout_size = layout.bounds().size();
-        if state.size != layout_size {
+        if state.size != layout_size || state.sized_for != Some(self.term.id) {
             state.size = layout_size;
+            state.sized_for = Some(self.term.id);
             let cmd = Command::Resize(
                 Some(layout_size),
                 Some(self.term.font.measure),
@@ -927,6 +933,10 @@ struct TerminalViewState {
     scroll_pixels: f32,
     keyboard_modifiers: Modifiers,
     size: Size<f32>,
+    /// Which terminal `size` was last sent to — state is reused by TYPE at
+    /// a tree position, so a different terminal in the same slot must not
+    /// inherit "already sized".
+    sized_for: Option<u64>,
     mouse_position_on_grid: TerminalGridPoint,
 }
 
@@ -940,6 +950,7 @@ impl TerminalViewState {
             scroll_pixels: 0.0,
             keyboard_modifiers: Modifiers::empty(),
             size: Size::from([0.0, 0.0]),
+            sized_for: None,
             mouse_position_on_grid: TerminalGridPoint::default(),
         }
     }

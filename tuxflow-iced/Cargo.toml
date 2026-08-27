@@ -9,7 +9,9 @@ description = "TuxFlow's iced shell — the GNOME-stack exit, built on the vendo
 [dependencies]
 tuxflow-core = { path = "../tuxflow-core" }
 iced_term = { path = "../vendor/iced_term" }
-iced = { version = "0.14.0", features = ["tokio", "svg", "canvas"] }
+# `image` is what draws project avatars (PNG/WEBP/ICO); `svg` already came
+# free with the vendored fork's resvg and handles the vector half.
+iced = { version = "0.14.0", features = ["tokio", "svg", "canvas", "image"] }
 alacritty_terminal = "0.25.1"
 tokio = { version = "1.53.1", features = ["time"] }
 log = "0.4.34"

@@ -8,7 +8,6 @@ use crate::config::schema::{ProcessCategory, ProcessConfig, TuxFlowConfig};
 use crate::detect::detector::{self, DetectedStack};
 use crate::process::manager::{ProcessManager, ProcessManagerRef};
 use crate::remote::ProjectLocation;
-use crate::remote::fs::SshFs;
 use crate::util::icon_detector;
 use crate::watcher::file_watcher::FileWatcher;
 
@@ -74,8 +73,7 @@ pub use tuxflow_core::remote::probe::ProbeError;
 
 /// Probe a remote project dir over ssh: read tuxflow.toml or run stack
 /// detection (shared core probe), and (when `fetch_icon`) pull a project
-/// icon into the local cache — the GTK-only half, since only this shell
-/// renders cached icons today. Blocking — call from a worker thread,
+/// icon into the local cache. Blocking — call from a worker thread,
 /// never the GTK main thread.
 pub fn probe_remote(
     host: &str,
@@ -88,8 +86,7 @@ pub fn probe_remote(
         // Own permit: the core probe released its on return, and the icon
         // fetch opens ssh channels of its own.
         let _permit = crate::remote::ssh_permit();
-        let fs = SshFs::new(host, dir);
-        fetch_remote_icon(host, dir, &fs)
+        tuxflow_core::remote::icon::fetch_remote_icon(host, dir)
     } else {
         None
     };
@@ -101,39 +98,9 @@ pub fn probe_remote(
     })
 }
 
-/// Detect a project icon on the host (one batched round trip) and copy it
-/// into `~/.cache/tuxflow/icons/` so GTK can render it. Candidates are
-/// tried in priority order until one actually downloads — a single
-/// unreadable file must not cost the project its icon. Best-effort.
-fn fetch_remote_icon(host: &str, dir: &str, fs: &SshFs) -> Option<String> {
-    let key = format!("ssh://{host}{dir}");
-    for rel in crate::util::icon_detector::detect_icons_fs(fs) {
-        let abs = format!("{}/{}", dir.trim_end_matches('/'), rel);
-        match cache_remote_icon(host, &abs, &key) {
-            Some(path) => return Some(path),
-            None => log::info!("Remote icon candidate {host}:{abs} didn't fetch; trying next"),
-        }
-    }
-    None
-}
-
-/// Download `abs_path` from `host` into `~/.cache/tuxflow/icons/`, named by
-/// the project key so re-fetches overwrite the same slot. Returns the local
-/// path GTK can render. Blocking — call from a worker thread.
-pub fn cache_remote_icon(host: &str, abs_path: &str, project_key: &str) -> Option<String> {
-    // Icons are small; 2 MB guards against something mislabeled as one.
-    let bytes = crate::remote::fs::fetch_remote_file(host, abs_path, 2 * 1024 * 1024)?;
-    let ext = abs_path.rsplit('.').next().unwrap_or("png");
-    let cache_dir = dirs::cache_dir()?.join("tuxflow/icons");
-    std::fs::create_dir_all(&cache_dir).ok()?;
-    let path = cache_dir.join(format!("{:016x}.{ext}", crate::remote::fnv64(project_key)));
-    std::fs::write(&path, &bytes).ok()?;
-    log::info!(
-        "Fetched remote project icon {host}:{abs_path} -> {}",
-        path.display()
-    );
-    Some(path.to_string_lossy().into_owned())
-}
+// The remote-icon fetch moved to core alongside the detector, so the iced
+// shell can render remote project avatars too.
+pub use tuxflow_core::remote::icon::cache_remote_icon;
 
 pub type WorkspaceRef = Rc<RefCell<Workspace>>;
 
@@ -396,19 +363,15 @@ impl Workspace {
             ProjectLocation::Ssh { .. } => None,
         };
 
-        let icon_path = self.saved.get_icon(&dir_string).cloned().or_else(|| {
-            // Local projects detect from disk; remote ones arrive with the
-            // icon already fetched to the cache by the probe (icon_hint).
-            let detected = local_dir
-                .as_deref()
-                .and_then(icon_detector::detect_icon)
-                .or(icon_hint);
-            if let Some(ref path) = detected {
-                log::info!("Auto-detected project icon: {path}");
-                self.saved.set_icon(&dir_string, Some(path.clone()));
-            }
-            detected
-        });
+        // Local projects detect from disk; remote ones arrive with the icon
+        // already fetched to the cache by the probe (icon_hint). Policy is
+        // shared with the iced shell so the two can't show different avatars.
+        let icon_path = icon_detector::resolve_icon(
+            &mut self.saved,
+            &dir_string,
+            local_dir.as_deref(),
+            icon_hint,
+        );
 
         // Start file watcher for restart_when_changed patterns
         let file_watcher = local_dir
@@ -525,15 +488,9 @@ impl Workspace {
             let project = &self.projects[idx];
             let dir_str = project.key();
             // A fetched remote icon lives in our cache — delete it with the
-            // project so removals don't orphan cache files. Icons pointing
-            // into the project tree (local detection) are left alone.
-            if let (Some(icon), Some(cache_dir)) =
-                (self.saved.get_icon(&dir_str), dirs::cache_dir())
-            {
-                let icon_path = PathBuf::from(icon);
-                if icon_path.starts_with(cache_dir.join("tuxflow/icons")) {
-                    let _ = std::fs::remove_file(&icon_path);
-                }
+            // project so removals don't orphan cache files.
+            if let Some(icon) = self.saved.get_icon(&dir_str) {
+                tuxflow_core::remote::icon::discard_if_cached(icon);
             }
             project.manager.borrow_mut().stop_all();
             self.saved.remove(&dir_str);

@@ -2573,7 +2573,7 @@ impl TuxFlowWindow {
             let focus_gate_tick = focus_gate.clone();
             let icon_resolver_tick = icon_resolver.clone();
             let sidebar_tick = sidebar.clone();
-            glib::timeout_add_local(Duration::from_secs(2), move || {
+            glib::timeout_add_local(tuxflow_core::util::activity::SAMPLE_INTERVAL, move || {
                 let cells: Vec<(
                     String,
                     crate::util::notifications::AgentKind,
@@ -2608,21 +2608,15 @@ impl TuxFlowWindow {
                 let threshold = settings.notifications.agent_idle_silence_seconds;
                 let project_name = pname_cell_tick.borrow().clone();
                 for (name, kind, la, burst, idle) in cells {
-                    // Working/waiting dot with hysteresis: turning ON needs
-                    // a genuine repaint burst (a working agent redraws its
-                    // spinner continuously — dozens of events per tick),
-                    // which keeps the few trailing repaints after it
-                    // finishes from flapping the indicator. Once on, brief
-                    // lulls are ridden out via the recent-activity window.
-                    const AGENT_WORKING_WINDOW_SECS: u64 = 4;
-                    const WORKING_BURST_MIN: u32 = 3;
+                    // Working/waiting dot, on core's shared hysteresis (the
+                    // iced shell's card sweep reads the same rule).
                     let events = burst.replace(0);
                     let qname = workspace::qualified_name(&project_name, &name);
-                    let working = if sidebar_tick.is_process_working(&qname) {
-                        la.get().elapsed().as_secs() < AGENT_WORKING_WINDOW_SECS
-                    } else {
-                        events >= WORKING_BURST_MIN
-                    };
+                    let working = tuxflow_core::util::activity::next_working(
+                        sidebar_tick.is_process_working(&qname),
+                        events,
+                        la.get().elapsed(),
+                    );
                     sidebar_tick.set_process_working(&qname, working);
                     crate::process::auto_restart::check_agent_silence(
                         &project_name,

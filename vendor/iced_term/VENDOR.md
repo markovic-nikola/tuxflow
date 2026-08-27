@@ -225,3 +225,38 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    precisely that fall-through (same mechanism as `Passthrough`). Paste
    (and the middle-click PRIMARY paste) now treat an empty read as
    "nothing to paste": no write, no capture.
+16. **A terminal outlives its child: `shutdown` / `respawn` / `feed`** (found
+   live: a command that finished left the pane reading "not running" —
+   everything it had printed was gone). Upstream ties the grid's lifetime to
+   the PTY session: the ONLY way to kill a child is to drop the whole
+   `Terminal`, which takes the scrollback with it, and the only way to run
+   something again is to build a new one, starting blank. TuxFlow's GTK shell
+   keeps one VTE widget per process for its whole life, so a process's
+   terminal is its log ACROSS runs; these three make that possible here.
+   - `Backend::shutdown` sends the PTY loop `Msg::Shutdown` — the same
+     teardown `Drop` performs (loop exits → drops the PTY → SIGHUP + reap),
+     minus dropping the grid. It emits no `Exit` event, so a stop is not
+     mistaken for a crash.
+   - `Backend::respawn` opens a new PTY on the SAME `Term` and the same event
+     proxy, so the existing subscription and widget id keep working — no
+     per-run identity churn in the embedder. Order inside is load-bearing:
+     tidy (`RESET_BETWEEN_RUNS`), then the caller's banner, then the spawn. A
+     banner fed before the tidy would be discarded with the alt screen; one
+     fed after the spawn would race the new child through a second parser.
+   - `RESET_BETWEEN_RUNS` undoes what a run left the emulator wearing (alt
+     screen, mouse reporting, bracketed paste, scroll region, hidden cursor,
+     SGR) WITHOUT RIS, which would clear the history the respawn exists to
+     keep. DECSTBM homes the cursor, hence the DECSC/DECRC bracket around it.
+   - `Backend::feed` advances a parser of the backend's own over the grid, for
+     bytes that never came from a child (TuxFlow's exit banners). Safe only
+     between runs — two parsers over one grid can interleave mid-sequence.
+   - **`drain_on_exit` flipped to `true`** (`DRAIN_ON_EXIT`), which is
+     alacritty's `hold`. With it off, the loop breaks out of the child-exit
+     arm WITHOUT reading what is still buffered, so a command short enough to
+     print and exit within one poll — `echo`, a failing build — lost its
+     entire output. Invisible upstream (the grid died with the child anyway)
+     and the reason the first respawn test failed: the run before it had
+     printed nothing to keep.
+   Covered by live-PTY tests in `backend.rs`: a second run keeps the first
+   one's output, a run that died inside the alt screen comes back to the
+   primary one, and `shutdown` kills the child while the grid survives.

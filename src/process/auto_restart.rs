@@ -210,41 +210,21 @@ fn handle_process_exit(
         log::warn!("Process {name} crashed (exit status {status})");
     }
 
-    // Explain the exit inside the terminal itself. Crucial for remote
-    // processes: an error printed inside the tmux pane (e.g. the shell's
-    // "command not found") vanishes with the session, leaving only tmux's
-    // bare "[exited]" behind.
+    // Explain the exit inside the terminal itself (the wording is core's,
+    // shared with the iced shell — both keep a process's terminal across
+    // runs, so both need the same marker for why a run ended).
     {
         let mgr = manager_ref.borrow();
         if let Some(proc) = mgr.get_process(name)
             && let Some(term) = proc.terminal.as_ref()
+            && let Some(msg) = tuxflow_core::util::banner::exit_banner(
+                status,
+                is_connection_loss,
+                &proc.config.command,
+                mgr.location().host(),
+            )
         {
-            let msg = if is_connection_loss {
-                "\x1b[1;33m[tuxflow]\x1b[0m connection lost — reconnecting, the process keeps \
-                 running on the host"
-                    .to_string()
-            } else if status == 127 || status == 126 {
-                let what = if status == 127 {
-                    "command not found"
-                } else {
-                    "command not executable"
-                };
-                let mut cmd = proc.config.command.clone();
-                if cmd.len() > 60 {
-                    cmd.truncate(60);
-                    cmd.push_str("…");
-                }
-                match mgr.location().host() {
-                    Some(host) => format!(
-                        "\x1b[1;31m[tuxflow]\x1b[0m exit {status} — {what} on {host}: \
-                         \x1b[1m{cmd}\x1b[0m (is it installed there?)"
-                    ),
-                    None => format!("\x1b[1;31m[tuxflow]\x1b[0m exit {status} — {what}: {cmd}"),
-                }
-            } else {
-                format!("\x1b[1;31m[tuxflow]\x1b[0m process exited with status {status}")
-            };
-            term.feed(format!("\r\n{msg}\r\n").as_bytes());
+            term.feed(msg.as_bytes());
         }
     }
 

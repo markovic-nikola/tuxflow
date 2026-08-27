@@ -15,6 +15,7 @@ use alacritty_terminal::term::{
     self, cell::Cell, test::TermSize, viewport_to_point, Term, TermMode,
 };
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi;
 use iced::keyboard::Modifiers;
 use iced_core::Size;
 use std::borrow::Cow;
@@ -25,6 +26,26 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`]+"#;
+
+/// Undo what a run left the emulator wearing, before the next one starts in
+/// the same grid: alt screen (which would hide the scrollback the respawn
+/// exists to keep), mouse reporting, bracketed paste, application cursor
+/// keys, a scroll region, a hidden cursor, leftover SGR. Deliberately NOT
+/// RIS (`\x1bc`) — a full reset clears the history along with the modes.
+/// DECSTBM homes the cursor, so the region reset is bracketed by
+/// DECSC/DECRC to leave the cursor where the last run parked it.
+const RESET_BETWEEN_RUNS: &[u8] =
+    b"\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\
+\x1b[?2004l\x1b[?1l\x1b7\x1b[r\x1b8\x1b[?7h\x1b[?25h\x1b[m";
+
+/// Read what the child left in the PTY before tearing the loop down —
+/// alacritty calls this `hold`, and only a terminal that OUTLIVES its child
+/// has anywhere to put it. Ours does now, and a command short enough to
+/// print and exit within one poll (`echo`, a failing build) is exactly the
+/// case where the whole run is in that last unread buffer: the child-exit
+/// arm of the loop breaks out without reading when this is off, so the run
+/// ends with a blank terminal and nothing to show for it.
+const DRAIN_ON_EXIT: bool = true;
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -145,9 +166,19 @@ impl From<TerminalSize> for WindowSize {
 }
 
 pub struct Backend {
+    /// Kept for `respawn`: the PTY is opened with it (alacritty tags the
+    /// child's window id with it).
+    id: u64,
     term: Arc<FairMutex<Term<EventProxy>>>,
     size: TerminalSize,
     notifier: Notifier,
+    /// The sender every PTY loop of this terminal reports through — a
+    /// respawned loop must reach the SAME subscription as the first one.
+    event_proxy: EventProxy,
+    /// Parser for bytes the embedder writes into the grid itself (run
+    /// banners). Separate from the PTY loop's own parser, which is why
+    /// feeding is only safe between runs — see `feed`.
+    parser: ansi::Processor,
     last_content: RenderableContent,
     pub(crate) url_regex: RegexSearch,
     search: Option<SearchState>,
@@ -171,20 +202,14 @@ impl Backend {
         // not exposed keeps alacritty's default.
         let config = term::Config {
             scrolling_history: settings.scrolling_history,
-            semantic_escape_chars: settings.semantic_escape_chars,
+            semantic_escape_chars: settings.semantic_escape_chars.clone(),
             kitty_keyboard: settings.kitty_keyboard,
             osc52: settings.osc52,
             ..term::Config::default()
         };
 
-        let pty_config = tty::Options {
-            shell: Some(tty::Shell::new(settings.program, settings.args)),
-            working_directory: settings.working_directory,
-            env: settings.env,
-            ..tty::Options::default()
-        };
         let terminal_size = TerminalSize::default();
-        let pty = tty::new(&pty_config, terminal_size.into(), id)?;
+        let pty = spawn_pty(id, terminal_size, &settings)?;
 
         let event_proxy = EventProxy(pty_event_proxy_sender);
 
@@ -207,21 +232,80 @@ impl Backend {
 
         let term = Arc::new(FairMutex::new(term));
 
-        let pty_event_loop =
-            EventLoop::new(term.clone(), event_proxy, pty, false, false)?;
+        let pty_event_loop = EventLoop::new(
+            term.clone(),
+            event_proxy.clone(),
+            pty,
+            DRAIN_ON_EXIT,
+            false,
+        )?;
 
         let notifier = Notifier(pty_event_loop.channel());
 
         let _ = pty_event_loop.spawn();
 
         Ok(Self {
+            id,
             term: term.clone(),
             size: terminal_size,
             notifier,
+            event_proxy,
+            parser: ansi::Processor::new(),
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
             search: None,
         })
+    }
+
+    /// End the PTY session — the child gets the same SIGHUP `Drop` sends
+    /// (the loop's exit drops the PTY, which kills and reaps it) — but keep
+    /// the grid. Stopping a process must not erase the output it produced;
+    /// dropping the whole terminal for that is what left an embedder with
+    /// nothing to show.
+    pub fn shutdown(&self) {
+        let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+
+    /// Write bytes straight into the grid, bypassing the PTY — the
+    /// embedder's own annotations (why a run ended, where the next begins).
+    ///
+    /// Safe only BETWEEN runs: this parser and the PTY loop's are separate
+    /// state machines over one grid, so feeding while a child is writing
+    /// can interleave halfway through either one's escape sequence.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        let term = self.term.clone();
+        let mut term = term.lock();
+        self.parser.advance(&mut *term, bytes);
+    }
+
+    /// Start a new child in the SAME grid: the finished run's output stays
+    /// in the scrollback and the new one appends below `banner`.
+    ///
+    /// The order is load-bearing. Tidy first (a banner fed before it would
+    /// be discarded with the alt screen), banner second, spawn last — a
+    /// banner fed after the spawn would race the new child's first bytes
+    /// through the second parser `feed` warns about.
+    pub fn respawn(
+        &mut self,
+        settings: &BackendSettings,
+        banner: &[u8],
+    ) -> Result<()> {
+        // Usually already gone (the child exited on its own); a process
+        // that was stopped and started again still has a loop to end.
+        self.shutdown();
+        self.feed(RESET_BETWEEN_RUNS);
+        self.feed(banner);
+        let pty = spawn_pty(self.id, self.size, settings)?;
+        let pty_event_loop = EventLoop::new(
+            self.term.clone(),
+            self.event_proxy.clone(),
+            pty,
+            DRAIN_ON_EXIT,
+            false,
+        )?;
+        self.notifier = Notifier(pty_event_loop.channel());
+        let _ = pty_event_loop.spawn();
+        Ok(())
     }
 
     pub fn handle(&mut self, cmd: Command) -> Action {
@@ -650,6 +734,26 @@ impl Backend {
     }
 }
 
+/// Open a PTY running `settings`' program. Shared by the first spawn and
+/// every `respawn`, so a second run of a process cannot drift from the
+/// first in how it is launched.
+fn spawn_pty(
+    id: u64,
+    size: TerminalSize,
+    settings: &BackendSettings,
+) -> Result<tty::Pty> {
+    let pty_config = tty::Options {
+        shell: Some(tty::Shell::new(
+            settings.program.clone(),
+            settings.args.clone(),
+        )),
+        working_directory: settings.working_directory.clone(),
+        env: settings.env.clone(),
+        ..tty::Options::default()
+    };
+    tty::new(&pty_config, size.into(), id)
+}
+
 /// Copied from alacritty/src/display/hint.rs:
 /// Iterate over all visible regex matches.
 fn visible_regex_match_iter<'a>(
@@ -744,5 +848,118 @@ impl EventListener for EventProxy {
         // Called from the PTY thread, sometimes while it holds the terminal
         // lock — must never block (see the channel comment in terminal.rs).
         let _ = self.0.send(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn settings(command: &str) -> BackendSettings {
+        BackendSettings {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), command.into()],
+            ..BackendSettings::default()
+        }
+    }
+
+    /// Everything the grid holds right now, one line per row.
+    fn screen(backend: &mut Backend) -> String {
+        backend.sync();
+        let mut out = String::new();
+        let mut line = backend.last_content.cells.first().map(|c| c.point.line);
+        for cell in &backend.last_content.cells {
+            if Some(cell.point.line) != line {
+                out.push('\n');
+                line = Some(cell.point.line);
+            }
+            out.push(cell.cell.c);
+        }
+        out
+    }
+
+    /// Run the PTY until the child exits, draining events as the embedder
+    /// does. Panics rather than hanging forever if the child never ends.
+    fn run_to_exit(rx: &mut mpsc::UnboundedReceiver<Event>) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(Event::Exit) => return,
+                Ok(_) => continue,
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        panic!("child never exited");
+    }
+
+    /// The whole point of `respawn`: a second run does NOT cost the user
+    /// what the first one printed.
+    #[test]
+    fn respawn_keeps_the_finished_run_on_screen() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut backend =
+            Backend::new(1, tx, settings("echo first-run")).expect("spawn");
+        run_to_exit(&mut rx);
+        assert!(screen(&mut backend).contains("first-run"));
+
+        backend
+            .respawn(&settings("echo second-run"), b"\r\n-- restarted --\r\n")
+            .expect("respawn");
+        run_to_exit(&mut rx);
+
+        let screen = screen(&mut backend);
+        assert!(screen.contains("first-run"), "lost the first run: {screen}");
+        assert!(screen.contains("-- restarted --"), "no banner: {screen}");
+        assert!(screen.contains("second-run"), "no second run: {screen}");
+    }
+
+    /// A run that died inside a full-screen TUI must not take the
+    /// scrollback with it — the tidy leaves the alt screen first.
+    #[test]
+    fn respawn_returns_from_the_alternate_screen() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Print, then switch to the alt screen and die there.
+        let mut backend = Backend::new(
+            2,
+            tx,
+            settings("echo before-tui; printf '\\033[?1049h'"),
+        )
+        .expect("spawn");
+        run_to_exit(&mut rx);
+        assert!(
+            !screen(&mut backend).contains("before-tui"),
+            "still primary"
+        );
+
+        backend
+            .respawn(&settings("echo after-tui"), b"")
+            .expect("respawn");
+        run_to_exit(&mut rx);
+
+        let screen = screen(&mut backend);
+        assert!(screen.contains("before-tui"), "alt screen kept: {screen}");
+        assert!(screen.contains("after-tui"), "no second run: {screen}");
+    }
+
+    /// `shutdown` is the stop button: the child dies, the output stays.
+    #[test]
+    fn shutdown_ends_the_child_but_keeps_the_grid() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut backend =
+            Backend::new(3, tx, settings("echo running; sleep 60"))
+                .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !screen(&mut backend).contains("running") {
+            assert!(Instant::now() < deadline, "child never printed");
+            let _ = rx.try_recv();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        backend.shutdown();
+        // The kill lands when the loop drops the PTY; the grid is ours
+        // either way.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(screen(&mut backend).contains("running"));
     }
 }

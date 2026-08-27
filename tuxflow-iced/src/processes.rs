@@ -35,10 +35,20 @@ pub enum Status {
 pub struct ProcessEntry {
     pub config: ProcessConfig,
     pub status: Status,
+    /// The process's terminal, kept for the entry's whole life once the
+    /// first run creates it: a finished run's output stays on screen and
+    /// the next run appends below it, as the GTK app's one-VTE-per-process
+    /// does. `Some` therefore means "has run", NOT "is running" — ask
+    /// `is_running()` for that.
     pub terminal: Option<iced_term::Terminal>,
-    /// Fresh per spawn — subscription identity must change across restarts
-    /// or iced would not start a stream for the new terminal.
+    /// Subscription identity, one per TERMINAL (not per run): iced would
+    /// not start a stream for a new terminal reusing an old id, and a
+    /// respawn keeps the stream it already has.
     pub term_id: Option<u64>,
+    /// Identity of the current RUN, bumped on every spawn — the terminal
+    /// outlives its runs now, so `term_id` can no longer answer "is this
+    /// still the run that started the work I'm holding?".
+    pub run_id: u64,
     /// ChildExit code observed before the Exit event finalizes the run.
     pub last_exit: Option<i32>,
     /// User pressed stop — the coming exit is expected, not a crash.
@@ -72,6 +82,13 @@ pub struct ProcessEntry {
     /// only (the context menu's "Resume Session" — GTK's
     /// spawn_with_command_override). A later crash restarts the original.
     pub command_override: Option<String>,
+    /// Terminal repaints since the last activity sample, and when the most
+    /// recent one landed — the raw signal behind `working`.
+    pub activity_burst: u32,
+    pub last_activity: Option<Instant>,
+    /// Agent is producing output right now (core's `util::activity`
+    /// hysteresis over the two fields above). Drives the card's sweep.
+    pub working: bool,
 }
 
 impl ProcessEntry {
@@ -81,6 +98,7 @@ impl ProcessEntry {
             status: Status::Stopped,
             terminal: None,
             term_id: None,
+            run_id: 0,
             last_exit: None,
             stopping: false,
             restart_attempts: 0,
@@ -94,11 +112,30 @@ impl ProcessEntry {
             outage_notified: false,
             title: None,
             command_override: None,
+            activity_burst: 0,
+            last_activity: None,
+            working: false,
         }
     }
 
     pub fn is_running(&self) -> bool {
         matches!(self.status, Status::Running)
+    }
+
+    /// The next `working` state, from the repaints counted since the last
+    /// sample. Non-agents and anything not running are never working: only
+    /// agents get the treatment (GTK samples the same set), and a stopped
+    /// terminal's last repaints must not leave the card lit.
+    pub fn sample_activity(&mut self) -> bool {
+        let events = std::mem::take(&mut self.activity_burst);
+        self.working = self.config.category == ProcessCategory::Agent
+            && self.is_running()
+            && tuxflow_core::util::activity::next_working(
+                self.working,
+                events,
+                self.last_activity.map_or(Duration::MAX, |at| at.elapsed()),
+            );
+        self.working
     }
 }
 

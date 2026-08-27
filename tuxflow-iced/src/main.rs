@@ -11,6 +11,7 @@ mod keys;
 mod notify;
 mod processes;
 mod settings_ui;
+mod status_dot;
 mod theme;
 
 use std::collections::HashMap;
@@ -28,11 +29,14 @@ use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
 use tuxflow_core::remote::{self, ProjectLocation};
+use tuxflow_core::util::activity;
 use tuxflow_core::util::agents::resume_command_for;
+use tuxflow_core::util::banner;
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
+use status_dot::status_dot;
 use theme::{CRASHED, DIM, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT, TEXT_SECONDARY, accent_for};
 use tuxflow_core::config::settings::AppSettings;
 
@@ -51,6 +55,19 @@ const HOVER_SLIDE_MS: f32 = 140.0;
 /// moves the whole window's layout, and Adwaita's own flap takes ~200ms.
 const SIDEBAR_SLIDE_MS: f32 = 180.0;
 
+/// One pass of the working-agent sweep across a project card. Slow: this
+/// says "something is thinking", it is not a progress bar.
+const SWEEP_MS: f32 = 2600.0;
+/// Its own cadence, a third of [`FRAME`]'s. The glides last 140–180 ms;
+/// this chain runs for as long as an agent stays busy, which can be
+/// minutes, and every frame repaints the WHOLE window — where GTK's
+/// equivalent spinner is a 14 px cairo widget that redraws alone. Measured
+/// on a release build under llvmpipe, against the same app with the sweep
+/// off and a terminal printing at 20 Hz beside it: 30 fps cost ~25 % of a
+/// core, 20 fps ~9 %. A soft band with no edges, crossing in 2.6 s, moves
+/// ~7 px per frame here — there is nothing at 30 fps worth triple that.
+const SWEEP_FRAME: Duration = Duration::from_millis(50);
+
 /// GTK sidebar parity: AdwOverlaySplitView sizes the sidebar at a quarter
 /// of the window, clamped to the GTK app's min/max (window.rs: 220–400).
 const SIDEBAR_FRACTION: f32 = 0.25;
@@ -59,6 +76,62 @@ const SIDEBAR_MAX: f32 = 400.0;
 /// Width of the collapsed icon rail, and so the floor of the collapse
 /// glide: 16px icon + 7px button padding either side + 4px rail padding.
 const SIDEBAR_RAIL: f32 = 38.0;
+
+/// The sidebar's category sections, in the order they are drawn. This is
+/// the single source for both the render loop and [`App::switch_targets`],
+/// which numbers the Ctrl+1..9 hints by position in the drawn sequence —
+/// the two orders diverging is exactly what makes a row advertise a chord
+/// that lands somewhere else. GTK keeps the same pair in sync by hand
+/// (`project_list.rs`'s `categories` vs `running_names_in_sidebar_order`,
+/// each carrying a comment pointing at the other); here there is one array.
+const SIDEBAR_CATEGORIES: [ProcessCategory; 4] = [
+    ProcessCategory::Agent,
+    ProcessCategory::Command,
+    ProcessCategory::Terminal,
+    ProcessCategory::SSH,
+];
+
+/// How many processes the digit switcher can reach — Ctrl+1..9.
+const SWITCH_SLOTS: usize = 9;
+
+/// Entry indices of one project's rows in the order the sidebar draws
+/// them: grouped by category, each keeping its saved order.
+fn sidebar_order(entries: &[ProcessEntry]) -> impl Iterator<Item = usize> + '_ {
+    SIDEBAR_CATEGORIES.iter().flat_map(move |cat| {
+        (0..entries.len()).filter(move |&i| entries[i].config.category == *cat)
+    })
+}
+
+/// The word on the separator a new run starts under, read off the status
+/// the run is REPLACING — the entry is still wearing the outgoing run's
+/// state when [`App::start`] asks.
+fn run_label(status: &Status) -> &'static str {
+    match status {
+        Status::Reconnecting(_) => "reconnecting",
+        Status::Restarting(_) => "auto-restart",
+        _ => "restarted",
+    }
+}
+
+/// The switcher sequence over a workspace's per-project entry lists. Split
+/// out of [`App::switch_targets`] so the ordering rules can be tested
+/// without standing up a live workspace.
+fn switch_targets_of<'a>(
+    projects: impl IntoIterator<Item = &'a [ProcessEntry]>,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (pidx, entries) in projects.into_iter().enumerate() {
+        for i in sidebar_order(entries) {
+            if entries[i].is_running() {
+                out.push((pidx, i));
+                if out.len() == SWITCH_SLOTS {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
 
 /// A 0..1 progress ramp advanced by a self-scheduling chain of frame
 /// ticks — iced 0.14 has no animation driver, so this is the same
@@ -113,6 +186,48 @@ impl Anim {
     }
 }
 
+/// The working-agent sweep: the phase of a band of light travelling across
+/// every card whose agent is producing output. Same tick-chain idiom as
+/// [`Anim`] and generation-stamped for the same reason, but it LOOPS
+/// rather than settling — and it is linear, since an ease would make a
+/// repeating pass lurch at the seam.
+#[derive(Default)]
+struct Sweep {
+    phase: f32,
+    stamp: u64,
+    running: bool,
+}
+
+impl Sweep {
+    /// Begin a chain, or `None` if one is already in flight.
+    fn start(&mut self) -> Option<u64> {
+        if self.running {
+            return None;
+        }
+        self.running = true;
+        self.phase = 0.0;
+        self.stamp += 1;
+        Some(self.stamp)
+    }
+
+    /// Advance one frame. `None` means the tick was stale; otherwise the
+    /// bool says whether the phase wrapped — the moment cards that have
+    /// gone quiet may drop out, since the band is off-card there and their
+    /// light goes out at the edge instead of mid-pass.
+    fn tick(&mut self, generation: u64) -> Option<bool> {
+        if generation != self.stamp {
+            return None;
+        }
+        self.phase += SWEEP_FRAME.as_millis() as f32 / SWEEP_MS;
+        Some(if self.phase >= 1.0 {
+            self.phase -= 1.0;
+            true
+        } else {
+            false
+        })
+    }
+}
+
 fn main() -> iced::Result {
     env_logger::init();
     // VTE set TERM for its children silently; on this stack it is the
@@ -127,7 +242,7 @@ fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .theme(|_: &App| iced::Theme::Dark)
         .title(|app: &App| match app.active_project() {
-            Some(p) => format!("TuxFlow — {}", p.name),
+            Some(p) => format!("TuxFlow - {}", p.name),
             None => String::from("TuxFlow"),
         })
         .window(iced::window::Settings {
@@ -175,6 +290,10 @@ struct ProjectState {
     poll_chain_started: bool,
     terminals_created: usize,
     git: Option<tuxflow_core::remote::git::GitStatus>,
+    /// The card is riding the working-agent sweep. Set when an agent here
+    /// starts producing output, cleared only at a pass boundary — see
+    /// [`Sweep::tick`].
+    sweeping: bool,
 }
 
 impl ProjectState {
@@ -198,6 +317,11 @@ impl ProjectState {
                 Status::Running | Status::Restarting(_) | Status::Reconnecting(_)
             )
         })
+    }
+
+    /// At least one agent in here is producing output right now.
+    fn agent_working(&self) -> bool {
+        self.entries.iter().any(|e| e.working)
     }
 }
 
@@ -241,6 +365,13 @@ struct App {
     /// index None = the project header. Drives the cluster slide-in.
     hovered_row: Option<(u64, Option<usize>)>,
     hover_anim: Anim,
+    /// Ctrl is down right now, so the rows the digit switcher can reach are
+    /// wearing their keycaps. Nothing about the chords depends on this — it
+    /// only decides whether the sidebar is currently answering "which one
+    /// is 3?", which is why it can be dropped on focus loss without care.
+    ctrl_held: bool,
+    /// Shared by every card riding it, so their bands stay in step.
+    sweep: Sweep,
     /// Last pointer position in window coords — where a right-click's
     /// context menu opens (mouse_area reports no position itself).
     cursor: iced::Point,
@@ -366,7 +497,13 @@ enum Event {
     HoverTick(u64),
     /// One frame of the sidebar's collapse/expand glide.
     SidebarTick(u64),
+    /// Fixed-interval sample of which agents are producing output.
+    ActivityTick,
+    /// One frame of the working-agent sweep.
+    SweepTick(u64),
     CursorMoved(iced::Point),
+    /// Ctrl went down or up — reveals/hides the sidebar's keycaps.
+    CtrlHeld(bool),
     /// Right-click on a sidebar row (index None = project header).
     OpenContextMenu {
         project: u64,
@@ -435,6 +572,9 @@ enum Event {
     ImagePasted {
         project: u64,
         term: u64,
+        /// The run that asked for the paste — the terminal outlives its
+        /// runs, so its id alone no longer says the paste is still wanted.
+        run: u64,
         result: Result<Vec<u8>, String>,
     },
     /// Click on the status-bar port pill: open the (tunnel-mapped) URL.
@@ -493,7 +633,9 @@ impl App {
             filter_query: String::new(),
             filter_input: iced::widget::Id::unique(),
             hovered_row: None,
+            ctrl_held: false,
             hover_anim: Anim::default(),
+            sweep: Sweep::default(),
             cursor: iced::Point::ORIGIN,
             context_menu: None,
             confirm: None,
@@ -570,6 +712,7 @@ impl App {
             ));
         }
         tasks.push(Task::done(Event::GitTick));
+        tasks.push(Task::done(Event::ActivityTick));
 
         (app, Task::batch(tasks))
     }
@@ -601,6 +744,7 @@ impl App {
             poll_chain_started: false,
             terminals_created: 0,
             git: None,
+            sweeping: false,
             location,
         };
 
@@ -638,9 +782,9 @@ impl App {
     fn remote_agent_selected(&self) -> bool {
         self.active_project().is_some_and(|p| {
             p.location.host().is_some()
-                && p.entries.get(p.selected).is_some_and(|e| {
-                    e.terminal.is_some() && e.config.category == ProcessCategory::Agent
-                })
+                && p.entries
+                    .get(p.selected)
+                    .is_some_and(|e| e.is_running() && e.config.category == ProcessCategory::Agent)
         })
     }
 
@@ -713,12 +857,17 @@ impl App {
         )
     }
 
-    /// Spawn (or respawn/reattach) a process's terminal. Fresh terminal id
-    /// each time: subscription identity must change or iced keeps the dead
-    /// stream.
+    /// Spawn (or respawn/reattach) a process's run.
+    ///
+    /// An entry keeps ONE terminal for its whole life: a second run of the
+    /// same process spawns into the grid the first one printed into, under
+    /// a separator, so its output is still there to read (the GTK app gets
+    /// this by reusing a single VTE widget per process). Only the first run
+    /// builds a terminal, and only that path takes a fresh terminal id —
+    /// subscription identity must change per TERMINAL or iced keeps the
+    /// dead stream, but a respawn keeps the live stream it already has.
     fn start(&mut self, pidx: usize, index: usize) -> Task<Event> {
-        let id = self.next_term_id;
-        self.next_term_id += 1;
+        let fresh_id = self.next_term_id;
 
         let reservations = self.app_keys.reservations();
         let font = self.term_font();
@@ -735,8 +884,17 @@ impl App {
         let remote_agent = project.location.host().is_some()
             && project.entries[index].config.category == ProcessCategory::Agent;
         let entry = &mut project.entries[index];
-        match iced_term::Terminal::new(id, settings) {
-            Ok(mut term) => {
+        let separator_label = run_label(&entry.status);
+        // (widget id to focus, terminal id, whether `fresh_id` was taken)
+        let spawned: std::io::Result<(iced::widget::Id, u64, bool)> = if entry.terminal.is_some() {
+            let id = entry.term_id.unwrap_or(fresh_id);
+            let term = entry.terminal.as_mut().expect("terminal, just checked");
+            let cols = term.backend().renderable_content().terminal_size.columns();
+            let banner = banner::run_separator(cols, separator_label);
+            term.respawn(settings.backend, banner.as_bytes())
+                .map(|()| (term.widget_id().clone(), id, false))
+        } else {
+            iced_term::Terminal::new(fresh_id, settings).map(|mut term| {
                 // Reserve the app's chords before the first keystroke —
                 // the stock bindings would type them into the shell.
                 term.handle(iced_term::Command::AddBindings(reservations));
@@ -758,9 +916,16 @@ impl App {
                         iced_term::bindings::BindingAction::Paste,
                     )]));
                 }
-                let focus = TerminalView::focus(term.widget_id().clone());
+                let widget = term.widget_id().clone();
                 entry.terminal = Some(term);
+                (widget, fresh_id, true)
+            })
+        };
+
+        match spawned {
+            Ok((widget, id, took_fresh_id)) => {
                 entry.term_id = Some(id);
+                entry.run_id += 1;
                 entry.status = Status::Running;
                 entry.last_exit = None;
                 entry.stopping = false;
@@ -770,7 +935,10 @@ impl App {
                 project.ports.clear(&name);
                 project.selected = index;
                 self.active = pidx;
-                focus
+                if took_fresh_id {
+                    self.next_term_id += 1;
+                }
+                TerminalView::focus(widget)
             }
             Err(err) => {
                 log::error!("failed to spawn {}: {err}", entry.config.name);
@@ -802,8 +970,10 @@ impl App {
 
     /// Stop. Remote: explicitly kill the host-side session first (the local
     /// PTY teardown only detaches it), fire-and-forget, and make the next
-    /// spawn clear any survivor. Local: dropping the terminal SIGHUPs the
-    /// child on the PTY thread.
+    /// spawn clear any survivor. Local: `shutdown()` SIGHUPs the child on
+    /// the PTY thread — the same teardown dropping the terminal performed,
+    /// minus the part that threw away everything the process printed.
+    /// It emits no Exit event, so the status set here is the final word.
     fn stop(&mut self, pidx: usize, index: usize) {
         let project = &mut self.projects[pidx];
         if let Some(host) = project.location.host() {
@@ -821,8 +991,9 @@ impl App {
         entry.restart_generation += 1;
         entry.restart_attempts = 0;
         entry.pending_auto_open = false;
-        entry.terminal = None;
-        entry.term_id = None;
+        if let Some(term) = entry.terminal.as_ref() {
+            term.shutdown();
+        }
         entry.status = Status::Stopped;
         self.maybe_drop_tunnels(pidx);
     }
@@ -927,9 +1098,25 @@ impl App {
             && project.entries[index].last_exit == Some(255);
 
         let project_id = project.id;
+        let host = project.location.host().map(String::from);
         let entry = &mut project.entries[index];
-        entry.terminal = None;
-        entry.term_id = None;
+
+        // The terminal stays — it holds the run's output, which is what the
+        // user reaches for when a run ends badly. GTK feeds the same line
+        // into its VTE, and it matters most on remote projects: an error
+        // printed inside the tmux pane dies with the session, leaving only
+        // tmux's bare "[exited]" behind.
+        if let Some(code) = entry.last_exit
+            && let Some(msg) = banner::exit_banner(
+                code,
+                connection_loss,
+                &entry.config.command,
+                host.as_deref(),
+            )
+            && let Some(term) = entry.terminal.as_mut()
+        {
+            term.feed(msg.as_bytes());
+        }
 
         let run = entry.started_at.map(|t| t.elapsed());
         let stopping_was = entry.stopping;
@@ -1127,18 +1314,22 @@ impl App {
             AppAction::ToggleSidebar => self.set_sidebar(!self.sidebar_visible),
             AppAction::FilterSidebar => self.toggle_filter(),
             AppAction::SelectProcessN(n) => {
-                if let Some(project) = self.projects.get_mut(self.active)
-                    && (n as usize) <= project.entries.len()
-                {
-                    project.selected = n as usize - 1;
-                    return self.focus_selected_terminal();
+                // Routed through SelectProcess rather than assigning here:
+                // crossing to another project has to refresh the git chip,
+                // and that rule belongs in one place.
+                match self.switch_targets().get(n as usize - 1) {
+                    Some(&(pidx, index)) => {
+                        let project = self.projects[pidx].id;
+                        self.update(Event::SelectProcess { project, index })
+                    }
+                    None => Task::none(),
                 }
-                Task::none()
             }
             AppAction::SelectProjectN(n) => {
-                if (n as usize) <= self.projects.len() {
-                    self.active = n as usize - 1;
-                    return self.focus_selected_terminal();
+                let idx = n as usize - 1;
+                if idx < self.projects.len() && idx != self.active {
+                    self.active = idx;
+                    return Task::batch([self.focus_selected_terminal(), self.poll_git()]);
                 }
                 Task::none()
             }
@@ -1339,14 +1530,31 @@ impl App {
         self.focus_selected_terminal()
     }
 
+    /// What Ctrl+1..9 reaches, in the order the sidebar shows it: every
+    /// project in workspace order, each project's rows in category order,
+    /// RUNNING processes only — GTK's `switch_to_nth_global`.
+    ///
+    /// Three properties come from GTK and all three matter. The sequence is
+    /// GLOBAL, so the chords address the whole sidebar rather than restarting
+    /// per card; it is drawn order, not `entries` order, so the number on a
+    /// row matches counting rows down the screen (an agent sorts to the top
+    /// of its card whatever its saved index); and it skips everything not
+    /// running, because the switcher's job is to reach a live terminal and a
+    /// stopped row has none to focus. The same list draws the hints, so a
+    /// row can never advertise a chord that goes elsewhere.
+    fn switch_targets(&self) -> Vec<(usize, usize)> {
+        switch_targets_of(self.projects.iter().map(|p| p.entries.as_slice()))
+    }
+
     /// (project id, entry index) pairs matching the palette query, in
     /// sidebar order. Case-insensitive substring over "project process".
     fn palette_matches(&self) -> Vec<(u64, usize)> {
         let needle = self.palette_query.to_lowercase();
         let mut out = Vec::new();
         for project in &self.projects {
-            for (i, entry) in project.entries.iter().enumerate() {
-                let hay = format!("{} {}", project.name, entry.config.name).to_lowercase();
+            for i in sidebar_order(&project.entries) {
+                let hay =
+                    format!("{} {}", project.name, project.entries[i].config.name).to_lowercase();
                 if needle.is_empty() || hay.contains(&needle) {
                     out.push((project.id, i));
                 }
@@ -1369,9 +1577,10 @@ impl App {
         let Some(entry) = project.entries.get(project.selected) else {
             return Task::none();
         };
-        let (Some(term), true) = (entry.term_id, entry.terminal.is_some()) else {
+        let (Some(term), true) = (entry.term_id, entry.is_running()) else {
             return Task::none();
         };
+        let run = entry.run_id;
         let project_id = project.id;
         let host = project.location.host().map(String::from);
         let is_agent = entry.config.category == ProcessCategory::Agent;
@@ -1408,6 +1617,7 @@ impl App {
             move |joined| Event::ImagePasted {
                 project: project_id,
                 term,
+                run,
                 result: joined.unwrap_or_else(|e| Err(format!("paste worker died: {e}"))),
             },
         )
@@ -1571,7 +1781,7 @@ impl App {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
                 };
-                if self.projects[pidx].entries[index].terminal.is_some() {
+                if self.projects[pidx].entries[index].is_running() {
                     self.stop(pidx, index);
                 }
                 self.start_fresh(pidx, index)
@@ -1592,7 +1802,7 @@ impl App {
                     let entry = &self.projects[pidx].entries[index];
                     let idle = matches!(entry.status, Status::Stopped | Status::Crashed(_));
                     if entry.config.start_with_project && idle {
-                        if self.projects[pidx].entries[index].terminal.is_some() {
+                        if self.projects[pidx].entries[index].is_running() {
                             self.stop(pidx, index);
                         }
                         tasks.push(self.start_fresh(pidx, index));
@@ -1653,6 +1863,10 @@ impl App {
                 self.cursor = position;
                 Task::none()
             }
+            Event::CtrlHeld(down) => {
+                self.ctrl_held = down;
+                Task::none()
+            }
             Event::OpenContextMenu { project, index } => {
                 self.context_menu = Some(MenuTarget {
                     project,
@@ -1687,7 +1901,7 @@ impl App {
                     self.stop(pidx, index);
                     Task::none()
                 } else {
-                    if self.projects[pidx].entries[index].terminal.is_some() {
+                    if self.projects[pidx].entries[index].is_running() {
                         self.stop(pidx, index);
                     }
                     self.start_fresh(pidx, index)
@@ -1706,7 +1920,7 @@ impl App {
                 // GTK's spawn_with_command_override: a running session is
                 // replaced, and the override lasts one spawn — a later
                 // crash restarts the configured command.
-                if self.projects[pidx].entries[index].terminal.is_some() {
+                if self.projects[pidx].entries[index].is_running() {
                     self.stop(pidx, index);
                 }
                 self.projects[pidx].entries[index].command_override = Some(resume);
@@ -1760,6 +1974,50 @@ impl App {
                 }
                 Task::perform(tokio::time::sleep(FRAME), move |_| {
                     Event::SidebarTick(generation)
+                })
+            }
+            Event::ActivityTick => {
+                // Which agents are busy, on core's shared hysteresis. A
+                // card joins the sweep here; it only leaves at a pass
+                // boundary, so nothing blinks out mid-card.
+                for project in &mut self.projects {
+                    let working = project
+                        .entries
+                        .iter_mut()
+                        .fold(false, |any, entry| entry.sample_activity() | any);
+                    project.sweeping |= working;
+                }
+                let start = self
+                    .projects
+                    .iter()
+                    .any(|p| p.sweeping)
+                    .then(|| self.sweep.start())
+                    .flatten();
+                let next = Task::perform(tokio::time::sleep(activity::SAMPLE_INTERVAL), |_| {
+                    Event::ActivityTick
+                });
+                match start {
+                    Some(generation) => {
+                        Task::batch([next, Task::done(Event::SweepTick(generation))])
+                    }
+                    None => next,
+                }
+            }
+            Event::SweepTick(generation) => {
+                let Some(wrapped) = self.sweep.tick(generation) else {
+                    return Task::none();
+                };
+                if wrapped {
+                    for project in &mut self.projects {
+                        project.sweeping = project.agent_working();
+                    }
+                    if !self.projects.iter().any(|p| p.sweeping) {
+                        self.sweep.running = false;
+                        return Task::none();
+                    }
+                }
+                Task::perform(tokio::time::sleep(SWEEP_FRAME), move |_| {
+                    Event::SweepTick(generation)
                 })
             }
             Event::AddTerminal(project) => match self.project_index(project) {
@@ -2044,18 +2302,20 @@ impl App {
             Event::ImagePasted {
                 project,
                 term,
+                run,
                 result,
             } => {
                 match result {
                     Ok(bytes) => {
-                        // Only if the initiating terminal is still alive —
-                        // a restart between paste and upload must not type
-                        // a stale path into the fresh run.
+                        // Only if the run that asked is still the one on the
+                        // other end — a restart between paste and upload
+                        // must not type a stale path into the fresh run.
                         let target = self.project_index(project).and_then(|pidx| {
                             self.projects[pidx]
                                 .entries
                                 .iter_mut()
-                                .find(|e| e.term_id == Some(term))
+                                .find(|e| e.term_id == Some(term) && e.run_id == run)
+                                .filter(|e| e.is_running())
                                 .and_then(|e| e.terminal.as_mut())
                         });
                         if let Some(terminal) = target {
@@ -2308,7 +2568,14 @@ impl App {
                 let mut rescan = false;
                 if let BackendCommand::ProcessAlacrittyEvent(ev) = &cmd {
                     match ev {
-                        AEvent::Wakeup => rescan = true,
+                        AEvent::Wakeup => {
+                            rescan = true;
+                            // The repaint signal the working-agent sweep
+                            // reads — VTE's contents-changed on GTK.
+                            let entry = &mut self.projects[pidx].entries[index];
+                            entry.activity_burst = entry.activity_burst.saturating_add(1);
+                            entry.last_activity = Some(Instant::now());
+                        }
                         AEvent::ChildExit(code) => {
                             self.projects[pidx].entries[index].last_exit = Some(*code);
                         }
@@ -2847,6 +3114,11 @@ impl App {
         let query = self.filter_query.trim().to_lowercase();
         let filter = (self.filter_open && !query.is_empty()).then_some(query.as_str());
 
+        // Numbered over the whole workspace, not per visible card: a filter
+        // hides rows but does not rebind the chords, so the hint a row keeps
+        // is still the one that reaches it.
+        let targets = self.switch_targets();
+
         let mut col = column![].spacing(10).padding([12, 10]);
         for (pidx, project) in self.projects.iter().enumerate() {
             if let Some(q) = filter {
@@ -2859,7 +3131,7 @@ impl App {
                     continue;
                 }
             }
-            col = col.push(self.view_project_block(pidx, project, filter));
+            col = col.push(self.view_project_block(pidx, project, filter, &targets));
         }
 
         let mut inner = column![
@@ -2920,6 +3192,7 @@ impl App {
         pidx: usize,
         project: &'a ProjectState,
         filter: Option<&str>,
+        targets: &[(usize, usize)],
     ) -> Element<'a, Event> {
         let remote = project.location.is_remote();
         let accent = accent_for(remote);
@@ -3051,12 +3324,7 @@ impl App {
                     // a separator after the last one is padding, and it made
                     // the card bottom-heavy against the 8px above the header.
                     let mut first = true;
-                    for category in [
-                        ProcessCategory::Agent,
-                        ProcessCategory::Command,
-                        ProcessCategory::SSH,
-                        ProcessCategory::Terminal,
-                    ] {
+                    for category in SIDEBAR_CATEGORIES {
                         let members: Vec<usize> = (0..project.entries.len())
                             .filter(|&i| project.entries[i].config.category == category)
                             .filter(|&i| match filter {
@@ -3074,32 +3342,42 @@ impl App {
                         }
                         first = false;
                         for i in members {
-                            block = block.push(self.view_row(pidx, i));
+                            block = block.push(self.view_row(pidx, i, targets));
                         }
                     }
                 }
             }
         }
 
+        let sweep = project.sweeping.then_some(self.sweep.phase);
         container(block)
             .width(Length::Fill)
             .padding(8)
-            .style(theme::project_card(accent, running, active))
+            .style(theme::project_card(accent, running, active, sweep))
             .into()
     }
 
-    fn view_row(&'_ self, pidx: usize, index: usize) -> Element<'_, Event> {
+    fn view_row(
+        &'_ self,
+        pidx: usize,
+        index: usize,
+        targets: &[(usize, usize)],
+    ) -> Element<'_, Event> {
         let project = &self.projects[pidx];
         let remote = project.location.is_remote();
         let accent = accent_for(remote);
         let entry = &project.entries[index];
 
-        let (dot_color, dot) = match entry.status {
-            Status::Running => (accent, "\u{25cf}"),
-            Status::Stopped => (STOPPED, "\u{25cf}"),
-            Status::Crashed(_) => (CRASHED, "\u{25cf}"),
-            Status::Restarting(_) | Status::Reconnecting(_) => (RESTARTING, "\u{25cf}"),
+        let dot_color = match entry.status {
+            Status::Running => accent,
+            Status::Stopped => STOPPED,
+            Status::Crashed(_) => CRASHED,
+            Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
         };
+        // The light rides the card sweep's phase instead of keeping one of
+        // its own: every working row turns in step, and a busy agent still
+        // costs exactly one timer no matter how many rows are lit.
+        let working = entry.working.then_some(self.sweep.phase);
         let name = entry
             .config
             .display_name
@@ -3112,19 +3390,41 @@ impl App {
         // glyph cluster), and the row must measure the same with any of
         // them or the rows below shift while the pointer moves.
         let mut content = row![
-            text(dot).size(10).color(dot_color),
+            status_dot(dot_color, working),
             clipped_label(text(name).size(12.5)),
         ]
         .spacing(8)
         .height(17)
         .align_y(iced::Alignment::Center);
 
-        // Ctrl+1..9 hints (settings-gated) on the active project's rows —
-        // the chords the digit switcher actually honors. The hint yields
-        // its slot to the lifecycle glyphs while the pointer is here.
-        if !hovered && self.settings.sidebar.show_keybind_hints && pidx == self.active && index < 9
+        // Ctrl+1..9 keycaps, revealed only while Ctrl is actually down.
+        //
+        // Numbered off the very list the switcher indexes into — the label
+        // is a lookup, never a count of its own, so the two cannot drift.
+        // Standing hints were the wrong shape for what this became: the
+        // sequence is global and skips stopped rows, so it is at most nine
+        // marks scattered over the whole sidebar, and holding a slot on
+        // every row to show them was paying full chrome for a sparse
+        // overlay. On the modifier the sparseness is the point — only the
+        // reachable rows answer.
+        //
+        // The cap carries the digit alone. `⌃` is the half of the chord
+        // that never varies, it is illegible at this size, and while the
+        // reveal is running the modifier is being held anyway.
+        //
+        // Still yields to the lifecycle glyphs under the pointer: they
+        // share this slot, and the row's fixed height is what keeps that
+        // swap from re-flowing the rows below.
+        if self.ctrl_held
+            && !hovered
+            && self.settings.sidebar.show_keybind_hints
+            && let Some(slot) = targets.iter().position(|&t| t == (pidx, index))
         {
-            content = content.push(text(format!("\u{2303}{}", index + 1)).size(9).color(DIM));
+            content = content.push(
+                container(text(slot + 1).size(10))
+                    .padding([0, 4])
+                    .style(theme::keycap),
+            );
         }
 
         if let Some(port) = project.ports.get_port(&entry.config.name) {
@@ -3480,22 +3780,14 @@ impl App {
                 })
                 .style(theme::terminal_pane)
                 .into(),
+            // Only before a process's FIRST run: from then on its terminal
+            // stays for good, showing what the last run printed, and the
+            // toolbar pill carries the status the pane used to spell out.
             None => {
                 let label = match entry.status {
-                    Status::Crashed(Some(code)) => {
-                        format!("crashed with exit {code} \u{2014} start again when ready")
+                    Status::Crashed(_) => {
+                        String::from("could not start \u{2014} check the command")
                     }
-                    Status::Crashed(None) => {
-                        String::from("crashed \u{2014} start again when ready")
-                    }
-                    Status::Restarting(attempt) => format!(
-                        "restarting \u{00b7} attempt {attempt}/{}",
-                        processes::MAX_RESTART_ATTEMPTS
-                    ),
-                    Status::Reconnecting(attempt) => format!(
-                        "connection lost \u{2014} reconnecting (attempt {attempt}). \
-                         The process keeps running on the host."
-                    ),
                     _ => String::from("not running"),
                 };
                 container(text(label).size(13).color(DIM))
@@ -3556,7 +3848,7 @@ impl App {
         col = col.push(container(body).width(Length::Fill).height(Length::Fill));
 
         if entry.config.category == ProcessCategory::Agent
-            && entry.terminal.is_some()
+            && entry.is_running()
             && self.settings.tools.agent_composer
         {
             let placeholder = format!("message to {}\u{2026}", entry.config.name);
@@ -4083,6 +4375,17 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Event::CursorMoved(position))
                 }
+                // The keycap reveal. Taken from ModifiersChanged rather than
+                // KeyPressed because a bare modifier is not a key press —
+                // and read regardless of capture status, since the terminal
+                // swallows the keyboard whenever it has focus, which is
+                // exactly when the hint is wanted.
+                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
+                    Some(Event::CtrlHeld(m.control()))
+                }
+                // Ctrl+Tab away and the release never arrives; without this
+                // the sidebar comes back still wearing its keycaps.
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Event::CtrlHeld(false)),
                 _ => None,
             }),
             // exit_on_close_request(false): the close button routes through
@@ -4359,5 +4662,97 @@ mod tests {
             "{} != {mirrored}",
             a.eased()
         );
+    }
+
+    /// `(name, category)` → a running entry.
+    fn up(name: &str, category: ProcessCategory) -> ProcessEntry {
+        let mut e = ProcessEntry::new(ProcessConfig {
+            name: name.into(),
+            command: format!("echo {name}"),
+            working_dir: None,
+            start_with_project: false,
+            auto_restart: false,
+            open_in_browser: false,
+            restart_when_changed: Vec::new(),
+            env: Default::default(),
+            category,
+            auto_named: false,
+            display_name: None,
+        });
+        e.status = Status::Running;
+        e
+    }
+
+    fn down(name: &str, category: ProcessCategory) -> ProcessEntry {
+        let mut e = up(name, category);
+        e.status = Status::Stopped;
+        e
+    }
+
+    #[test]
+    fn slots_follow_drawn_order_not_entry_order() {
+        // The reported card: four commands with an agent saved third. The
+        // agent draws at the TOP of the card, so it must own Ctrl+1 — the
+        // old code numbered by entry index and labelled it Ctrl+3, which is
+        // what made the sidebar read 3,1,2,4,5 down the screen.
+        use ProcessCategory::{Agent, Command};
+        let entries = vec![
+            up("dev", Command),
+            up("build", Command),
+            up("shopify app launch status", Agent),
+            up("deploy", Command),
+            up("deploy shopify config", Command),
+        ];
+        let targets = switch_targets_of([entries.as_slice()]);
+        assert_eq!(targets, vec![(0, 2), (0, 0), (0, 1), (0, 3), (0, 4)]);
+    }
+
+    #[test]
+    fn categories_draw_agents_commands_terminals_ssh() {
+        // Must match GTK's `running_names_in_sidebar_order`; the iced port
+        // had Terminal and SSH the other way round.
+        use ProcessCategory::{Agent, Command, SSH, Terminal};
+        let entries = vec![
+            up("s", SSH),
+            up("t", Terminal),
+            up("c", Command),
+            up("a", Agent),
+        ];
+        let order: Vec<usize> = sidebar_order(&entries).collect();
+        assert_eq!(order, vec![3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn stopped_rows_take_no_slot() {
+        // GTK only numbers running processes: the chord's whole job is to
+        // focus a terminal, and a stopped row has none.
+        use ProcessCategory::Command;
+        let entries = vec![
+            down("a", Command),
+            up("b", Command),
+            down("c", Command),
+            up("d", Command),
+        ];
+        assert_eq!(
+            switch_targets_of([entries.as_slice()]),
+            vec![(0, 1), (0, 3)]
+        );
+    }
+
+    #[test]
+    fn numbering_runs_across_projects() {
+        // Global, not per-card — Ctrl+N addresses the whole sidebar.
+        use ProcessCategory::Command;
+        let a = vec![up("a1", Command), up("a2", Command)];
+        let b = vec![up("b1", Command)];
+        let targets = switch_targets_of([a.as_slice(), b.as_slice()]);
+        assert_eq!(targets, vec![(0, 0), (0, 1), (1, 0)]);
+    }
+
+    #[test]
+    fn numbering_stops_at_nine() {
+        use ProcessCategory::Command;
+        let entries: Vec<ProcessEntry> = (0..12).map(|i| up(&i.to_string(), Command)).collect();
+        assert_eq!(switch_targets_of([entries.as_slice()]).len(), SWITCH_SLOTS);
     }
 }

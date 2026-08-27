@@ -333,7 +333,10 @@ fn page_sidebar<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
             ),
             switch_row(
                 "Show Keybind Hints",
-                "Show Ctrl+1..9 on the first nine processes in the sidebar",
+                // The only place the chord is spelled out now that the caps
+                // carry a bare digit — and the only hint that holding Ctrl
+                // shows them at all.
+                "Hold Ctrl to number the first nine running processes in the sidebar",
                 sb.show_keybind_hints,
                 Msg::KeybindHints,
             ),

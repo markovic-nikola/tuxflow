@@ -59,6 +59,14 @@ memory, rendering under your real workload.
 - **Composer** under agent terminals: type locally, Enter/send delivers.
 - **Lifecycle**: crash → auto-restart backoff (1s→32s, gives up at 5,
   60 s of stability resets), notifications per your settings flags.
+- **Output survives the run** (GTK's one-VTE-per-process): a command that
+  finishes, crashes or is stopped leaves everything it printed on screen —
+  the status moves to the toolbar pill. A bad exit gets the same
+  `[tuxflow] …` line GTK feeds (exit 127 names the host and the command),
+  and starting it again appends under a dim rule rather than on a blank
+  pane, so a crash loop reads as a stack of runs. Worth pushing on: a TUI
+  that dies without cleaning up (the respawn leaves the alt screen for
+  you), and scrollback/search/copy on a process that is no longer running.
 - **Workspace**: recently-used project order, add/edit/delete process
   (working directory field included), add project, SSH section rows,
   git chip in the status bar (branch ↑ahead ↓behind ±changed, 20 s

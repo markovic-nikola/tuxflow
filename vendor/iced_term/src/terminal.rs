@@ -2,7 +2,7 @@ use crate::actions::Action;
 use crate::backend;
 use crate::bindings::{Binding, BindingAction, BindingsLayout, InputKind};
 use crate::font::TermFont;
-use crate::settings::{FontSettings, Settings, ThemeSettings};
+use crate::settings::{BackendSettings, FontSettings, Settings, ThemeSettings};
 use crate::theme::{ColorPalette, Theme};
 use crate::AlacrittyEvent;
 use iced::futures::stream::BoxStream;
@@ -89,6 +89,37 @@ impl Terminal {
 
     pub fn backend(&self) -> &backend::Backend {
         &self.backend
+    }
+
+    /// End the running child, keeping the grid readable
+    /// (`backend::Backend::shutdown`). A terminal whose process was stopped
+    /// still shows what that process printed.
+    pub fn shutdown(&self) {
+        self.backend.shutdown();
+    }
+
+    /// Run something else in this terminal, appending under `banner`
+    /// instead of on a blank grid (`backend::Backend::respawn`). One
+    /// terminal therefore spans every run of a process — its subscription
+    /// and widget id survive, so neither the embedder's event routing nor
+    /// keyboard focus has to be rebuilt per run.
+    pub fn respawn(
+        &mut self,
+        settings: BackendSettings,
+        banner: &[u8],
+    ) -> Result<()> {
+        let spawned = self.backend.respawn(&settings, banner);
+        let _ = self.backend.sync();
+        self.redraw();
+        spawned
+    }
+
+    /// Write the embedder's own bytes into the grid, between runs only
+    /// (`backend::Backend::feed`).
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.backend.feed(bytes);
+        let _ = self.backend.sync();
+        self.redraw();
     }
 
     pub fn widget_id(&self) -> &iced::widget::Id {

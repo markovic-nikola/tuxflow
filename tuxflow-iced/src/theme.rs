@@ -172,6 +172,35 @@ pub fn terminal_pane(_: &Theme) -> container::Style {
     }
 }
 
+/// The angle every card gradient runs at: 135°, so offset 0 sits in the
+/// top-left corner and offset 1 in the bottom-right one.
+const CARD_DIAGONAL: Radians = Radians(2.356);
+
+/// The ACTIVE card's static wash, as (offset, accent strength) along the
+/// diagonal: lit at the top-left corner, fading out by the far one.
+const CARD_WASH: [(f32, f32); 3] = [(0.0, 0.10), (0.55, 0.02), (1.0, 0.0)];
+
+/// Peak accent strength of the working-agent band, on top of the wash.
+/// A quarter of what it shipped at first (Nikola, off the calibration
+/// bench and then a notch lower again): on the ACTIVE card the band lands
+/// on a corner the wash has already lit, and 0.10 + 0.10 put a bright
+/// field under the row labels — legible at 9:1, but it pulled the eye off
+/// them, which is the whole complaint. The ring carries the motion now,
+/// so the band only has to keep the surface from feeling static.
+const SWEEP_PEAK: f32 = 0.025;
+/// Half-width of the band as a fraction of the diagonal. Wide and soft —
+/// this is a slow breath across a sidebar card, not a loading skeleton.
+const SWEEP_HALF: f32 = 0.32;
+
+/// Ring alpha with nothing sweeping — GTK's `.project-has-running` edge.
+const RING_REST: f32 = 0.35;
+/// …and the range it breathes through while an agent works. This is the
+/// half of the signal that never crosses a row, which is why the band
+/// could go as quiet as it did: the ring carries the motion, the band
+/// only tints the surface it passes.
+const RING_MIN: f32 = 0.22;
+const RING_MAX: f32 = 0.60;
+
 /// A project card. Two orthogonal signals, as in GTK, where they are two
 /// unrelated CSS classes: an accent border RING says something inside is
 /// running (`.project-has-running`, which lights the container's left
@@ -180,27 +209,32 @@ pub fn terminal_pane(_: &Theme) -> container::Style {
 /// (`.project-active`, a background wash). GTK's ring is a 2px left edge;
 /// iced borders are all-or-nothing per side, so it goes around the whole
 /// card at a lower alpha for the same weight of ink.
+///
+/// `sweep` is the third: a 0..1 phase while an agent inside is producing
+/// output. It drives BOTH a band of accent light travelling the same
+/// diagonal and a breath in the ring, in step — the band adds to the wash
+/// rather than replacing it, so "active" and "an agent is working" stay
+/// readable together, and on a background card the band is the only thing
+/// lit, which is exactly the distinction. Splitting the signal across the
+/// two is what let the band drop to a whisper: a bright thing sliding
+/// under a row label reads as interference however legible it measures,
+/// so the carrying motion sits on the border, where there is no text.
 pub fn project_card(
     accent: Color,
     running: bool,
     active: bool,
+    sweep: Option<f32>,
 ) -> impl Fn(&Theme) -> container::Style {
     move |_| {
-        let background = if active {
-            Background::Gradient(Gradient::Linear(
-                Linear::new(Radians(2.356))
-                    .add_stop(0.0, mix(BG_CARD, accent, 0.10))
-                    .add_stop(0.55, mix(BG_CARD, accent, 0.02))
-                    .add_stop(1.0, BG_CARD),
-            ))
-        } else {
-            Background::Color(BG_CARD)
+        let background = match card_gradient(accent, active, sweep) {
+            Some(gradient) => Background::Gradient(gradient),
+            None => Background::Color(BG_CARD),
         };
         container::Style {
             background: Some(background),
             border: Border {
                 color: if running {
-                    alpha(accent, 0.35)
+                    alpha(accent, ring_alpha(sweep))
                 } else {
                     alpha(Color::WHITE, 0.05)
                 },
@@ -215,6 +249,90 @@ pub fn project_card(
             ..Default::default()
         }
     }
+}
+
+/// The ring's alpha at `sweep`: resting when nothing is working, else a
+/// cosine breath in step with the band — dimmest as the band waits off the
+/// top-left corner, fullest as it crosses the middle. Cosine rather than
+/// the band's own triangle because the ring has no position to give it
+/// away, only brightness, and a linear ramp reads as a flicker at the
+/// turn. Periodic, so the phase wrapping 1 → 0 costs nothing; the one
+/// seam is the pass where work ENDS, which leaves the ring at RING_MIN and
+/// steps it back to rest — 0.13 alpha on a 1px border, once per finished
+/// run, against a trough deep enough to read as breathing rather than
+/// blinking. That trade was the point of dipping below rest at all.
+fn ring_alpha(sweep: Option<f32>) -> f32 {
+    match sweep {
+        Some(phase) => {
+            let breath = 0.5 - (phase * std::f32::consts::TAU).cos() / 2.0;
+            RING_MIN + (RING_MAX - RING_MIN) * breath
+        }
+        None => RING_REST,
+    }
+}
+
+/// Accent strength of the static wash at `t` along the diagonal.
+fn wash_at(t: f32) -> f32 {
+    let mut prev = CARD_WASH[0];
+    for &stop in &CARD_WASH[1..] {
+        if t <= stop.0 {
+            let span = stop.0 - prev.0;
+            let f = if span > 0.0 {
+                ((t - prev.0) / span).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            return prev.1 + (stop.1 - prev.1) * f;
+        }
+        prev = stop;
+    }
+    prev.1
+}
+
+/// Where the band's peak sits at `phase`. It starts and ends a full
+/// half-width OUTSIDE the card, so the pass loops into the next one with
+/// nothing lit at the seam — no wrap-around jump to hide.
+fn band_center(phase: f32) -> f32 {
+    -SWEEP_HALF + phase * (1.0 + 2.0 * SWEEP_HALF)
+}
+
+/// Accent strength the band adds at `t`. A triangle rather than a cosine:
+/// at these strengths over a near-black card the profiles are
+/// indistinguishable, and a triangle needs three stops instead of five.
+fn band_at(t: f32, center: f32) -> f32 {
+    SWEEP_PEAK * (1.0 - (t - center).abs() / SWEEP_HALF).max(0.0)
+}
+
+/// The card's background gradient, or `None` when nothing lights it and a
+/// flat fill will do.
+fn card_gradient(accent: Color, active: bool, sweep: Option<f32>) -> Option<Gradient> {
+    if !active && sweep.is_none() {
+        return None;
+    }
+    let center = sweep.map(band_center);
+    // Stops go where the intensity changes slope: the wash's own
+    // breakpoints, plus the band's leading edge, peak and trailing edge.
+    // Six at most, comfortably inside iced's cap of eight.
+    let mut offsets: Vec<f32> = CARD_WASH.iter().map(|(offset, _)| *offset).collect();
+    if let Some(c) = center {
+        offsets.extend(
+            [c - SWEEP_HALF, c, c + SWEEP_HALF]
+                .into_iter()
+                .filter(|t| (0.0..=1.0).contains(t)),
+        );
+    }
+    // Ascending, because `add_stop` writes at the sorted index WITHOUT
+    // shifting what is already there: a stop added out of order silently
+    // overwrites its neighbour.
+    offsets.sort_by(|a, b| a.partial_cmp(b).expect("finite offsets"));
+    offsets.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+
+    let mut gradient = Linear::new(CARD_DIAGONAL);
+    for t in offsets {
+        let amount = if active { wash_at(t) } else { 0.0 } + center.map_or(0.0, |c| band_at(t, c));
+        gradient = gradient.add_stop(t, mix(BG_CARD, accent, amount));
+    }
+    Some(Gradient::Linear(gradient))
 }
 
 /// 26px rounded initials square.
@@ -239,6 +357,33 @@ pub fn pill(_: &Theme) -> container::Style {
         border: Border {
             radius: 99.0.into(),
             ..Default::default()
+        },
+        text_color: Some(TEXT_SECONDARY),
+        ..Default::default()
+    }
+}
+
+/// The Ctrl+N keycap revealed on a sidebar row while Ctrl is held. Squared
+/// off against [`pill`]'s full round on purpose: the port pill sits in the
+/// same strip, and shape is what separates them at 9px where neither is
+/// really readable as a word.
+///
+/// A real keycap's weighted bottom edge cannot be a border — iced border
+/// widths are all-or-nothing across the four sides — so the lip is an
+/// unblurred shadow offset a single pixel down, which renders as exactly
+/// that edge and nothing else.
+pub fn keycap(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(alpha(Color::WHITE, 0.055))),
+        border: Border {
+            color: alpha(Color::WHITE, 0.12),
+            width: 1.0,
+            radius: 3.0.into(),
+        },
+        shadow: Shadow {
+            color: alpha(Color::BLACK, 0.5),
+            offset: Vector::new(0.0, 1.0),
+            blur_radius: 0.0,
         },
         text_color: Some(TEXT_SECONDARY),
         ..Default::default()
@@ -554,5 +699,110 @@ fn mix(base: Color, tint: Color, t: f32) -> Color {
         g: base.g + (tint.g - base.g) * t,
         b: base.b + (tint.b - base.b) * t,
         a: 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stops(active: bool, sweep: Option<f32>) -> Vec<(f32, f32)> {
+        let Some(Gradient::Linear(g)) = card_gradient(REMOTE_ACCENT, active, sweep) else {
+            panic!("expected a gradient");
+        };
+        // Recover each stop's accent strength from the blend it landed on
+        // (the red channel spans the widest between card and gold).
+        g.stops
+            .iter()
+            .flatten()
+            .map(|s| {
+                (
+                    s.offset,
+                    (s.color.r - BG_CARD.r) / (REMOTE_ACCENT.r - BG_CARD.r),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn idle_background_card_needs_no_gradient() {
+        assert!(card_gradient(REMOTE_ACCENT, false, None).is_none());
+    }
+
+    #[test]
+    fn stops_stay_ascending_and_within_the_cap() {
+        // add_stop overwrites rather than shifts out of order, and drops
+        // everything past the eighth — both silent, so pin them here.
+        for i in 0..=40 {
+            let phase = i as f32 / 40.0;
+            for active in [false, true] {
+                let stops = stops(active, Some(phase));
+                assert!(stops.len() <= 8, "phase {phase}: {} stops", stops.len());
+                assert!(
+                    stops.windows(2).all(|w| w[0].0 < w[1].0),
+                    "phase {phase}: {stops:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pass_loops_without_a_seam() {
+        // Nothing of the band is on the card at either end of a pass, so
+        // the phase can wrap 1 -> 0 with no jump to hide.
+        for phase in [0.0, 1.0] {
+            for (_, amount) in stops(false, Some(phase)) {
+                assert!(amount.abs() < 1e-3, "phase {phase} lit the card: {amount}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_band_crosses_the_card() {
+        // Mid-pass the peak is mid-card, and it travels monotonically.
+        let peak = |phase: f32| {
+            stops(false, Some(phase))
+                .into_iter()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).expect("finite"))
+                .expect("a stop")
+        };
+        let (offset, amount) = peak(0.5);
+        assert!((offset - 0.5).abs() < 1e-3, "peak at {offset}");
+        assert!((amount - SWEEP_PEAK).abs() < 1e-3, "peak strength {amount}");
+        assert!(peak(0.35).0 < offset && offset < peak(0.65).0);
+    }
+
+    #[test]
+    fn the_ring_breathes_in_step_with_the_band() {
+        assert!((ring_alpha(None) - RING_REST).abs() < 1e-6);
+        // Dimmest where the band waits off-card, fullest mid-crossing.
+        assert!((ring_alpha(Some(0.0)) - RING_MIN).abs() < 1e-6);
+        assert!((ring_alpha(Some(0.5)) - RING_MAX).abs() < 1e-6);
+        // Periodic: the phase wrapping 1 -> 0 must not step the border.
+        assert!((ring_alpha(Some(1.0)) - ring_alpha(Some(0.0))).abs() < 1e-6);
+        // Monotone up over the first half, so it reads as one breath.
+        let mut prev = ring_alpha(Some(0.0));
+        for i in 1..=25 {
+            let a = ring_alpha(Some(i as f32 / 50.0));
+            assert!(a > prev, "phase {i}/50 fell back to {a}");
+            prev = a;
+        }
+    }
+
+    #[test]
+    fn the_sweep_adds_to_the_active_wash() {
+        // Both signals stay readable at once: the active card keeps its
+        // lit top-left corner while the band rides over it.
+        let corner = |sweep| {
+            stops(true, sweep)
+                .into_iter()
+                .find(|(offset, _)| *offset == 0.0)
+                .expect("the 0.0 stop")
+                .1
+        };
+        assert!((corner(None) - CARD_WASH[0].1).abs() < 1e-3);
+        assert!(corner(Some(0.0)) > corner(None) - 1e-3);
+        // The band's own pass over the corner is what brightens it.
+        assert!(corner(Some(0.16)) > corner(None) + 0.02);
     }
 }

@@ -235,7 +235,7 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         "r",        Modifiers::CTRL; BindingAction::Char('\x12');
         "s",        Modifiers::CTRL; BindingAction::Char('\x13');
         "t",        Modifiers::CTRL; BindingAction::Char('\x14');
-        "u",        Modifiers::CTRL; BindingAction::Char('\x51');
+        "u",        Modifiers::CTRL; BindingAction::Char('\x15'); // NAK               vt100
         "v",        Modifiers::CTRL; BindingAction::Char('\x16');
         "w",        Modifiers::CTRL; BindingAction::Char('\x17');
         "x",        Modifiers::CTRL; BindingAction::Char('\x18');
@@ -258,6 +258,7 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         ArrowLeft,  Modifiers::SHIFT; BindingAction::Esc("\x1b[1;2D".into());
         ArrowRight, Modifiers::SHIFT; BindingAction::Esc("\x1b[1;2C".into());
         // ALT
+        Enter,      Modifiers::ALT; BindingAction::Esc("\x1b\x0d".into());
         Backspace,  Modifiers::ALT; BindingAction::Esc("\x1b\x7f".into());
         End,        Modifiers::ALT; BindingAction::Esc("\x1b[1;3F".into());
         Home,       Modifiers::ALT; BindingAction::Esc("\x1b[1;3H".into());
@@ -303,7 +304,7 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         "r",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x12');
         "s",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x13');
         "t",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x14');
-        "u",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x51');
+        "u",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x15');
         "v",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x16');
         "w",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x17');
         "x",        Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x18');
@@ -445,6 +446,36 @@ mod tests {
             ),
             BindingAction::Passthrough,
         );
+    }
+
+    #[test]
+    fn alt_enter_sends_esc_cr() {
+        // Claude Code's newline chord; VTE sends the same bytes.
+        let layout = BindingsLayout::default();
+        assert_eq!(
+            layout.get_action(
+                InputKind::KeyCode(Named::Enter),
+                Modifiers::ALT,
+                TermMode::empty(),
+            ),
+            BindingAction::Esc("\x1b\x0d".into()),
+        );
+    }
+
+    #[test]
+    fn ctrl_u_is_nak() {
+        // Shell kill-line — upstream shipped 0x51 ('Q'), a transposition.
+        let layout = BindingsLayout::default();
+        for modifiers in [Modifiers::CTRL, Modifiers::SHIFT | Modifiers::CTRL] {
+            assert_eq!(
+                layout.get_action(
+                    InputKind::Char("u".into()),
+                    modifiers,
+                    TermMode::empty(),
+                ),
+                BindingAction::Char('\x15'),
+            );
+        }
     }
 
     #[test]

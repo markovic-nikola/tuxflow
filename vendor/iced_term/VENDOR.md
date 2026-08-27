@@ -201,3 +201,27 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    Also logs each terminal's measured cell metrics at INFO — if a
    platform's font resolution ever produces degenerate metrics, the log
    says so immediately.
+14. **Keyboard fidelity: Alt+Enter, Alt as ESC-prefix, Ctrl+U** (found
+   test-driving Claude Code in the iced shell: Alt+Enter would not insert
+   a newline, and readline's Alt+B/F did nothing). Upstream has no
+   Alt+Enter binding and the named-key path has no text fallback, so the
+   chord wrote NOTHING to the PTY; Alt+<letter> fell through to the bare
+   character, losing the ESC prefix every other terminal sends (xterm
+   metaSendsEscape, the VTE and alacritty defaults). Alt+Enter now sends
+   `\x1b\r`, and the unmatched-text fallback inserts `\x1b` when Alt is
+   held — single-byte input only, so AltGr-composed characters pass
+   unmangled. Also fixed Ctrl+U (both the CTRL and SHIFT+CTRL tables)
+   sending 0x51 ('Q') instead of 0x15 (NAK, vt100) — an upstream
+   transposition that broke shell kill-line.
+15. **Empty clipboard read must not capture the paste chord** (found live:
+   Ctrl+V pasted text but did nothing with an image on the clipboard).
+   iced's X11 clipboard backend (clipboard_x11) maps the owner's
+   conversion refusal — SelectionNotify with property=None, which is
+   exactly what an image-only clipboard owner answers to a UTF8_STRING
+   request — to `Ok("")`, not an error (verified empirically under Xvfb
+   with an image-only owner). The Paste arm therefore saw `Some("")`,
+   wrote an empty bracketed paste and CAPTURED the event, so it never
+   fell through to the embedder — whose image-paste bridge hangs off
+   precisely that fall-through (same mechanism as `Passthrough`). Paste
+   (and the middle-click PRIMARY paste) now treat an empty read as
+   "nothing to paste": no write, no capture.

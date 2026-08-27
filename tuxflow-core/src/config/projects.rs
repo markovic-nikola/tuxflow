@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,17 @@ pub struct SavedProjects {
     /// per project. Drives the sidebar's "recently used first" sort.
     #[serde(default)]
     pub last_used: BTreeMap<String, u64>,
+    /// The file every mutation writes back to, stamped by [`Self::load_from`].
+    /// `None` — which is what `default()` gives — means **nowhere**; see
+    /// [`Self::save`] for why that is the safe default rather than the real
+    /// config path.
+    ///
+    /// Skipped by serde: it is plumbing, not data. It also sits last on
+    /// purpose — TOML puts every plain value before the first table, so a
+    /// serialized path down here would fail to encode rather than quietly
+    /// appear in the user's file.
+    #[serde(skip)]
+    path: Option<PathBuf>,
 }
 
 impl SavedProjects {
@@ -37,9 +48,29 @@ impl SavedProjects {
     }
 
     pub fn load() -> Self {
-        let path = Self::config_path();
+        Self::load_from(Self::config_path())
+    }
+
+    /// Load from an explicit file, and bind every later mutation to it.
+    ///
+    /// This is the seam `load()` is built on, and the ONLY way a test should
+    /// obtain a `SavedProjects` it intends to mutate: the setters all persist
+    /// (see [`Self::save`]), so one built any other way either writes nothing
+    /// or — before this existed — wrote the developer's real workspace. The
+    /// file need not exist yet; a missing one loads as empty, exactly as the
+    /// app's first run does.
+    pub fn load_from(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let mut saved = Self::read(&path);
+        saved.path = Some(path);
+        saved
+    }
+
+    /// Parse the file, or an empty set if it is absent, unreadable or
+    /// malformed. Leaves `path` unset — [`Self::load_from`] stamps it.
+    fn read(path: &Path) -> Self {
         if path.exists() {
-            match fs::read_to_string(&path) {
+            match fs::read_to_string(path) {
                 Ok(content) => match toml::from_str(&content) {
                     Ok(saved) => {
                         log::info!("Loaded saved projects from {}", path.display());
@@ -53,8 +84,27 @@ impl SavedProjects {
         Self::default()
     }
 
+    /// Persist to the file this was loaded from. Called by every setter, so
+    /// callers rarely need it directly.
+    ///
+    /// A `SavedProjects` with no file behind it writes **nothing**. That is
+    /// the entire point of the `Option`: `default()` is what tests reach for,
+    /// and defaulting it to the real config path meant a test calling any
+    /// setter replaced a 33-project workspace with its own empty struct —
+    /// which happened twice. Making the accidental case inert costs nothing,
+    /// because the app always arrives through `load()`.
     pub fn save(&self) {
-        let path = Self::config_path();
+        let Some(path) = self.path.as_deref() else {
+            log::error!(
+                "SavedProjects::save() on an unbound instance — ignored. \
+                 Use load() in the app, or load_from(tmp) in tests."
+            );
+            return;
+        };
+        self.write_to(path);
+    }
+
+    fn write_to(&self, path: &Path) {
         if let Some(parent) = path.parent()
             && let Err(e) = fs::create_dir_all(parent)
         {
@@ -69,7 +119,7 @@ impl SavedProjects {
                 // torn half-write — parsing one as "empty workspace" and
                 // saving it back is how a workspace gets wiped.
                 let tmp = path.with_extension("toml.tmp");
-                let result = fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, &path));
+                let result = fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, path));
                 match result {
                     Ok(()) => log::debug!("Saved projects list to {}", path.display()),
                     Err(e) => log::error!("Failed to write saved projects: {e}"),
@@ -221,5 +271,93 @@ impl SavedProjects {
             list.retain(|c| c.name != process_name);
             self.save();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bound instance round-trips through the real setter → `save()` →
+    /// `load_from()` path, which had no coverage at all: every setter
+    /// persists, so exercising one used to mean writing the real config.
+    #[test]
+    fn a_setter_persists_and_reloads() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("projects.toml");
+
+        let mut saved = SavedProjects::load_from(&file);
+        saved.add("/p/one");
+        saved.set_name("/p/one", "One");
+        saved.set_icon("/p/one", Some("/p/one/logo.svg".into()));
+
+        let reloaded = SavedProjects::load_from(&file);
+        assert_eq!(reloaded.directories, vec!["/p/one".to_string()]);
+        assert_eq!(reloaded.get_name("/p/one").map(String::as_str), Some("One"));
+        assert_eq!(
+            reloaded.get_icon("/p/one").map(String::as_str),
+            Some("/p/one/logo.svg")
+        );
+    }
+
+    /// The regression guard for the actual incident: `default()` — what a
+    /// test reaches for — must come back UNBOUND, so the setters it calls
+    /// persist nowhere. Before the `path` field they targeted
+    /// `~/.config/tuxflow/projects.toml` and replaced a real workspace.
+    ///
+    /// The assertion is on the binding rather than on some file's absence:
+    /// an unbound `save()` would have written the developer's real config,
+    /// and a test cannot check that target without either reading the
+    /// developer's own file or racing a running app against it. `path: None`
+    /// plus `save()`'s early return on it is the whole safety property.
+    #[test]
+    fn a_default_instance_is_unbound() {
+        let mut saved = SavedProjects::default();
+        saved.set_icon("/p/one", Some("/p/one/logo.svg".into()));
+        saved.add("/p/one");
+        saved.set_last_used("/p/one", 42);
+
+        assert!(
+            saved.path.is_none(),
+            "default() must not be bound to any file"
+        );
+        // Inert means "does not persist", not "does not work" — the three
+        // mutations above still landed in memory, which is what the existing
+        // merge_saved tests rely on.
+        assert_eq!(saved.get_last_used("/p/one"), 42);
+        assert_eq!(saved.directories, vec!["/p/one".to_string()]);
+    }
+
+    /// The counterpart: a bound instance really does write. Together with
+    /// the test above this is the safety property in full — bound persists,
+    /// unbound cannot.
+    #[test]
+    fn a_bound_instance_writes_its_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("projects.toml");
+
+        let mut saved = SavedProjects::load_from(&file);
+        assert!(!file.exists(), "nothing written before the first mutation");
+
+        saved.add("/p/one");
+        assert!(file.exists(), "a setter on a bound instance must persist");
+    }
+
+    /// The `path` field is plumbing and must never reach the file — an
+    /// unknown key would be read back as data, and a plain value emitted
+    /// after the tables would not be valid TOML at all.
+    #[test]
+    fn the_bound_path_is_not_serialized() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("projects.toml");
+
+        let mut saved = SavedProjects::load_from(&file);
+        saved.add("/p/one");
+
+        let written = fs::read_to_string(&file).expect("must have been written");
+        assert!(
+            !written.contains("path"),
+            "`path` leaked into the config file:\n{written}"
+        );
     }
 }

@@ -511,9 +511,10 @@ mod tests {
     /// reset on every restart.
     #[test]
     fn custom_command_overrides_same_named_detection() {
-        // Struct literals, never the mutator methods: those auto-save to
-        // the REAL ~/.config/tuxflow/projects.toml, and a test run once
-        // wiped Nikola's actual workspace that way.
+        // `default()` is unbound, so its setters persist nowhere — which is
+        // what makes it safe here. It used to save to the REAL
+        // ~/.config/tuxflow/projects.toml and wiped Nikola's actual workspace
+        // twice; a test that needs persistence now uses `load_from(tmp)`.
         let mut saved = SavedProjects::default();
         let mut edited = pc("web");
         edited.open_in_browser = true;

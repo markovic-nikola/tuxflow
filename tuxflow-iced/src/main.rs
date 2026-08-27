@@ -15,6 +15,7 @@ mod status_dot;
 mod theme;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::Event as AEvent;
@@ -32,6 +33,7 @@ use tuxflow_core::remote::{self, ProjectLocation};
 use tuxflow_core::util::activity;
 use tuxflow_core::util::agents::resume_command_for;
 use tuxflow_core::util::banner;
+use tuxflow_core::util::icon_detector;
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
 use keys::{AppAction, AppKeys};
@@ -290,6 +292,10 @@ struct ProjectState {
     poll_chain_started: bool,
     terminals_created: usize,
     git: Option<tuxflow_core::remote::git::GitStatus>,
+    /// The project's avatar, resolved once at load; None falls back to the
+    /// initials square. Already checked to exist — `view` runs every frame
+    /// and must never stat the disk.
+    icon: Option<PathBuf>,
     /// The card is riding the working-agent sweep. Set when an agent here
     /// starts producing output, cleared only at a pass boundary — see
     /// [`Sweep::tick`].
@@ -420,8 +426,21 @@ enum ConfirmAction {
 }
 
 /// Probe success: project name if configured, process configs, live tmux
-/// sessions. Failure: message + whether it's worth retrying.
-type ProbeResult = Result<(Option<String>, Vec<ProcessConfig>, Vec<String>), (String, bool)>;
+/// sessions, and the local cache path of a fetched icon. Failure: message +
+/// whether it's worth retrying.
+type ProbeResult = Result<ProbeOk, (String, bool)>;
+
+/// The probe's payload — a struct rather than a tuple because the icon made
+/// it four wide and `p.2` stopped saying anything.
+#[derive(Debug, Clone)]
+struct ProbeOk {
+    name: Option<String>,
+    configs: Vec<ProcessConfig>,
+    live_sessions: Vec<String>,
+    /// Icon pulled into `~/.cache/tuxflow/icons/`, when the project had none
+    /// saved and the host had one to give.
+    icon: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 enum Event {
@@ -744,6 +763,7 @@ impl App {
             poll_chain_started: false,
             terminals_created: 0,
             git: None,
+            icon: None,
             sweeping: false,
             location,
         };
@@ -754,6 +774,15 @@ impl App {
                 if self.saved.get_name(key).is_none() {
                     project.name = name;
                 }
+                // Local detection is a handful of stats on a directory we are
+                // already reading configs from — cheap enough to stay inline,
+                // unlike the remote half, which rides the probe worker.
+                project.icon = usable_icon(icon_detector::resolve_icon(
+                    &mut self.saved,
+                    key,
+                    Some(&dir),
+                    None,
+                ));
                 let merged = processes::merge_saved(configs, &self.saved, key);
                 project.entries = processes::entries_from(merged);
                 project.phase = Phase::Ready;
@@ -799,6 +828,9 @@ impl App {
         ) else {
             return Task::none();
         };
+        // A project that already has an icon skips the fetch entirely — it is
+        // a second ssh round trip, and the saved path wins over it anyway.
+        let fetch_icon = self.saved.get_icon(&self.projects[pidx].key()).is_none();
         Task::perform(
             tokio::task::spawn_blocking(move || {
                 remote::probe::probe_remote(&host, &dir, true)
@@ -812,7 +844,20 @@ impl App {
                                 .flat_map(|s| s.suggested_processes)
                                 .collect(),
                         };
-                        (name, configs, p.live_sessions)
+                        // Own ssh permit inside: the probe released its own
+                        // on return and the fetch opens channels of its own.
+                        let icon = fetch_icon
+                            .then(|| {
+                                let _permit = remote::ssh_permit();
+                                remote::icon::fetch_remote_icon(&host, &dir)
+                            })
+                            .flatten();
+                        ProbeOk {
+                            name,
+                            configs,
+                            live_sessions: p.live_sessions,
+                            icon,
+                        }
                     })
                     .map_err(|e| {
                         let retryable = matches!(e, ProbeError::Unreachable(_));
@@ -1080,6 +1125,11 @@ impl App {
         let key = self.projects[pidx].key();
         if let Some(tunnels) = &mut self.projects[pidx].tunnels {
             tunnels.close_all();
+        }
+        // A fetched remote icon lives in our cache — delete it with the
+        // project so removals don't orphan cache files (GTK parity).
+        if let Some(icon) = self.saved.get_icon(&key) {
+            remote::icon::discard_if_cached(icon);
         }
         self.projects.remove(pidx);
         self.saved.remove(&key);
@@ -1727,13 +1777,26 @@ impl App {
                     return Task::none();
                 };
                 match result {
-                    Ok((name, configs, live_sessions)) => {
+                    Ok(ProbeOk {
+                        name,
+                        configs,
+                        live_sessions,
+                        icon,
+                    }) => {
                         let key = self.projects[pidx].key();
                         if self.saved.get_name(&key).is_none()
                             && let Some(name) = name
                         {
                             self.projects[pidx].name = name;
                         }
+                        // Remote projects have no local dir to scan — the icon
+                        // arrives already fetched into the cache by the probe.
+                        self.projects[pidx].icon = usable_icon(icon_detector::resolve_icon(
+                            &mut self.saved,
+                            &key,
+                            None,
+                            icon,
+                        ));
                         let merged = processes::merge_saved(configs, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
@@ -3198,18 +3261,51 @@ impl App {
         let accent = accent_for(remote);
         let active = pidx == self.active;
 
-        // 26px initials square.
-        let initials: String = project
-            .name
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .take(2)
-            .collect::<String>()
-            .to_uppercase();
-        let icon = container(text(initials).size(9).font(bold()))
-            .center_x(26)
-            .center_y(26)
-            .style(theme::icon_square(accent, remote));
+        // 26px avatar: the project's own artwork, or an initials square.
+        let icon: Element<'a, Event> = match &project.icon {
+            Some(path) => {
+                // Drawn bare, as GTK does: `.project-icon-area` carries only
+                // the rounded clip and the accent wash belongs to
+                // `.project-icon`, the initials label. A logo sitting on an
+                // accent tint reads as a *tinted logo*.
+                let art: Element<'a, Event> = if is_svg(path) {
+                    // No `svg::Style` here — that is the symbolic recolor and
+                    // these are full-colour art. No radius either: `svg` has
+                    // no `border_radius`, and vector logos bring their own
+                    // transparent corners, so GTK's clip is a no-op on them.
+                    iced::widget::svg(iced::widget::svg::Handle::from_path(path))
+                        .width(26)
+                        .height(26)
+                        .into()
+                } else {
+                    // The radius is GTK's `overflow: hidden`, and it earns its
+                    // place: a favicon with opaque corners is a hard square in
+                    // a column of rounded ones. iced applies it to the FITTED
+                    // art bounds rather than the layout box, so a non-square
+                    // logo gets its own corners rounded, not a crop.
+                    iced::widget::image(iced::widget::image::Handle::from_path(path))
+                        .width(26)
+                        .height(26)
+                        .border_radius(8)
+                        .into()
+                };
+                container(art).center_x(26).center_y(26).into()
+            }
+            None => {
+                let initials: String = project
+                    .name
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .take(2)
+                    .collect::<String>()
+                    .to_uppercase();
+                container(text(initials).size(9).font(bold()))
+                    .center_x(26)
+                    .center_y(26)
+                    .style(theme::icon_square(accent, remote))
+                    .into()
+            }
+        };
 
         // GTK's hover controls on the project row: start the marked set,
         // restart the running, stop everything. They take the counter
@@ -4568,6 +4664,23 @@ fn bold() -> iced::Font {
         weight: iced::font::Weight::Bold,
         ..iced::Font::DEFAULT
     }
+}
+
+/// An avatar path we can actually draw, or None for the initials square.
+/// Existence is checked HERE, once at load, and never again: a saved icon
+/// can outlive the file it names (a deleted logo, a cleared cache), and iced
+/// draws a missing image as an empty hole where GTK's initials would be —
+/// but `view` runs every frame and has no business touching the disk.
+fn usable_icon(path: Option<String>) -> Option<PathBuf> {
+    let path = PathBuf::from(path?);
+    path.is_file().then_some(path)
+}
+
+/// Vector art goes to the `svg` widget, raster to `image` — iced has one
+/// decoder each and no sniffing between them.
+fn is_svg(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
 }
 
 /// 1px hairline (style.css alpha(@borders, .3)) — horizontal.

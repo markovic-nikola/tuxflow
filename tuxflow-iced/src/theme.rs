@@ -2,7 +2,8 @@
 //! (chosen from the four-directions review, 2026-08-26).
 //!
 //! Each project is a floating card on a darker ground; the ACTIVE card is
-//! lit by a corner-to-corner accent gradient. Ports, counters and statuses
+//! lit by a corner-to-corner accent gradient, and a card with something
+//! RUNNING in it wears an accent border ring. Ports, counters and statuses
 //! are pills; the composer is a rounded field with a filled accent send.
 //! The location rule survives from the GTK system: gold = remote,
 //! green = local, and a project's accent tints its own interactions.
@@ -171,9 +172,19 @@ pub fn terminal_pane(_: &Theme) -> container::Style {
     }
 }
 
-/// A project card. The ACTIVE one (owning the main pane) is lit by the
-/// accent gradient running corner to corner and a tinted border.
-pub fn project_card(accent: Color, active: bool) -> impl Fn(&Theme) -> container::Style {
+/// A project card. Two orthogonal signals, as in GTK, where they are two
+/// unrelated CSS classes: an accent border RING says something inside is
+/// running (`.project-has-running`, which lights the container's left
+/// border to full accent and its title), and the corner-to-corner accent
+/// gradient says this is the ACTIVE project owning the main pane
+/// (`.project-active`, a background wash). GTK's ring is a 2px left edge;
+/// iced borders are all-or-nothing per side, so it goes around the whole
+/// card at a lower alpha for the same weight of ink.
+pub fn project_card(
+    accent: Color,
+    running: bool,
+    active: bool,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| {
         let background = if active {
             Background::Gradient(Gradient::Linear(
@@ -188,8 +199,8 @@ pub fn project_card(accent: Color, active: bool) -> impl Fn(&Theme) -> container
         container::Style {
             background: Some(background),
             border: Border {
-                color: if active {
-                    alpha(accent, 0.22)
+                color: if running {
+                    alpha(accent, 0.35)
                 } else {
                     alpha(Color::WHITE, 0.05)
                 },
@@ -341,12 +352,34 @@ pub fn process_row(
     }
 }
 
-/// Project card header row: transparent, soft accent tint on hover.
-pub fn project_row(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_, status| {
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        flat(alpha(accent, if hovered { 0.08 } else { 0.0 }), TEXT, 8.0)
+/// Project card header strip: a soft accent tint on hover, and nothing
+/// otherwise. GTK's `.project-active` also washes this row on the active
+/// project, but there the card behind it is undecorated — here the active
+/// card already wears the gradient, so a standing wash on top of it just
+/// boxes the title inside its own card.
+///
+/// The tint lives on the container wrapping the WHOLE row — title and the
+/// lifecycle glyphs beside it — rather than on the title button, which
+/// stops short of the glyphs and reads as a box floating inside the card.
+/// That also means it is driven by the row-level hover the sidebar already
+/// tracks for the glyph reveal, not by the button's own status: pointing at
+/// the glyph half has to light the strip too, and the button never sees it.
+pub fn project_header(accent: Color, hovered: bool) -> impl Fn(&Theme) -> container::Style {
+    let a = if hovered { 0.08 } else { 0.0 };
+    move |_| container::Style {
+        background: Some(Background::Color(alpha(accent, a))),
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
     }
+}
+
+/// The header's title half: a hit target for expand/collapse only. The
+/// wash it used to paint is [`project_header`]'s job now.
+pub fn header_title(_: &Theme, _: button::Status) -> button::Style {
+    flat(Color::TRANSPARENT, TEXT, 8.0)
 }
 
 /// Neutral pill button: toolbar chips, "+ project", cancel.
@@ -386,6 +419,97 @@ pub fn primary(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Styl
         ),
         button::Status::Pressed => flat(alpha(accent, 0.85), ON_ACCENT, 99.0),
         _ => flat(accent, ON_ACCENT, 99.0),
+    }
+}
+
+/// GTK header-bar icon button: flat until hovered, 6px corners, and a
+/// persistent wash while toggled on (sidebar / filter), like Adwaita's
+/// `.toggled` headerbar buttons.
+pub fn toolbar_icon(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let wash = match (active, status) {
+            (_, button::Status::Pressed) => 0.16,
+            (true, button::Status::Hovered) => 0.15,
+            (true, _) => 0.12,
+            (false, button::Status::Hovered) => 0.08,
+            (false, _) => 0.0,
+        };
+        flat(alpha(Color::WHITE, wash), TEXT, 6.0)
+    }
+}
+
+/// Right-click menu card (the GTK sidebar popovers): field-toned, tight
+/// radius, floating shadow.
+pub fn menu_card(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(BG_FIELD)),
+        border: Border {
+            color: alpha(Color::WHITE, 0.09),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    }
+}
+
+/// One menu row: flat until hovered; destructive rows read red and wash
+/// red (GTK's .destructive-menu-item).
+pub fn menu_item(destructive: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let ink = match (destructive, hovered) {
+            (true, _) => CRASHED,
+            (false, true) => TEXT,
+            (false, false) => TEXT_SECONDARY,
+        };
+        let bg = match (destructive, hovered) {
+            (_, false) => Color::TRANSPARENT,
+            (true, true) => alpha(CRASHED, 0.14),
+            (false, true) => alpha(Color::WHITE, 0.07),
+        };
+        flat(bg, ink, 7.0)
+    }
+}
+
+/// The confirmation card's destructive commit: filled red.
+pub fn danger() -> impl Fn(&Theme, button::Status) -> button::Style {
+    |_, status| match status {
+        button::Status::Hovered => flat(
+            Color {
+                r: (CRASHED.r + 0.05).min(1.0),
+                g: (CRASHED.g + 0.05).min(1.0),
+                b: (CRASHED.b + 0.05).min(1.0),
+                a: 1.0,
+            },
+            Color::WHITE,
+            99.0,
+        ),
+        button::Status::Pressed => flat(alpha(CRASHED, 0.85), Color::WHITE, 99.0),
+        _ => flat(CRASHED, Color::WHITE, 99.0),
+    }
+}
+
+/// Tooltip bubble under the header buttons.
+pub fn tooltip(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(BG_CARD)),
+        border: Border {
+            color: alpha(Color::WHITE, 0.10),
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        text_color: Some(TEXT_SECONDARY),
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+        ..Default::default()
     }
 }
 

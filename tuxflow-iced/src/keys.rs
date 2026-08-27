@@ -27,6 +27,8 @@ pub enum AppAction {
     FontDecrease,
     MoveProcessUp,
     MoveProcessDown,
+    ToggleSidebar,
+    FilterSidebar,
     /// Ctrl+1..9 — the GTK app's fixed process switcher.
     SelectProcessN(u8),
     /// Alt+1..9 — the GTK app's fixed project switcher.
@@ -51,8 +53,10 @@ pub struct AppKeys {
 
 impl AppKeys {
     pub fn from_settings(kb: &KeybindingsSettings) -> Self {
-        let sources: [(&String, AppAction); 11] = [
+        let sources: [(&String, AppAction); 13] = [
             (&kb.terminal_search, AppAction::TerminalSearch),
+            (&kb.toggle_sidebar, AppAction::ToggleSidebar),
+            (&kb.filter_processes, AppAction::FilterSidebar),
             (&kb.command_palette, AppAction::CommandPalette),
             (&kb.settings, AppAction::Settings),
             (&kb.prev_process, AppAction::PrevProcess),
@@ -281,8 +285,8 @@ mod tests {
     fn default_chords_parse() {
         // All shipped defaults must parse — a silent drop means a
         // shortcut the GTK app honors and this shell ignores.
-        // 11 settings-backed + 2 reorder built-ins + 18 digit switchers.
-        assert_eq!(keys().bindings.len(), 31);
+        // 13 settings-backed + 2 reorder built-ins + 18 digit switchers.
+        assert_eq!(keys().bindings.len(), 33);
     }
 
     #[test]
@@ -341,8 +345,13 @@ mod tests {
             keys.action_for(&key, Modifiers::CTRL | Modifiers::SHIFT),
             Some(AppAction::TerminalSearch)
         );
-        // Extra modifier bits (caps lock &c.) are ignored, missing ones fail.
-        assert_eq!(keys.action_for(&key, Modifiers::CTRL), None);
+        // A dropped modifier lands on the *other* binding sharing the key
+        // (Ctrl+F filters the sidebar, GTK parity), never on this one.
+        assert_eq!(
+            keys.action_for(&key, Modifiers::CTRL),
+            Some(AppAction::FilterSidebar)
+        );
+        assert_eq!(keys.action_for(&key, Modifiers::SHIFT), None);
     }
 
     #[test]

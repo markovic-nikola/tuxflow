@@ -28,6 +28,7 @@ use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
 use tuxflow_core::remote::{self, ProjectLocation};
+use tuxflow_core::util::agents::resume_command_for;
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
 
 use keys::{AppAction, AppKeys};
@@ -42,11 +43,75 @@ const POLL_SLOW: Duration = Duration::from_secs(30);
 /// Provisional badges get this long to firm up before auto-open fires.
 const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
 
+/// Frame cadence shared by every [`Anim`] ramp — ~60fps.
+const FRAME: Duration = Duration::from_millis(16);
+/// The sidebar cluster's slide-in (design round F).
+const HOVER_SLIDE_MS: f32 = 140.0;
+/// The sidebar's collapse/expand glide. Longer than the hover glide: it
+/// moves the whole window's layout, and Adwaita's own flap takes ~200ms.
+const SIDEBAR_SLIDE_MS: f32 = 180.0;
+
 /// GTK sidebar parity: AdwOverlaySplitView sizes the sidebar at a quarter
 /// of the window, clamped to the GTK app's min/max (window.rs: 220–400).
 const SIDEBAR_FRACTION: f32 = 0.25;
 const SIDEBAR_MIN: f32 = 220.0;
 const SIDEBAR_MAX: f32 = 400.0;
+/// Width of the collapsed icon rail, and so the floor of the collapse
+/// glide: 16px icon + 7px button padding either side + 4px rail padding.
+const SIDEBAR_RAIL: f32 = 38.0;
+
+/// A 0..1 progress ramp advanced by a self-scheduling chain of frame
+/// ticks — iced 0.14 has no animation driver, so this is the same
+/// sleep-and-re-fire idiom the restart timers use.
+///
+/// Generation-stamped because a ramp restarted mid-flight (toggle the
+/// sidebar twice quickly, sweep across two rows) leaves the previous
+/// chain in flight: without the stamp both chains keep firing and the
+/// ramp advances at double speed, then keeps ticking after it settles.
+#[derive(Default)]
+struct Anim {
+    t: f32,
+    stamp: u64,
+}
+
+impl Anim {
+    /// Restart from zero. The returned generation is what the tick chain
+    /// must carry back; anything else is stale by definition.
+    fn start(&mut self) -> u64 {
+        self.restart_at(0.0)
+    }
+
+    /// Restart so the ramp's EASED position lands on `f` — for reversing
+    /// a glide in flight without the widget jumping. The ease has to be
+    /// inverted to get there: `1 - t` would not do, since
+    /// `eased(1 - t) != 1 - eased(t)` (mirroring t=0.5 lands on 0.75, not
+    /// the 0.25 the reversal needs).
+    fn restart_at(&mut self, f: f32) -> u64 {
+        self.t = 1.0 - (1.0 - f.clamp(0.0, 1.0)).sqrt();
+        self.stamp += 1;
+        self.stamp
+    }
+
+    /// Advance one frame. `false` means stop scheduling — either the tick
+    /// was stale or the ramp has arrived.
+    fn tick(&mut self, generation: u64, span_ms: f32) -> bool {
+        if generation != self.stamp || self.t >= 1.0 {
+            return false;
+        }
+        self.t = (self.t + FRAME.as_millis() as f32 / span_ms).min(1.0);
+        self.t < 1.0
+    }
+
+    fn settled(&self) -> bool {
+        self.t >= 1.0
+    }
+
+    /// Ease-out (quadratic): quick off the mark, gentle into the seat.
+    fn eased(&self) -> f32 {
+        let t = self.t.clamp(0.0, 1.0);
+        1.0 - (1.0 - t) * (1.0 - t)
+    }
+}
 
 fn main() -> iced::Result {
     env_logger::init();
@@ -120,6 +185,20 @@ impl ProjectState {
     fn running(&self) -> usize {
         self.entries.iter().filter(|e| e.is_running()).count()
     }
+
+    /// Whether the card should read as live. Wider than [`running`], which
+    /// feeds the counter pill: GTK's `project_has_running` counts
+    /// `Restarting` too, and a `Reconnecting` remote process is the same
+    /// case — its tmux session is alive on the host, only the link is
+    /// down, so the card must not go dark mid-reconnect.
+    fn has_running(&self) -> bool {
+        self.entries.iter().any(|e| {
+            matches!(
+                e.status,
+                Status::Running | Status::Restarting(_) | Status::Reconnecting(_)
+            )
+        })
+    }
 }
 
 struct ProcessForm {
@@ -148,6 +227,27 @@ struct App {
     /// Settings view state; `Some` = the main pane shows settings.
     settings_ui: Option<settings_ui::State>,
     composer: String,
+    /// Header toggle (GTK: the AdwOverlaySplitView sidebar). Runtime-only,
+    /// like GTK — a fresh launch always shows the sidebar.
+    sidebar_visible: bool,
+    /// The collapse/expand glide toward whatever `sidebar_visible` now
+    /// says. Until it settles the sidebar is mid-flight, not at either end.
+    sidebar_anim: Anim,
+    /// Sidebar filter (GTK: the header search toggle + SearchEntry).
+    filter_open: bool,
+    filter_query: String,
+    filter_input: iced::widget::Id,
+    /// Which sidebar row the pointer is on: (project id, process index),
+    /// index None = the project header. Drives the cluster slide-in.
+    hovered_row: Option<(u64, Option<usize>)>,
+    hover_anim: Anim,
+    /// Last pointer position in window coords — where a right-click's
+    /// context menu opens (mouse_area reports no position itself).
+    cursor: iced::Point,
+    /// An open right-click menu (GTK's sidebar popovers).
+    context_menu: Option<MenuTarget>,
+    /// A pending destructive action awaiting its GTK-style confirmation.
+    confirm: Option<ConfirmAction>,
     search_open: bool,
     search_query: String,
     search_hit: Option<bool>,
@@ -170,6 +270,22 @@ struct App {
     geometry_gen: u64,
     next_project_id: u64,
     next_term_id: u64,
+}
+
+/// A right-click's target row: process index, or None for the project
+/// header. `at` is the click position (menus open at the pointer).
+#[derive(Debug, Clone, Copy)]
+struct MenuTarget {
+    project: u64,
+    index: Option<usize>,
+    at: iced::Point,
+}
+
+/// Destructive sidebar actions ask first, like GTK's AlertDialogs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmAction {
+    RemoveProject(u64),
+    DeleteProcess { project: u64, index: usize },
 }
 
 /// Probe success: project name if configured, process configs, live tmux
@@ -199,11 +315,17 @@ enum Event {
     /// Post-launch placement correction (GTK's restore_window_placement
     /// trick): measure where the frame actually landed and fix the delta.
     RestoreSettle,
+    /// Re-request maximize once the window is mapped (the pre-map hint
+    /// is dropped on X11).
+    RestoreMaximize,
     RestoreMeasured {
         id: iced::window::Id,
         actual: Option<iced::Point>,
     },
     OpenSettings,
+    ToggleSidebar,
+    ToggleFilter,
+    FilterInput(String),
     SettingsMsg(settings_ui::Msg),
     Probed {
         project: u64,
@@ -226,9 +348,54 @@ enum Event {
         project: u64,
         index: usize,
     },
+    /// Project-header cluster (GTK's hover controls): start every
+    /// process marked start_with_project / restart / stop the running.
+    StartAll(u64),
+    RestartAll(u64),
+    StopAll(u64),
+    /// Pointer entered/left a sidebar row (index None = project header).
+    RowEnter {
+        project: u64,
+        index: Option<usize>,
+    },
+    RowExit {
+        project: u64,
+        index: Option<usize>,
+    },
+    /// One frame of the cluster slide-in.
+    HoverTick(u64),
+    /// One frame of the sidebar's collapse/expand glide.
+    SidebarTick(u64),
+    CursorMoved(iced::Point),
+    /// Right-click on a sidebar row (index None = project header).
+    OpenContextMenu {
+        project: u64,
+        index: Option<usize>,
+    },
+    CloseContextMenu,
+    /// A picked menu item: close the menu, then run the wrapped event.
+    MenuAction(Box<Event>),
+    /// GTK menu backings without a button elsewhere.
+    CopyText(String),
+    OpenInEditor(u64),
+    ToggleProcessAt {
+        project: u64,
+        index: usize,
+    },
+    ResumeAgentAt {
+        project: u64,
+        index: usize,
+    },
+    EditProcessAt {
+        project: u64,
+        index: usize,
+    },
+    /// Destructive actions route through a confirmation card first.
+    ConfirmRequest(ConfirmAction),
+    ConfirmCancel,
+    ConfirmProceed,
     AddTerminal(u64),
     ToggleExpanded(u64),
-    CloseProject(u64),
     RestartDue {
         project: u64,
         index: usize,
@@ -272,6 +439,11 @@ enum Event {
     },
     /// Click on the status-bar port pill: open the (tunnel-mapped) URL.
     OpenBadge,
+    /// The sidebar row's ↗ button — any process, not just the selected.
+    OpenBadgeFor {
+        project: u64,
+        index: usize,
+    },
     OpenAddProject,
     AddProjectInput(String),
     AddProjectSubmit,
@@ -314,6 +486,17 @@ impl App {
             app_keys: AppKeys::from_settings(&settings.keybindings),
             settings_ui: None,
             composer: String::new(),
+            sidebar_visible: true,
+            // Settled: a fresh launch shows the sidebar without a glide.
+            sidebar_anim: Anim { t: 1.0, stamp: 0 },
+            filter_open: std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("filter"),
+            filter_query: String::new(),
+            filter_input: iced::widget::Id::unique(),
+            hovered_row: None,
+            hover_anim: Anim::default(),
+            cursor: iced::Point::ORIGIN,
+            context_menu: None,
+            confirm: None,
             // Headless design/debug hook: force panels open for screenshots.
             search_open: std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("search"),
             search_query: String::new(),
@@ -377,6 +560,15 @@ impl App {
                 |_| Event::RestoreSettle,
             ));
         }
+        // Maximized restore needs a second ask AFTER the WM maps the
+        // window: winit's pre-map request is lost on X11 (verified under
+        // metacity — the window came up floating at the saved size).
+        if app.settings.window.maximized {
+            tasks.push(Task::perform(
+                tokio::time::sleep(Duration::from_millis(250)),
+                |_| Event::RestoreMaximize,
+            ));
+        }
         tasks.push(Task::done(Event::GitTick));
 
         (app, Task::batch(tasks))
@@ -438,6 +630,18 @@ impl App {
 
     fn active_project(&self) -> Option<&ProjectState> {
         self.projects.get(self.active)
+    }
+
+    /// Is the selected process a live remote AGENT terminal? Decides
+    /// whether a plain Ctrl+V that fell through the widget belongs to
+    /// the paste bridge (see the Paste rebind in start()).
+    fn remote_agent_selected(&self) -> bool {
+        self.active_project().is_some_and(|p| {
+            p.location.host().is_some()
+                && p.entries.get(p.selected).is_some_and(|e| {
+                    e.terminal.is_some() && e.config.category == ProcessCategory::Agent
+                })
+        })
     }
 
     /// Kick the blocking ssh probe onto a worker; the project shows Loading.
@@ -528,12 +732,32 @@ impl App {
             scrollback,
             palette,
         );
+        let remote_agent = project.location.host().is_some()
+            && project.entries[index].config.category == ProcessCategory::Agent;
         let entry = &mut project.entries[index];
         match iced_term::Terminal::new(id, settings) {
             Ok(mut term) => {
                 // Reserve the app's chords before the first keystroke —
                 // the stock bindings would type them into the shell.
                 term.handle(iced_term::Command::AddBindings(reservations));
+                if remote_agent {
+                    // GTK parity (window.rs, "plain Ctrl+V in a remote
+                    // agent terminal"): the agent's raw ^V reads the
+                    // HOST's clipboard, which is not where the user's
+                    // clipboard lives — paste text from here instead.
+                    // An image-only clipboard leaves the widget nothing
+                    // to paste, so the chord falls through uncaptured to
+                    // the Hotkey handler's paste_image bridge.
+                    term.handle(iced_term::Command::AddBindings(vec![(
+                        iced_term::bindings::Binding {
+                            target: iced_term::bindings::InputKind::Char("v".into()),
+                            modifiers: iced::keyboard::Modifiers::CTRL,
+                            terminal_mode_include: iced_term::TermMode::empty(),
+                            terminal_mode_exclude: iced_term::TermMode::empty(),
+                        },
+                        iced_term::bindings::BindingAction::Paste,
+                    )]));
+                }
                 let focus = TerminalView::focus(term.widget_id().clone());
                 entry.terminal = Some(term);
                 entry.term_id = Some(id);
@@ -639,6 +863,48 @@ impl App {
     /// Close a project: local processes die with their PTYs, remote
     /// sessions DETACH (kill only happens on explicit per-process stop) —
     /// the same contract as quitting the app.
+    fn open_edit_form(&mut self, pidx: usize, index: usize) {
+        let project = &self.projects[pidx];
+        let Some(entry) = project.entries.get(index) else {
+            return;
+        };
+        self.add_command = Some(ProcessForm {
+            name: entry.config.name.clone(),
+            command: entry.config.command.clone(),
+            working_dir: entry.config.working_dir.clone().unwrap_or_default(),
+            agent: entry.config.category == ProcessCategory::Agent,
+            start_with_project: entry.config.start_with_project,
+            auto_restart: entry.config.auto_restart,
+            open_in_browser: entry.config.open_in_browser,
+            editing: Some((project.id, index)),
+            original_category: entry.config.category.clone(),
+        });
+    }
+
+    /// Stop and remove a process: drop its custom-command copy AND record
+    /// the deletion — the user's edit of a DETECTED process lives in
+    /// custom_commands, and without the deletion record detection
+    /// resurrects it on the next load.
+    fn delete_process(&mut self, pidx: usize, index: usize) {
+        if self.projects[pidx].entries.get(index).is_none() {
+            return;
+        }
+        self.stop(pidx, index);
+        let key = self.projects[pidx].key();
+        let name = self.projects[pidx].entries[index].config.name.clone();
+        let is_custom = self
+            .saved
+            .get_custom_commands(&key)
+            .is_some_and(|l| l.iter().any(|c| c.name == name));
+        if is_custom {
+            self.saved.remove_custom_command(&key, &name);
+        }
+        self.saved.add_deleted_process(&key, &name);
+        self.projects[pidx].entries.remove(index);
+        let n = self.projects[pidx].entries.len();
+        self.projects[pidx].selected = if n == 0 { 0 } else { index.min(n - 1) };
+    }
+
     fn close_project(&mut self, pidx: usize) {
         let key = self.projects[pidx].key();
         if let Some(tunnels) = &mut self.projects[pidx].tunnels {
@@ -858,6 +1124,8 @@ impl App {
                 self.settings_ui = Some(settings_ui::State::new(&self.settings));
                 Task::none()
             }
+            AppAction::ToggleSidebar => self.set_sidebar(!self.sidebar_visible),
+            AppAction::FilterSidebar => self.toggle_filter(),
             AppAction::SelectProcessN(n) => {
                 if let Some(project) = self.projects.get_mut(self.active)
                     && (n as usize) <= project.entries.len()
@@ -874,6 +1142,46 @@ impl App {
                 }
                 Task::none()
             }
+        }
+    }
+
+    /// Flip the sidebar and start its glide. A no-op when it is already
+    /// there OR already heading there — a rail button that reopens a
+    /// mid-expand sidebar must not restart the ramp and snap it back.
+    fn set_sidebar(&mut self, visible: bool) -> Task<Event> {
+        if self.sidebar_visible == visible {
+            return Task::none();
+        }
+        // Toggled mid-glide, the new ramp picks up where this one stands:
+        // reversed, the eased position `f` becomes `1 - f`, whichever way
+        // it was going (the two cases work out the same).
+        let resume = if self.sidebar_anim.settled() {
+            0.0
+        } else {
+            1.0 - self.sidebar_anim.eased()
+        };
+        self.sidebar_visible = visible;
+        let generation = self.sidebar_anim.restart_at(resume);
+        Task::perform(tokio::time::sleep(FRAME), move |_| {
+            Event::SidebarTick(generation)
+        })
+    }
+
+    /// GTK's search toggle: opening focuses the entry, closing clears the
+    /// query (the sidebar un-narrows) and hands focus back to the terminal.
+    fn toggle_filter(&mut self) -> Task<Event> {
+        self.filter_open = !self.filter_open;
+        if self.filter_open {
+            // The entry lives in the sidebar — filtering a collapsed
+            // sidebar reopens it (rail button / Ctrl+F while hidden).
+            let open = self.set_sidebar(true);
+            Task::batch([
+                open,
+                iced::widget::operation::focus(self.filter_input.clone()),
+            ])
+        } else {
+            self.filter_query.clear();
+            self.focus_selected_terminal()
         }
     }
 
@@ -1152,6 +1460,9 @@ impl App {
             Event::RestoreSettle => iced::window::latest().and_then(|id| {
                 iced::window::position(id).map(move |actual| Event::RestoreMeasured { id, actual })
             }),
+            Event::RestoreMaximize => {
+                iced::window::latest().and_then(|id| iced::window::maximize(id, true))
+            }
             Event::RestoreMeasured { id, actual } => {
                 let w = &self.settings.window;
                 log::info!(
@@ -1173,6 +1484,12 @@ impl App {
             }
             Event::OpenSettings => {
                 self.settings_ui = Some(settings_ui::State::new(&self.settings));
+                Task::none()
+            }
+            Event::ToggleSidebar => self.set_sidebar(!self.sidebar_visible),
+            Event::ToggleFilter => self.toggle_filter(),
+            Event::FilterInput(query) => {
+                self.filter_query = query;
                 Task::none()
             }
             Event::SettingsMsg(msg) => self.handle_settings(msg),
@@ -1265,6 +1582,186 @@ impl App {
                 }
                 Task::none()
             }
+            Event::StartAll(project) => {
+                // GTK's spawn_project_group: the marked processes only.
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                for index in 0..self.projects[pidx].entries.len() {
+                    let entry = &self.projects[pidx].entries[index];
+                    let idle = matches!(entry.status, Status::Stopped | Status::Crashed(_));
+                    if entry.config.start_with_project && idle {
+                        if self.projects[pidx].entries[index].terminal.is_some() {
+                            self.stop(pidx, index);
+                        }
+                        tasks.push(self.start_fresh(pidx, index));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Event::RestartAll(project) => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                for index in 0..self.projects[pidx].entries.len() {
+                    if self.projects[pidx].entries[index].is_running() {
+                        self.stop(pidx, index);
+                        tasks.push(self.start_fresh(pidx, index));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Event::StopAll(project) => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                for index in 0..self.projects[pidx].entries.len() {
+                    // Running, restarting and reconnecting alike — "stop
+                    // all" also cancels pending comebacks.
+                    let active = !matches!(
+                        self.projects[pidx].entries[index].status,
+                        Status::Stopped | Status::Crashed(_)
+                    );
+                    if active {
+                        self.stop(pidx, index);
+                    }
+                }
+                Task::none()
+            }
+            Event::RowEnter { project, index } => {
+                let target = Some((project, index));
+                if self.hovered_row == target {
+                    return Task::none();
+                }
+                self.hovered_row = target;
+                let generation = self.hover_anim.start();
+                Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::HoverTick(generation)
+                })
+            }
+            Event::RowExit { project, index } => {
+                // Enter of the next row may already have retargeted us —
+                // only clear if this exit still owns the state.
+                if self.hovered_row == Some((project, index)) {
+                    self.hovered_row = None;
+                }
+                Task::none()
+            }
+            Event::CursorMoved(position) => {
+                self.cursor = position;
+                Task::none()
+            }
+            Event::OpenContextMenu { project, index } => {
+                self.context_menu = Some(MenuTarget {
+                    project,
+                    index,
+                    at: self.cursor,
+                });
+                Task::none()
+            }
+            Event::CloseContextMenu => {
+                self.context_menu = None;
+                Task::none()
+            }
+            Event::MenuAction(inner) => {
+                self.context_menu = None;
+                self.update(*inner)
+            }
+            Event::CopyText(text) => iced::clipboard::write(text),
+            Event::OpenInEditor(project) => {
+                if let Some(pidx) = self.project_index(project) {
+                    tuxflow_core::util::editor::open_in_editor(&self.projects[pidx].location);
+                }
+                Task::none()
+            }
+            Event::ToggleProcessAt { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let Some(entry) = self.projects[pidx].entries.get(index) else {
+                    return Task::none();
+                };
+                if entry.is_running() {
+                    self.stop(pidx, index);
+                    Task::none()
+                } else {
+                    if self.projects[pidx].entries[index].terminal.is_some() {
+                        self.stop(pidx, index);
+                    }
+                    self.start_fresh(pidx, index)
+                }
+            }
+            Event::ResumeAgentAt { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let Some(entry) = self.projects[pidx].entries.get(index) else {
+                    return Task::none();
+                };
+                let Some(resume) = resume_command_for(&entry.config.command) else {
+                    return Task::none();
+                };
+                // GTK's spawn_with_command_override: a running session is
+                // replaced, and the override lasts one spawn — a later
+                // crash restarts the configured command.
+                if self.projects[pidx].entries[index].terminal.is_some() {
+                    self.stop(pidx, index);
+                }
+                self.projects[pidx].entries[index].command_override = Some(resume);
+                self.projects[pidx].selected = index;
+                self.active = pidx;
+                self.start_fresh(pidx, index)
+            }
+            Event::EditProcessAt { project, index } => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.active = pidx;
+                    self.projects[pidx].selected = index;
+                    self.open_edit_form(pidx, index);
+                }
+                Task::none()
+            }
+            Event::ConfirmRequest(action) => {
+                self.confirm = Some(action);
+                Task::none()
+            }
+            Event::ConfirmCancel => {
+                self.confirm = None;
+                Task::none()
+            }
+            Event::ConfirmProceed => {
+                match self.confirm.take() {
+                    Some(ConfirmAction::RemoveProject(project)) => {
+                        if let Some(pidx) = self.project_index(project) {
+                            self.close_project(pidx);
+                        }
+                    }
+                    Some(ConfirmAction::DeleteProcess { project, index }) => {
+                        if let Some(pidx) = self.project_index(project) {
+                            self.delete_process(pidx, index);
+                        }
+                    }
+                    None => {}
+                }
+                Task::none()
+            }
+            Event::HoverTick(generation) => {
+                if self.hovered_row.is_none() || !self.hover_anim.tick(generation, HOVER_SLIDE_MS) {
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::HoverTick(generation)
+                })
+            }
+            Event::SidebarTick(generation) => {
+                if !self.sidebar_anim.tick(generation, SIDEBAR_SLIDE_MS) {
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::SidebarTick(generation)
+                })
+            }
             Event::AddTerminal(project) => match self.project_index(project) {
                 Some(pidx) => self.add_terminal(pidx),
                 None => Task::none(),
@@ -1284,12 +1781,6 @@ impl App {
                     let key = self.projects[pidx].key();
                     self.saved.set_expanded(&key, self.projects[pidx].expanded);
                     self.saved.save();
-                }
-                Task::none()
-            }
-            Event::CloseProject(project) => {
-                if let Some(pidx) = self.project_index(project) {
-                    self.close_project(pidx);
                 }
                 Task::none()
             }
@@ -1426,15 +1917,24 @@ impl App {
                 {
                     return self.finish_capture(action, &key, modifiers);
                 }
-                // Esc closes settings like it closes the other panels.
-                if self.settings_ui.is_some()
-                    && matches!(
-                        key.as_ref(),
-                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
-                    )
-                {
-                    self.settings_ui = None;
-                    return Task::none();
+                // Esc peels overlays top-down: confirmation card, context
+                // menu, then settings like the other panels.
+                if matches!(
+                    key.as_ref(),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                ) {
+                    if self.confirm.is_some() {
+                        self.confirm = None;
+                        return Task::none();
+                    }
+                    if self.context_menu.is_some() {
+                        self.context_menu = None;
+                        return Task::none();
+                    }
+                    if self.settings_ui.is_some() {
+                        self.settings_ui = None;
+                        return Task::none();
+                    }
                 }
                 // Palette navigation first (its input consumes typing but
                 // not Esc/arrows).
@@ -1463,16 +1963,28 @@ impl App {
                 {
                     return self.update(Event::SearchClose);
                 }
+                if self.filter_open
+                    && matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    )
+                {
+                    return self.toggle_filter();
+                }
                 if let Some(action) = self.app_keys.action_for(&key, modifiers) {
                     return self.apply_action(action);
                 }
                 match key.as_ref() {
                     // Reaching here means the widget found no TEXT to paste
-                    // — the clipboard holds an image (or nothing).
+                    // — the clipboard holds an image (or nothing). Plain
+                    // Ctrl+V only falls through on remote agent terminals,
+                    // where start() rebinds it to Paste (GTK's hardcoded
+                    // branch); the guard keeps a stray unfocused chord from
+                    // typing into a terminal it was never aimed at.
                     iced::keyboard::Key::Character(c)
                         if c.eq_ignore_ascii_case("v")
                             && modifiers.control()
-                            && modifiers.shift() =>
+                            && (modifiers.shift() || self.remote_agent_selected()) =>
                     {
                         self.paste_image()
                     }
@@ -1584,12 +2096,16 @@ impl App {
             Event::OpenBadge => {
                 if let Some(project) = self.active_project()
                     && let Some(entry) = project.entries.get(project.selected)
-                    && let Some(url) = browser_url(project, &entry.config.name)
                 {
-                    log::info!("open badge {url}");
-                    if let Err(e) = open::that(&url) {
-                        log::warn!("open {url} failed: {e}");
-                    }
+                    open_badge(project, entry);
+                }
+                Task::none()
+            }
+            Event::OpenBadgeFor { project, index } => {
+                if let Some(pidx) = self.project_index(project)
+                    && let Some(entry) = self.projects[pidx].entries.get(index)
+                {
+                    open_badge(&self.projects[pidx], entry);
                 }
                 Task::none()
             }
@@ -1646,20 +2162,9 @@ impl App {
                 Task::none()
             }
             Event::OpenEditProcess => {
-                if let Some(project) = self.active_project()
-                    && let Some(entry) = project.entries.get(project.selected)
-                {
-                    self.add_command = Some(ProcessForm {
-                        name: entry.config.name.clone(),
-                        command: entry.config.command.clone(),
-                        working_dir: entry.config.working_dir.clone().unwrap_or_default(),
-                        agent: entry.config.category == ProcessCategory::Agent,
-                        start_with_project: entry.config.start_with_project,
-                        auto_restart: entry.config.auto_restart,
-                        open_in_browser: entry.config.open_in_browser,
-                        editing: Some((project.id, project.selected)),
-                        original_category: entry.config.category.clone(),
-                    });
+                if let Some(project) = self.active_project() {
+                    let (pidx, index) = (self.active, project.selected);
+                    self.open_edit_form(pidx, index);
                 }
                 Task::none()
             }
@@ -1697,27 +2202,7 @@ impl App {
                 let Some(pidx) = self.project_index(project_id) else {
                     return Task::none();
                 };
-                if self.projects[pidx].entries.get(index).is_none() {
-                    return Task::none();
-                }
-                self.stop(pidx, index);
-                let key = self.projects[pidx].key();
-                let name = self.projects[pidx].entries[index].config.name.clone();
-                // The user's edit of a DETECTED process lives in
-                // custom_commands; deleting must both drop the custom copy
-                // and remember the deletion, or detection resurrects it on
-                // the next load.
-                let is_custom = self
-                    .saved
-                    .get_custom_commands(&key)
-                    .is_some_and(|l| l.iter().any(|c| c.name == name));
-                if is_custom {
-                    self.saved.remove_custom_command(&key, &name);
-                }
-                self.saved.add_deleted_process(&key, &name);
-                self.projects[pidx].entries.remove(index);
-                let n = self.projects[pidx].entries.len();
-                self.projects[pidx].selected = if n == 0 { 0 } else { index.min(n - 1) };
+                self.delete_process(pidx, index);
                 Task::none()
             }
             Event::AddCommandName(value) => {
@@ -1891,22 +2376,298 @@ impl App {
     }
 
     fn view(&'_ self) -> Element<'_, Event> {
-        let body = row![
-            self.view_sidebar(),
-            vline(),
+        let mut body = row![].height(Length::Fill);
+        if self.sidebar_visible || !self.sidebar_anim.settled() {
+            // Mid-glide the sidebar keeps its own content, clipped to the
+            // animated width. The rail is a different layout — the same
+            // four icons stacked instead of in a row — so swapping to it
+            // before the collapse lands reads as a flicker, not a slide.
+            body = body.push(self.view_sidebar()).push(vline());
+        } else {
+            // Collapsed: the cluster survives as a slim icon rail, so the
+            // toggle (and everything else) stays reachable by mouse.
+            body = body.push(self.view_rail()).push(vline());
+        }
+        body = body.push(
             container(self.view_main())
                 .width(Length::Fill)
                 .height(Length::Fill),
-        ]
-        .height(Length::Fill);
+        );
 
         let base: Element<'_, Event> = column![body, hline(), self.view_status_bar()].into();
 
+        // Overlay order: palette, then a context menu, then a pending
+        // confirmation on the very top.
+        let mut layers = vec![base];
         if self.palette_open {
-            iced::widget::stack![base, self.view_palette()].into()
-        } else {
-            base
+            layers.push(self.view_palette());
         }
+        if self.context_menu.is_some() {
+            layers.push(self.view_context_menu());
+        }
+        if self.confirm.is_some() {
+            layers.push(self.view_confirm());
+        }
+        if layers.len() == 1 {
+            layers.pop().expect("base layer")
+        } else {
+            iced::widget::Stack::with_children(layers).into()
+        }
+    }
+
+    /// The GTK sidebar popovers, rebuilt: a click-away backdrop plus an
+    /// item card at the right-click position.
+    fn view_context_menu(&'_ self) -> Element<'_, Event> {
+        // None = separator; (label, event, destructive) otherwise.
+        type Item = Option<(&'static str, Event, bool)>;
+
+        let target = match self.context_menu {
+            Some(t) => t,
+            None => return column![].into(),
+        };
+        let mut items: Vec<Item> = Vec::new();
+        if let Some(pidx) = self.projects.iter().position(|p| p.id == target.project) {
+            let project = &self.projects[pidx];
+            match target.index {
+                // Project header — mirrors GTK's project_row menu
+                // (minus Edit Project: that dialog isn't ported yet).
+                None => {
+                    items.push(Some(("Start All", Event::StartAll(project.id), false)));
+                    items.push(Some(("Stop All", Event::StopAll(project.id), false)));
+                    items.push(Some(("Restart All", Event::RestartAll(project.id), false)));
+                    items.push(None);
+                    items.push(Some((
+                        "New Terminal",
+                        Event::AddTerminal(project.id),
+                        false,
+                    )));
+                    items.push(Some((
+                        "Open in Editor",
+                        Event::OpenInEditor(project.id),
+                        false,
+                    )));
+                    let path = match &project.location {
+                        // Remote projects copy the scp-style host:path form.
+                        ProjectLocation::Local(p) => p.to_string_lossy().into_owned(),
+                        ProjectLocation::Ssh { host, dir } => format!("{host}:{dir}"),
+                    };
+                    items.push(Some(("Copy Path", Event::CopyText(path), false)));
+                    items.push(None);
+                    items.push(Some((
+                        "Remove Project",
+                        Event::ConfirmRequest(ConfirmAction::RemoveProject(project.id)),
+                        true,
+                    )));
+                }
+                // Process row — mirrors GTK's process_row menu (minus
+                // Clear Output / Redraw Terminal: no backend command yet).
+                Some(index) => {
+                    if let Some(entry) = project.entries.get(index) {
+                        items.push(Some((
+                            "Start / Stop",
+                            Event::ToggleProcessAt {
+                                project: project.id,
+                                index,
+                            },
+                            false,
+                        )));
+                        items.push(Some((
+                            "Restart",
+                            Event::Restart {
+                                project: project.id,
+                                index,
+                            },
+                            false,
+                        )));
+                        if entry.config.category == ProcessCategory::Agent
+                            && resume_command_for(&entry.config.command).is_some()
+                        {
+                            items.push(Some((
+                                "Resume Session",
+                                Event::ResumeAgentAt {
+                                    project: project.id,
+                                    index,
+                                },
+                                false,
+                            )));
+                        }
+                        if browser_url(project, &entry.config.name).is_some() {
+                            items.push(None);
+                            items.push(Some((
+                                "Open in Browser",
+                                Event::OpenBadgeFor {
+                                    project: project.id,
+                                    index,
+                                },
+                                false,
+                            )));
+                        }
+                        items.push(None);
+                        items.push(Some((
+                            "Edit Command",
+                            Event::EditProcessAt {
+                                project: project.id,
+                                index,
+                            },
+                            false,
+                        )));
+                        items.push(Some((
+                            "Copy Command",
+                            Event::CopyText(entry.config.command.clone()),
+                            false,
+                        )));
+                        items.push(None);
+                        items.push(Some((
+                            "Delete Command",
+                            Event::ConfirmRequest(ConfirmAction::DeleteProcess {
+                                project: project.id,
+                                index,
+                            }),
+                            true,
+                        )));
+                    }
+                }
+            }
+        }
+
+        const MENU_WIDTH: f32 = 190.0;
+        let mut height = 8.0; // card padding
+        let mut col = column![].width(Length::Fill);
+        for item in items {
+            match item {
+                Some((label, event, destructive)) => {
+                    height += 27.0;
+                    col = col.push(
+                        button(text(label).size(12.5))
+                            .width(Length::Fill)
+                            .padding([5, 12])
+                            .style(theme::menu_item(destructive))
+                            .on_press(Event::MenuAction(Box::new(event))),
+                    );
+                }
+                None => {
+                    height += 7.0;
+                    col = col.push(container(hline()).padding([3, 6]));
+                }
+            }
+        }
+        let menu = container(col)
+            .width(MENU_WIDTH)
+            .padding(4)
+            .style(theme::menu_card);
+
+        // Open at the pointer, nudged inside the window edges.
+        let x = target
+            .at
+            .x
+            .min(self.window_size.width - MENU_WIDTH - 8.0)
+            .max(0.0);
+        let y = target
+            .at
+            .y
+            .min(self.window_size.height - height - 8.0)
+            .max(0.0);
+        let placed = container(menu)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: y,
+                left: x,
+                right: 0.0,
+                bottom: 0.0,
+            });
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_press(Event::CloseContextMenu)
+        .on_right_press(Event::CloseContextMenu);
+
+        iced::widget::stack![backdrop, placed].into()
+    }
+
+    /// GTK's AlertDialog for destructive sidebar actions: dimmed ground,
+    /// centered card, Cancel default.
+    fn view_confirm(&'_ self) -> Element<'_, Event> {
+        let Some(action) = self.confirm else {
+            return column![].into();
+        };
+        let (heading, body, verb) = match action {
+            ConfirmAction::RemoveProject(project) => {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                (
+                    format!("Remove '{name}'?"),
+                    "This will remove the project and all its processes from the sidebar.",
+                    "Remove",
+                )
+            }
+            ConfirmAction::DeleteProcess { project, index } => {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project)
+                    .and_then(|p| p.entries.get(index))
+                    .map(|e| e.config.name.clone())
+                    .unwrap_or_default();
+                (
+                    format!("Delete '{name}'?"),
+                    "This will stop the process and remove it from the sidebar.",
+                    "Delete",
+                )
+            }
+        };
+
+        let card = container(
+            column![
+                text(heading).size(15).font(bold()).color(TEXT),
+                text(body).size(12).color(TEXT_SECONDARY),
+                container(
+                    row![
+                        button(text("Cancel").size(12))
+                            .padding([6, 16])
+                            .style(theme::pill_button(LOCAL_ACCENT))
+                            .on_press(Event::ConfirmCancel),
+                        button(text(verb).size(12))
+                            .padding([6, 16])
+                            .style(theme::danger())
+                            .on_press(Event::ConfirmProceed),
+                    ]
+                    .spacing(8),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(380)
+        .style(theme::form_card);
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::ConfirmCancel);
+
+        let placed = container(card)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+
+        iced::widget::stack![backdrop, placed].into()
     }
 
     /// The command palette: a dimmed backdrop with a centered card —
@@ -1986,30 +2747,148 @@ impl App {
             .into()
     }
 
+    /// The GTK header bar's button cluster: sidebar toggle, sidebar
+    /// filter, settings, add — the same four Adwaita symbolic icons in the
+    /// same order, flat until hovered, washed while toggled on. Lives at
+    /// the top of the sidebar; `vertical` renders the collapsed rail.
+    fn header_cluster(&'_ self, vertical: bool) -> Element<'_, Event> {
+        let kb = &self.settings.keybindings;
+        // A collapsed rail's tooltips open away from the edge they hug.
+        let position = if vertical {
+            iced::widget::tooltip::Position::Right
+        } else {
+            iced::widget::tooltip::Position::Bottom
+        };
+        let btn = |icon: &'static [u8], active: bool, tip: String, event: Event| {
+            iced::widget::tooltip(
+                button(symbolic(icon, 16.0, TEXT))
+                    .padding(7)
+                    .style(theme::toolbar_icon(active))
+                    .on_press(event),
+                text(tip).size(11),
+                position,
+            )
+            .gap(4)
+            .padding(7)
+            .style(theme::tooltip)
+        };
+        let buttons = [
+            btn(
+                ICON_SIDEBAR,
+                self.sidebar_visible,
+                format!("Toggle Sidebar ({})", kb.toggle_sidebar),
+                Event::ToggleSidebar,
+            ),
+            btn(
+                ICON_FIND,
+                self.filter_open,
+                format!("Filter Sidebar ({})", kb.filter_processes),
+                Event::ToggleFilter,
+            ),
+            btn(
+                ICON_GEAR,
+                self.settings_ui.is_some(),
+                format!("Settings ({})", kb.settings),
+                Event::OpenSettings,
+            ),
+            btn(
+                ICON_ADD,
+                self.add_project.is_some(),
+                String::from("Add Project"),
+                Event::OpenAddProject,
+            ),
+        ];
+        if vertical {
+            let mut col = column![].spacing(2).align_x(iced::Alignment::Center);
+            for b in buttons {
+                col = col.push(b);
+            }
+            col.into()
+        } else {
+            let mut r = row![].spacing(4).align_y(iced::Alignment::Center);
+            for b in buttons {
+                r = r.push(b);
+            }
+            r.into()
+        }
+    }
+
+    /// The hidden-sidebar stand-in: the same four buttons as a slim
+    /// vertical rail on the window edge.
+    fn view_rail(&'_ self) -> Element<'_, Event> {
+        // Pinned to SIDEBAR_RAIL rather than left to its content: that
+        // constant is the floor the collapse glide aims at, and a rail
+        // even a pixel off it would jump on arrival.
+        container(self.header_cluster(true))
+            .width(SIDEBAR_RAIL)
+            .height(Length::Fill)
+            .padding([6, 4])
+            .style(theme::ground)
+            .into()
+    }
+
+    /// The sidebar's full width — GTK's quarter-of-the-window rule.
+    fn sidebar_width(&self) -> f32 {
+        (self.window_size.width * SIDEBAR_FRACTION).clamp(SIDEBAR_MIN, SIDEBAR_MAX)
+    }
+
+    /// How wide the sidebar column is drawn right now: rail width at one
+    /// end of the glide, full width at the other.
+    fn sidebar_extent(&self) -> f32 {
+        let f = self.sidebar_anim.eased();
+        let open = if self.sidebar_visible { f } else { 1.0 - f };
+        SIDEBAR_RAIL + (self.sidebar_width() - SIDEBAR_RAIL) * open
+    }
+
     fn view_sidebar(&'_ self) -> Element<'_, Event> {
+        // The filter narrows the whole sidebar (GTK semantics): a project
+        // matching by name keeps all its rows; otherwise only matching
+        // process rows stay, and a project with no match hides entirely.
+        let query = self.filter_query.trim().to_lowercase();
+        let filter = (self.filter_open && !query.is_empty()).then_some(query.as_str());
+
         let mut col = column![].spacing(10).padding([12, 10]);
         for (pidx, project) in self.projects.iter().enumerate() {
-            col = col.push(self.view_project_block(pidx, project));
+            if let Some(q) = filter {
+                let name_match = project.name.to_lowercase().contains(q);
+                let process_match = project
+                    .entries
+                    .iter()
+                    .any(|e| e.config.name.to_lowercase().contains(q));
+                if !name_match && !process_match {
+                    continue;
+                }
+            }
+            col = col.push(self.view_project_block(pidx, project, filter));
         }
 
-        let add = button(
-            text("+ project")
-                .size(12)
-                .width(Length::Fill)
-                .align_x(iced::Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding([6, 10])
-        .style(theme::pill_button(LOCAL_ACCENT))
-        .on_press(Event::OpenAddProject);
-
-        // The GTK header bar's gear, relocated: this shell has no header.
-        let gear = button(text("\u{2699}").size(14))
-            .padding([4, 9])
-            .style(theme::ghost(LOCAL_ACCENT))
-            .on_press(Event::OpenSettings);
-
-        container(column![
+        let mut inner = column![
+            container(self.header_cluster(false)).padding(iced::Padding {
+                top: 6.0,
+                right: 8.0,
+                bottom: 2.0,
+                left: 8.0,
+            })
+        ];
+        if self.filter_open {
+            inner = inner.push(
+                container(
+                    text_input("filter projects & processes\u{2026}", &self.filter_query)
+                        .id(self.filter_input.clone())
+                        .on_input(Event::FilterInput)
+                        .style(theme::input(LOCAL_ACCENT))
+                        .padding([6, 12])
+                        .size(12),
+                )
+                .padding(iced::Padding {
+                    top: 6.0,
+                    right: 10.0,
+                    bottom: 0.0,
+                    left: 10.0,
+                }),
+            );
+        }
+        inner = inner.push(
             scrollable(col)
                 .direction(scrollable::Direction::Vertical(
                     scrollable::Scrollbar::new().width(4).scroller_width(4),
@@ -2017,20 +2896,30 @@ impl App {
                 .style(theme::overlay_scrollbar)
                 .height(Length::Fill)
                 .width(Length::Fill),
-            container(row![add, gear].spacing(6).align_y(iced::Alignment::Center)).padding([8, 10]),
-        ])
-        .width((self.window_size.width * SIDEBAR_FRACTION).clamp(SIDEBAR_MIN, SIDEBAR_MAX))
-        .height(Length::Fill)
-        .style(theme::ground)
-        .into()
+        );
+
+        // Two boxes on purpose: the inner one holds the content at the
+        // sidebar's FULL width so the glide reveals a finished layout,
+        // while the outer one carries the animated width and clips it.
+        // Laying the content out at the animated width instead would
+        // re-wrap every clipped label and re-flow every card each frame —
+        // the cards would visibly rearrange themselves mid-slide.
+        container(container(inner).width(self.sidebar_width()))
+            .width(self.sidebar_extent())
+            .height(Length::Fill)
+            .clip(true)
+            .style(theme::ground)
+            .into()
     }
 
     /// One floating project card; the active one is lit by its accent
-    /// gradient.
+    /// gradient. A filter query forces the card open on its matching rows
+    /// (all of them when the project matched by name).
     fn view_project_block<'a>(
         &'a self,
         pidx: usize,
         project: &'a ProjectState,
+        filter: Option<&str>,
     ) -> Element<'a, Event> {
         let remote = project.location.is_remote();
         let accent = accent_for(remote);
@@ -2049,34 +2938,96 @@ impl App {
             .center_y(26)
             .style(theme::icon_square(accent, remote));
 
-        let counter = format!("{}/{}", project.running(), project.entries.len());
-        let header = row![
-            button(
-                row![
-                    icon,
-                    clipped_label(text(&project.name).size(13).font(bold()).color(TEXT)),
-                    container(text(counter).size(10))
-                        .padding([2, 8])
-                        .style(theme::pill),
-                ]
-                .spacing(9)
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .padding([2, 4])
-            .style(theme::project_row(accent))
-            .on_press(Event::ToggleExpanded(project.id)),
-            button(text("\u{00d7}").size(11))
-                .padding([3, 7])
-                .style(theme::ghost(CRASHED))
-                .on_press(Event::CloseProject(project.id)),
+        // GTK's hover controls on the project row: start the marked set,
+        // restart the running, stop everything. They take the counter
+        // pill's seat while the pointer is on the header.
+        // GTK's `.project-has-running .project-name`: the title lights up in
+        // the project's accent while anything inside is up, alongside the
+        // card's border ring. Idle cards keep the plain title.
+        let running = project.has_running();
+        let hovered = self.hovered_row == Some((project.id, None));
+        let mut title = row![
+            icon,
+            clipped_label(text(&project.name).size(13).font(bold()).color(if running {
+                accent
+            } else {
+                TEXT
+            })),
+        ]
+        .spacing(9)
+        .align_y(iced::Alignment::Center);
+        if !hovered {
+            let counter = format!("{}/{}", project.running(), project.entries.len());
+            title = title.push(
+                container(text(counter).size(10))
+                    .padding([2, 8])
+                    .style(theme::pill),
+            );
+        }
+        let mut header = row![
+            button(title)
+                .width(Length::Fill)
+                .padding([2, 4])
+                .style(theme::header_title)
+                .on_press(Event::ToggleExpanded(project.id)),
         ]
         .spacing(2)
         .align_y(iced::Alignment::Center);
+        if hovered {
+            let p = self.hover_progress();
+            let cluster = row![
+                row_action(
+                    ICON_PLAY,
+                    theme::alpha(LOCAL_ACCENT, p),
+                    String::from("Start all marked processes"),
+                    Event::StartAll(project.id),
+                ),
+                row_action(
+                    ICON_RESTART,
+                    theme::alpha(TEXT_SECONDARY, p),
+                    String::from("Restart all running processes"),
+                    Event::RestartAll(project.id),
+                ),
+                row_action(
+                    ICON_STOP,
+                    theme::alpha(CRASHED, p),
+                    String::from("Stop all"),
+                    Event::StopAll(project.id),
+                ),
+            ]
+            .spacing(1)
+            .align_y(iced::Alignment::Center);
+            header = header.push(self.slide_in(cluster));
+        }
+        // No ✕ here: removing a project lives in the right-click menu
+        // behind a confirmation, like GTK.
+        let header = container(header)
+            .width(Length::Fill)
+            .style(theme::project_header(accent, hovered));
+        let header = iced::widget::mouse_area(header)
+            .on_enter(Event::RowEnter {
+                project: project.id,
+                index: None,
+            })
+            .on_exit(Event::RowExit {
+                project: project.id,
+                index: None,
+            })
+            .on_right_press(Event::OpenContextMenu {
+                project: project.id,
+                index: None,
+            });
 
         let mut block = column![header].spacing(2);
 
-        if project.expanded {
+        let name_match = filter.is_some_and(|q| project.name.to_lowercase().contains(q));
+        if project.expanded || filter.is_some() {
+            // The header is a group of its own, so it gets the same gap
+            // under it that separates the categories below. Without it the
+            // title sits tighter to the first row than the rows sit to each
+            // other (the header's button padding is 2 against their 5), and
+            // a hovered header's tint touches the selected row's.
+            block = block.push(group_gap());
             match &project.phase {
                 Phase::Loading => {
                     block = block.push(
@@ -2096,6 +3047,10 @@ impl App {
                     block = block.push(container(r).padding([3, 10]));
                 }
                 Phase::Ready => {
+                    // The gap leads each category rather than trailing it:
+                    // a separator after the last one is padding, and it made
+                    // the card bottom-heavy against the 8px above the header.
+                    let mut first = true;
                     for category in [
                         ProcessCategory::Agent,
                         ProcessCategory::Command,
@@ -2104,24 +3059,24 @@ impl App {
                     ] {
                         let members: Vec<usize> = (0..project.entries.len())
                             .filter(|&i| project.entries[i].config.category == category)
+                            .filter(|&i| match filter {
+                                Some(q) if !name_match => {
+                                    project.entries[i].config.name.to_lowercase().contains(q)
+                                }
+                                _ => true,
+                            })
                             .collect();
                         if members.is_empty() {
                             continue;
                         }
+                        if !first {
+                            block = block.push(group_gap());
+                        }
+                        first = false;
                         for i in members {
                             block = block.push(self.view_row(pidx, i));
                         }
-                        block = block.push(container(column![]).height(3));
                     }
-                    block = block.push(
-                        container(
-                            button(text("+ terminal").size(10))
-                                .padding([2, 9])
-                                .style(theme::pill_button(accent))
-                                .on_press(Event::AddTerminal(project.id)),
-                        )
-                        .padding([1, 4]),
-                    );
                 }
             }
         }
@@ -2129,7 +3084,7 @@ impl App {
         container(block)
             .width(Length::Fill)
             .padding(8)
-            .style(theme::project_card(accent, active))
+            .style(theme::project_card(accent, running, active))
             .into()
     }
 
@@ -2151,16 +3106,24 @@ impl App {
             .as_deref()
             .unwrap_or(&entry.config.name);
 
+        let hovered = self.hovered_row == Some((project.id, Some(index)));
+
+        // Fixed content height: hover swaps elements in and out (hint ↔
+        // glyph cluster), and the row must measure the same with any of
+        // them or the rows below shift while the pointer moves.
         let mut content = row![
             text(dot).size(10).color(dot_color),
             clipped_label(text(name).size(12.5)),
         ]
         .spacing(8)
+        .height(17)
         .align_y(iced::Alignment::Center);
 
         // Ctrl+1..9 hints (settings-gated) on the active project's rows —
-        // the chords the digit switcher actually honors.
-        if self.settings.sidebar.show_keybind_hints && pidx == self.active && index < 9 {
+        // the chords the digit switcher actually honors. The hint yields
+        // its slot to the lifecycle glyphs while the pointer is here.
+        if !hovered && self.settings.sidebar.show_keybind_hints && pidx == self.active && index < 9
+        {
             content = content.push(text(format!("\u{2303}{}", index + 1)).size(9).color(DIM));
         }
 
@@ -2170,6 +3133,25 @@ impl App {
                 container(text(local.to_string()).size(10))
                     .padding([1, 7])
                     .style(theme::pill),
+            );
+        }
+        // GTK's browser button: always there while a URL is live.
+        if let Some(url) = browser_url(project, &entry.config.name) {
+            content = content.push(
+                iced::widget::tooltip(
+                    button(text("\u{2197}").size(10))
+                        .padding([1, 5])
+                        .style(theme::ghost(accent))
+                        .on_press(Event::OpenBadgeFor {
+                            project: project.id,
+                            index,
+                        }),
+                    text(format!("Open {url}")).size(11),
+                    iced::widget::tooltip::Position::Bottom,
+                )
+                .gap(4)
+                .padding(7)
+                .style(theme::tooltip),
             );
         }
         match entry.status {
@@ -2193,14 +3175,102 @@ impl App {
             _ => {}
         }
 
+        // The lifecycle glyphs (design round F): bare icons sliding in
+        // while the pointer is on the row — play when idle, restart+stop
+        // when running, stop-as-cancel while coming back.
+        if hovered {
+            let p = self.hover_progress();
+            let mut cluster = row![].spacing(1).align_y(iced::Alignment::Center);
+            match entry.status {
+                Status::Stopped | Status::Crashed(_) => {
+                    cluster = cluster.push(row_action(
+                        ICON_PLAY,
+                        theme::alpha(LOCAL_ACCENT, p),
+                        entry.config.command.clone(),
+                        Event::Start {
+                            project: project.id,
+                            index,
+                        },
+                    ));
+                }
+                Status::Running => {
+                    cluster = cluster
+                        .push(row_action(
+                            ICON_RESTART,
+                            theme::alpha(TEXT_SECONDARY, p),
+                            String::from("Restart"),
+                            Event::Restart {
+                                project: project.id,
+                                index,
+                            },
+                        ))
+                        .push(row_action(
+                            ICON_STOP,
+                            theme::alpha(CRASHED, p),
+                            String::from("Stop"),
+                            Event::Stop {
+                                project: project.id,
+                                index,
+                            },
+                        ));
+                }
+                Status::Restarting(_) | Status::Reconnecting(_) => {
+                    cluster = cluster.push(row_action(
+                        ICON_STOP,
+                        theme::alpha(CRASHED, p),
+                        String::from("Cancel"),
+                        Event::Stop {
+                            project: project.id,
+                            index,
+                        },
+                    ));
+                }
+            }
+            content = content.push(self.slide_in(cluster));
+        }
+
         let selected = pidx == self.active && index == project.selected;
-        button(content)
+        let base = button(content)
             .width(Length::Fill)
             .padding([5, 9])
             .style(theme::process_row(accent, selected))
             .on_press(Event::SelectProcess {
                 project: project.id,
                 index,
+            });
+
+        iced::widget::mouse_area(base)
+            .on_enter(Event::RowEnter {
+                project: project.id,
+                index: Some(index),
+            })
+            .on_exit(Event::RowExit {
+                project: project.id,
+                index: Some(index),
+            })
+            .on_right_press(Event::OpenContextMenu {
+                project: project.id,
+                index: Some(index),
+            })
+            .into()
+    }
+
+    /// Eased slide progress (0..1) of the current hover reveal.
+    fn hover_progress(&self) -> f32 {
+        self.hover_anim.eased()
+    }
+
+    /// F's glide: the cluster starts 6px right of its seat and settles,
+    /// swapping padding side for side so total width never changes (a
+    /// varying width would wobble the clipped name next to it).
+    fn slide_in<'a>(&self, cluster: iced::widget::Row<'a, Event>) -> Element<'a, Event> {
+        let p = self.hover_progress();
+        container(cluster)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 6.0 * p,
+                bottom: 0.0,
+                left: 6.0 * (1.0 - p),
             })
             .into()
     }
@@ -3008,6 +4078,11 @@ impl App {
             iced::window::resize_events().map(|(_, size)| Event::WindowResized(size)),
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Window(iced::window::Event::Moved(_)) => Some(Event::WindowMoved),
+                // Tracked continuously because a right-press event carries
+                // no position — this is where its context menu opens.
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Event::CursorMoved(position))
+                }
                 _ => None,
             }),
             // exit_on_close_request(false): the close button routes through
@@ -3122,6 +4197,39 @@ fn display_badge(project: &ProjectState, name: &str) -> Option<String> {
     }
 }
 
+/// One small icon button inside a sidebar hover cluster.
+fn row_action(
+    icon: &'static [u8],
+    tint: iced::Color,
+    tip: String,
+    event: Event,
+) -> Element<'static, Event> {
+    iced::widget::tooltip(
+        // 12px icon + 2px vertical padding = 16px, safely under the
+        // row's text line — a taller button would grow the row on hover
+        // and shove everything below it down a few pixels.
+        button(symbolic(icon, 12.0, tint))
+            .padding([2, 4])
+            .style(theme::toolbar_icon(false))
+            .on_press(event),
+        text(tip).size(11),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .gap(4)
+    .padding(7)
+    .style(theme::tooltip)
+    .into()
+}
+
+fn open_badge(project: &ProjectState, entry: &ProcessEntry) {
+    if let Some(url) = browser_url(project, &entry.config.name) {
+        log::info!("open badge {url}");
+        if let Err(e) = open::that(&url) {
+            log::warn!("open {url} failed: {e}");
+        }
+    }
+}
+
 /// A full URL for the browser, tunnel-mapped on remote projects.
 fn browser_url(project: &ProjectState, name: &str) -> Option<String> {
     let port = project.ports.get_port(name)?;
@@ -3168,6 +4276,12 @@ fn hline() -> Element<'static, Event> {
         .into()
 }
 
+/// The sidebar card's group separator: the air under the project header
+/// and between one category's rows and the next.
+fn group_gap() -> Element<'static, Event> {
+    container(column![]).height(3).into()
+}
+
 /// 1px hairline — vertical.
 fn vline() -> Element<'static, Event> {
     container(column![])
@@ -3175,4 +4289,75 @@ fn vline() -> Element<'static, Event> {
         .height(Length::Fill)
         .style(theme::hairline)
         .into()
+}
+
+// The GTK sidebar's icons, vendored from adwaita-icon-theme (see
+// assets/icons/README.md) so the shells share the exact glyphs.
+const ICON_SIDEBAR: &[u8] = include_bytes!("../assets/icons/sidebar-show-symbolic.svg");
+const ICON_FIND: &[u8] = include_bytes!("../assets/icons/edit-find-symbolic.svg");
+const ICON_GEAR: &[u8] = include_bytes!("../assets/icons/emblem-system-symbolic.svg");
+const ICON_ADD: &[u8] = include_bytes!("../assets/icons/list-add-symbolic.svg");
+const ICON_PLAY: &[u8] = include_bytes!("../assets/icons/media-playback-start-symbolic.svg");
+const ICON_STOP: &[u8] = include_bytes!("../assets/icons/media-playback-stop-symbolic.svg");
+const ICON_RESTART: &[u8] = include_bytes!("../assets/icons/view-refresh-symbolic.svg");
+
+/// A symbolic icon: the baked-in fill is overridden by the tint, which
+/// is what makes these behave like GTK's -symbolic icons.
+fn symbolic(bytes: &'static [u8], px: f32, tint: iced::Color) -> iced::widget::svg::Svg<'static> {
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(bytes))
+        .width(px)
+        .height(px)
+        .style(move |_, _| iced::widget::svg::Style { color: Some(tint) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SPAN: f32 = 160.0;
+
+    #[test]
+    fn ramp_advances_then_settles() {
+        let mut a = Anim::default();
+        let g = a.start();
+        assert_eq!(a.eased(), 0.0);
+        // Ten 16ms frames cover a 160ms span exactly.
+        for _ in 0..9 {
+            assert!(a.tick(g, SPAN), "ramp stopped early");
+        }
+        assert!(!a.tick(g, SPAN), "ramp should have arrived");
+        assert!(a.settled());
+        assert_eq!(a.eased(), 1.0);
+    }
+
+    #[test]
+    fn stale_ticks_are_dropped() {
+        let mut a = Anim::default();
+        let old = a.start();
+        a.tick(old, SPAN);
+        let new = a.start();
+        assert_ne!(old, new);
+        // The abandoned chain must not advance the restarted ramp — two
+        // live chains would run it at double speed.
+        assert!(!a.tick(old, SPAN));
+        assert_eq!(a.eased(), 0.0);
+    }
+
+    #[test]
+    fn reversal_is_continuous() {
+        let mut a = Anim::default();
+        let g = a.start();
+        for _ in 0..3 {
+            a.tick(g, SPAN);
+        }
+        // Reversing mid-glide: the widget's position is `1 - eased`, and
+        // the new ramp has to start exactly there or it visibly jumps.
+        let mirrored = 1.0 - a.eased();
+        a.restart_at(mirrored);
+        assert!(
+            (a.eased() - mirrored).abs() < 1e-5,
+            "{} != {mirrored}",
+            a.eased()
+        );
+    }
 }

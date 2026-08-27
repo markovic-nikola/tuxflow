@@ -185,10 +185,14 @@ impl<'a> TerminalView<'a> {
                 } else if let Some(data) =
                     clipboard.read(ClipboardKind::Primary)
                 {
-                    commands.push(Command::Write(paste_content(
-                        &terminal_mode,
-                        &data,
-                    )));
+                    // Empty = X11 conversion refusal (see the keyboard
+                    // Paste arm) — nothing to write.
+                    if !data.is_empty() {
+                        commands.push(Command::Write(paste_content(
+                            &terminal_mode,
+                            &data,
+                        )));
+                    }
                 }
             },
             iced_core::mouse::Event::ButtonReleased(
@@ -445,7 +449,17 @@ impl<'a> TerminalView<'a> {
                     // If no binding matched, only write printable text (when provided)
                     if binding_action == BindingAction::Ignore {
                         if let Some(c) = text {
-                            return Some(Command::Write(c.as_bytes().to_vec()));
+                            let mut bytes = c.as_bytes().to_vec();
+                            // Alt means ESC-prefix (xterm metaSendsEscape;
+                            // VTE and alacritty defaults) — single-byte
+                            // input only: AltGr-composed characters can
+                            // arrive with alt() set and must pass unmangled.
+                            if state.keyboard_modifiers.alt()
+                                && bytes.len() == 1
+                            {
+                                bytes.insert(0, 0x1b);
+                            }
+                            return Some(Command::Write(bytes));
                         }
                     }
                 },
@@ -471,11 +485,21 @@ impl<'a> TerminalView<'a> {
                 return Some(Command::Write(seq.as_bytes().to_vec()));
             },
             BindingAction::Paste => {
-                if let Some(data) = clipboard.read(ClipboardKind::Standard) {
-                    return Some(Command::Write(paste_content(
-                        &last_content.terminal_mode,
-                        &data,
-                    )));
+                // Empty is NOT "paste nothing": X11's conversion refusal
+                // (an image-only clipboard owner asked for UTF8_STRING)
+                // reaches iced as Ok("") — clipboard_x11 maps the
+                // SelectionNotify property=None reply to an empty buffer.
+                // Writing it would capture the event; returning None lets
+                // the chord fall through to the embedder, whose
+                // image-paste bridge hangs off exactly that fall-through.
+                match clipboard.read(ClipboardKind::Standard) {
+                    Some(data) if !data.is_empty() => {
+                        return Some(Command::Write(paste_content(
+                            &last_content.terminal_mode,
+                            &data,
+                        )));
+                    },
+                    _ => {},
                 }
             },
             BindingAction::Copy => {

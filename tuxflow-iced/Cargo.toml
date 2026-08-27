@@ -9,7 +9,7 @@ description = "TuxFlow's iced shell — the GNOME-stack exit, built on the vendo
 [dependencies]
 tuxflow-core = { path = "../tuxflow-core" }
 iced_term = { path = "../vendor/iced_term" }
-iced = { version = "0.14.0", features = ["tokio"] }
+iced = { version = "0.14.0", features = ["tokio", "svg"] }
 alacritty_terminal = "0.25.1"
 tokio = { version = "1.53.1", features = ["time"] }
 log = "0.4.34"

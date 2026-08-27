@@ -29,6 +29,8 @@ Your settings.toml strings apply; defaults shown.
 |---|---|
 | Ctrl+Shift+F | search scrollback (Enter next, Shift+Enter previous, Esc close) |
 | Ctrl+Shift+P | command palette |
+| Ctrl+F | filter the sidebar (projects & processes; Esc unfocuses, Esc again closes) |
+| Ctrl+\ | hide / show the sidebar |
 | Ctrl+Up / Ctrl+Down | previous / next process |
 | Ctrl+Shift+Up / Ctrl+Shift+Down | previous / next project |
 | Ctrl+T | new terminal in the active project |
@@ -36,6 +38,8 @@ Your settings.toml strings apply; defaults shown.
 | Ctrl+= / Ctrl+- | font size (applies to every terminal) |
 | Alt+Shift+Up / Alt+Shift+Down | move the selected process up / down (persists order) |
 | Ctrl+Shift+C / Ctrl+Shift+V | copy / paste (remote: tmux buffer bridge / image upload) |
+| Ctrl+V | remote agent terminals: paste text / bridge an image (GTK parity — a raw ^V would read the host's clipboard); elsewhere literal ^V |
+| Alt+Enter | ESC+CR to the terminal — newline in Claude Code |
 
 ## What to exercise (the parity walkthrough)
 
@@ -59,7 +63,28 @@ memory, rendering under your real workload.
   (working directory field included), add project, SSH section rows,
   git chip in the status bar (branch ↑ahead ↓behind ±changed, 20 s
   refresh, over ssh for remote projects).
-- **Settings** (gear next to "+ project", or Ctrl+,): full GTK-parity
+- **Header cluster** at the top of the sidebar: sidebar toggle, sidebar
+  filter, settings, add project — same Adwaita symbolic icons as GTK,
+  tooltips with your chords, toggled buttons keep their wash. Hiding the
+  sidebar collapses it to a slim icon rail (everything stays clickable);
+  filtering from the rail reopens the sidebar.
+- **Sidebar lifecycle controls** (GTK's hover buttons, design round F —
+  bare glyphs that slide in): hover a process row for play
+  (stopped/crashed), restart + stop (running), or cancel
+  (restarting/reconnecting); hover a project header for start-all-marked
+  / restart-all-running / stop-all — the ⌃N hint and the counter pill
+  step aside while the glyphs are in. A row with a detected URL grows a
+  standing ↗ that opens it through the tunnel map — any row, not just
+  the selected one.
+- **Right-click menus** (the GTK popovers): a project header offers
+  Start / Stop / Restart All, New Terminal (the card's old "+ terminal"
+  pill lives here now), Open in Editor, Copy Path, and Remove
+  Project behind the confirmation card; a process row offers
+  Start / Stop, Restart, Resume Session (agents), Open in Browser (when
+  a URL is live), Edit / Copy Command, and Delete Command (also
+  confirmed). The header's ✕ is gone — project removal lives here now,
+  like GTK. Esc or a click elsewhere closes.
+- **Settings** (gear in the header bar, or Ctrl+,): full GTK-parity
   port — all seven pages, every change saves to the shared settings.toml
   immediately. Live-applies here: terminal theme + font family / size /
   weight / line height (running terminals restyle in place), sidebar
@@ -75,6 +100,8 @@ memory, rendering under your real workload.
 - Drag-and-drop reorder (use Alt+Shift+Up/Down).
 - Local-only trio: file watcher restarts, MCP socket, update chip.
 - Voice bridge for remote agents.
+- Menu stragglers: Edit Project (dialog not ported), Clear Output /
+  Redraw Terminal (no backend command; redraw was a VTE workaround).
 
 ## Reporting
 

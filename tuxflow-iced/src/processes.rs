@@ -68,6 +68,10 @@ pub struct ProcessEntry {
     pub outage_notified: bool,
     /// OSC title the running program last set (shown dim in the toolbar).
     pub title: Option<String>,
+    /// One-shot command replacing `config.command` for the NEXT spawn
+    /// only (the context menu's "Resume Session" — GTK's
+    /// spawn_with_command_override). A later crash restarts the original.
+    pub command_override: Option<String>,
 }
 
 impl ProcessEntry {
@@ -89,6 +93,7 @@ impl ProcessEntry {
             auto_open_grace: false,
             outage_notified: false,
             title: None,
+            command_override: None,
         }
     }
 
@@ -185,6 +190,10 @@ pub fn spawn_settings(
     palette: iced_term::ColorPalette,
 ) -> iced_term::settings::Settings {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let run_command = entry
+        .command_override
+        .take()
+        .unwrap_or_else(|| entry.config.command.clone());
     let config = &entry.config;
 
     let (args, working_directory, env) = match location {
@@ -195,10 +204,10 @@ pub fn spawn_settings(
                 .unwrap_or_else(|| location.dir_str());
             // A plain terminal on a remote project is a login shell on the
             // host, inside tmux like everything else.
-            let command = if config.command.is_empty() {
+            let command = if run_command.is_empty() {
                 String::from("exec \"${SHELL:-/bin/sh}\" -l")
             } else {
-                config.command.clone()
+                run_command.clone()
             };
             let pidfile = remote::new_remote_pidfile();
             let fresh = std::mem::take(&mut entry.remote_fresh_next);
@@ -224,10 +233,10 @@ pub fn spawn_settings(
             )
         }
         _ => {
-            let args = if config.command.is_empty() {
+            let args = if run_command.is_empty() {
                 vec!["-l".into()]
             } else {
-                vec!["-li".into(), "-c".into(), config.command.clone()]
+                vec!["-li".into(), "-c".into(), run_command.clone()]
             };
             let cwd = config
                 .working_dir

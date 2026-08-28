@@ -19,6 +19,17 @@ Sidebar lifecycle controls (process rows + project headers):
 - `media-playback-stop-symbolic.svg` — stop
 - `view-refresh-symbolic.svg` — restart
 
-adwaita-icon-theme licenses these under **LGPL-3.0 or CC-BY-SA-3.0**
+Status bar:
+
+- `send-to-symbolic.svg` — git changes chip
+- `focus-windows-symbolic.svg` — focus mode (hide the sidebar)
+- `edit-clear-symbolic.svg` — clear the terminal
+
+`tuxflow-remote-symbolic.svg` is the exception: it is TuxFlow's own
+(app-namespaced so a user's icon theme can't override the glyph), copied
+from `data/icons/` and MIT like the rest of the app. It marks a project
+that lives on an ssh host.
+
+adwaita-icon-theme licenses the rest under **LGPL-3.0 or CC-BY-SA-3.0**
 (dual); they are redistributed here under CC-BY-SA-3.0 with this notice
 as attribution. Everything else in this crate remains MIT.

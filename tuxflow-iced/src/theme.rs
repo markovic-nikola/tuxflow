@@ -15,7 +15,7 @@
 use std::sync::RwLock;
 
 use iced::gradient::Linear;
-use iced::widget::{button, container, scrollable, text_input};
+use iced::widget::{button, container, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Gradient, Radians, Shadow, Theme, Vector};
 use tuxflow_core::config::palette;
 
@@ -50,6 +50,21 @@ pub const CRASHED: Color = Color::from_rgb(0.945, 0.298, 0.298);
 pub const RESTARTING: Color = Color::from_rgb(0.8, 0.655, 0.0);
 /// Stopped dot on the card surface.
 pub const STOPPED: Color = Color::from_rgb(0.290, 0.290, 0.322);
+
+// ── Git (semantic, fixed — matches style.css so the shells agree) ───────
+/// #73c991 — insertions, and commits waiting to be pushed. Same hue as
+/// LOCAL_ACCENT by coincidence of the palette, not by reference: the
+/// accent is user-settable and this must not move with it.
+pub const GIT_ADDED: Color = Color::from_rgb(0.451, 0.788, 0.569);
+/// #f14c4c — deletions.
+pub const GIT_REMOVED: Color = Color::from_rgb(0.945, 0.298, 0.298);
+/// #d29922 — commits waiting to be pulled. Amber reads as "incoming,
+/// not yours yet" against the green of what you already have.
+pub const GIT_BEHIND: Color = Color::from_rgb(0.824, 0.600, 0.133);
+/// #dcdcaa — a modified file's badge in the changes list.
+pub const GIT_MODIFIED: Color = Color::from_rgb(0.863, 0.863, 0.667);
+/// #6c6c6c — an untracked file's badge: present, but not git's business yet.
+pub const GIT_UNTRACKED: Color = Color::from_rgb(0.424, 0.424, 0.424);
 
 pub fn alpha(color: Color, a: f32) -> Color {
     Color { a, ..color }
@@ -172,6 +187,22 @@ pub fn terminal_pane(_: &Theme) -> container::Style {
     }
 }
 
+/// The tint behind one added or removed line of a diff, carried by the
+/// row's container so it reaches the full width of the pane. A span's
+/// `background` paints behind its glyphs only, which is what left every
+/// band with a ragged right edge.
+///
+/// Removed sits lower than added on purpose: it is already the dimmer
+/// half (see `DEL_ALPHA` in git_view), and red reads heavier than green
+/// at equal alpha.
+pub fn diff_band(color: Color) -> impl Fn(&Theme) -> container::Style {
+    let a = if color == GIT_REMOVED { 0.11 } else { 0.13 };
+    move |_| container::Style {
+        background: Some(Background::Color(alpha(color, a))),
+        ..Default::default()
+    }
+}
+
 /// The angle every card gradient runs at: 135°, so offset 0 sits in the
 /// top-left corner and offset 1 in the bottom-right one.
 const CARD_DIAGONAL: Radians = Radians(2.356);
@@ -212,13 +243,19 @@ const RING_MAX: f32 = 0.60;
 ///
 /// `sweep` is the third: a 0..1 phase while an agent inside is producing
 /// output. It drives BOTH a band of accent light travelling the same
-/// diagonal and a breath in the ring, in step — the band adds to the wash
-/// rather than replacing it, so "active" and "an agent is working" stay
-/// readable together, and on a background card the band is the only thing
-/// lit, which is exactly the distinction. Splitting the signal across the
-/// two is what let the band drop to a whisper: a bright thing sliding
-/// under a row label reads as interference however legible it measures,
-/// so the carrying motion sits on the border, where there is no text.
+/// diagonal and a breath in the ring, in step. Splitting the signal across
+/// the two is what let the band drop to a whisper: a bright thing sliding
+/// under a row label reads as interference however legible it measures, so
+/// the carrying motion sits on the border, where there is no text.
+///
+/// The two halves are gated differently, and asymmetrically on purpose
+/// (Nikola): the RING breathes on every card with a working agent, because
+/// "something over there is busy" is exactly what a background card needs
+/// to be able to say. The BAND rides the ACTIVE card only — it is a
+/// modulation of the active wash, and on a background card, where there is
+/// no wash under it, a lone band sliding across a dark card is the only
+/// motion in an otherwise still sidebar, so it pulls the eye to the card
+/// you are not looking at.
 pub fn project_card(
     accent: Color,
     running: bool,
@@ -304,9 +341,12 @@ fn band_at(t: f32, center: f32) -> f32 {
 }
 
 /// The card's background gradient, or `None` when nothing lights it and a
-/// flat fill will do.
+/// flat fill will do. Only the active card is ever lit: the band is a
+/// modulation of the wash, not a signal of its own (see [`project_card`]),
+/// so a background card stays flat however busy it is and says so with its
+/// ring instead.
 fn card_gradient(accent: Color, active: bool, sweep: Option<f32>) -> Option<Gradient> {
-    if !active && sweep.is_none() {
+    if !active {
         return None;
     }
     let center = sweep.map(band_center);
@@ -329,7 +369,7 @@ fn card_gradient(accent: Color, active: bool, sweep: Option<f32>) -> Option<Grad
 
     let mut gradient = Linear::new(CARD_DIAGONAL);
     for t in offsets {
-        let amount = if active { wash_at(t) } else { 0.0 } + center.map_or(0.0, |c| band_at(t, c));
+        let amount = wash_at(t) + center.map_or(0.0, |c| band_at(t, c));
         gradient = gradient.add_stop(t, mix(BG_CARD, accent, amount));
     }
     Some(Gradient::Linear(gradient))
@@ -386,24 +426,6 @@ pub fn keycap(_: &Theme) -> container::Style {
             blur_radius: 0.0,
         },
         text_color: Some(TEXT_SECONDARY),
-        ..Default::default()
-    }
-}
-
-/// Tinted status pill (toolbar): "● running" in the status's own color.
-pub fn status_pill(color: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style {
-        background: Some(Background::Color(alpha(color, 0.15))),
-        border: Border {
-            radius: 99.0.into(),
-            ..Default::default()
-        },
-        text_color: Some(Color {
-            r: (color.r + 0.35).min(1.0),
-            g: (color.g + 0.35).min(1.0),
-            b: (color.b + 0.35).min(1.0),
-            a: 1.0,
-        }),
         ..Default::default()
     }
 }
@@ -563,6 +585,11 @@ pub fn primary(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Styl
             99.0,
         ),
         button::Status::Pressed => flat(alpha(accent, 0.85), ON_ACCENT, 99.0),
+        // A filled accent button reads as pressable, so an unpressable one
+        // has to say otherwise — GTK dims `suggested-action` the same way
+        // when `set_sensitive(false)`. Without this, Commit-with-no-message
+        // looks armed and silently does nothing when clicked.
+        button::Status::Disabled => flat(alpha(accent, 0.35), alpha(ON_ACCENT, 0.5), 99.0),
         _ => flat(accent, ON_ACCENT, 99.0),
     }
 }
@@ -692,6 +719,30 @@ pub fn input(accent: Color) -> impl Fn(&Theme, text_input::Status) -> text_input
     }
 }
 
+/// Multi-line field (the commit message box). Same ink as `input`, but
+/// squared off — a 99px radius on something 72px tall reads as a capsule,
+/// not a text area.
+pub fn editor(accent: Color) -> impl Fn(&Theme, text_editor::Status) -> text_editor::Style {
+    move |_, status| {
+        let focused = matches!(status, text_editor::Status::Focused { .. });
+        text_editor::Style {
+            background: Background::Color(BG_FIELD),
+            border: Border {
+                color: if focused {
+                    alpha(accent, 0.55)
+                } else {
+                    alpha(Color::WHITE, 0.08)
+                },
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            placeholder: DIM,
+            value: TEXT,
+            selection: alpha(accent, 0.35),
+        }
+    }
+}
+
 /// Blend `base` toward `tint`.
 fn mix(base: Color, tint: Color, t: f32) -> Color {
     Color {
@@ -724,9 +775,30 @@ mod tests {
             .collect()
     }
 
+    /// The band's own contribution at each stop, with the static wash
+    /// subtracted out. The band only ever paints on the active card, so
+    /// isolating it means measuring against the wash rather than against a
+    /// bare card.
+    fn band_stops(phase: f32) -> Vec<(f32, f32)> {
+        stops(true, Some(phase))
+            .into_iter()
+            .map(|(offset, amount)| (offset, amount - wash_at(offset)))
+            .collect()
+    }
+
     #[test]
-    fn idle_background_card_needs_no_gradient() {
+    fn background_cards_stay_flat_however_busy() {
+        // The band is a modulation of the active wash, not a signal of its
+        // own: an unselected card is flat whether or not an agent in it is
+        // working. Its half of the working signal is the ring.
         assert!(card_gradient(REMOTE_ACCENT, false, None).is_none());
+        for i in 0..=8 {
+            let phase = i as f32 / 8.0;
+            assert!(
+                card_gradient(REMOTE_ACCENT, false, Some(phase)).is_none(),
+                "phase {phase} lit an unselected card"
+            );
+        }
     }
 
     #[test]
@@ -735,14 +807,12 @@ mod tests {
         // everything past the eighth — both silent, so pin them here.
         for i in 0..=40 {
             let phase = i as f32 / 40.0;
-            for active in [false, true] {
-                let stops = stops(active, Some(phase));
-                assert!(stops.len() <= 8, "phase {phase}: {} stops", stops.len());
-                assert!(
-                    stops.windows(2).all(|w| w[0].0 < w[1].0),
-                    "phase {phase}: {stops:?}"
-                );
-            }
+            let stops = stops(true, Some(phase));
+            assert!(stops.len() <= 8, "phase {phase}: {} stops", stops.len());
+            assert!(
+                stops.windows(2).all(|w| w[0].0 < w[1].0),
+                "phase {phase}: {stops:?}"
+            );
         }
     }
 
@@ -751,7 +821,7 @@ mod tests {
         // Nothing of the band is on the card at either end of a pass, so
         // the phase can wrap 1 -> 0 with no jump to hide.
         for phase in [0.0, 1.0] {
-            for (_, amount) in stops(false, Some(phase)) {
+            for (_, amount) in band_stops(phase) {
                 assert!(amount.abs() < 1e-3, "phase {phase} lit the card: {amount}");
             }
         }
@@ -761,7 +831,7 @@ mod tests {
     fn the_band_crosses_the_card() {
         // Mid-pass the peak is mid-card, and it travels monotonically.
         let peak = |phase: f32| {
-            stops(false, Some(phase))
+            band_stops(phase)
                 .into_iter()
                 .max_by(|a, b| a.1.partial_cmp(&b.1).expect("finite"))
                 .expect("a stop")
@@ -787,6 +857,21 @@ mod tests {
             assert!(a > prev, "phase {i}/50 fell back to {a}");
             prev = a;
         }
+    }
+
+    #[test]
+    fn the_ring_breathes_whether_or_not_the_card_is_selected() {
+        // The asymmetry (Nikola): the background belongs to the active
+        // card alone, but "an agent in here is working" has to read from
+        // any card, so the ring's half of the signal ignores selection.
+        let ring = |active| {
+            project_card(REMOTE_ACCENT, true, active, Some(0.5))(&Theme::Dark)
+                .border
+                .color
+                .a
+        };
+        assert!((ring(false) - RING_MAX).abs() < 1e-6);
+        assert!((ring(false) - ring(true)).abs() < 1e-6);
     }
 
     #[test]

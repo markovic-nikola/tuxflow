@@ -278,6 +278,32 @@ impl Backend {
         self.parser.advance(&mut *term, bytes);
     }
 
+    /// Wipe the grid — viewport, scrollback and cursor — leaving the child
+    /// alone. Unlike `feed` this is safe WHILE a process is writing: it
+    /// mutates the grid under the same lock the PTY loop takes, instead of
+    /// driving a second parser across it.
+    ///
+    /// The order is load-bearing. On the primary screen alacritty
+    /// implements `ClearMode::All` as "scroll the viewport up into the
+    /// history" — the xterm behaviour that lets `clear` keep your
+    /// scrollback — so the history has to be dropped AFTER it, never
+    /// before, or what we just cleared is sitting in it.
+    pub fn clear(&mut self) {
+        use alacritty_terminal::vte::ansi::Handler;
+
+        let term = self.term.clone();
+        let mut term = term.lock();
+        term.clear_screen(ansi::ClearMode::All);
+        term.clear_screen(ansi::ClearMode::Saved);
+        // `clear_viewport` doesn't move the cursor, so the next line of
+        // output would otherwise land where the old one was, under a
+        // screenful of blank rows.
+        term.goto(0, 0);
+        // A user who cleared while scrolled up is asking to see the empty
+        // screen, not the position they were reading at.
+        term.scroll_display(Scroll::Bottom);
+    }
+
     /// Start a new child in the SAME grid: the finished run's output stays
     /// in the scrollback and the new one appends below `banner`.
     ///

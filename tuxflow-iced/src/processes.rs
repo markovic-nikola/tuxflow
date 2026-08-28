@@ -76,7 +76,8 @@ pub struct ProcessEntry {
     /// A disconnect notification went out for the current outage — reset
     /// on manual action so the next outage notifies again.
     pub outage_notified: bool,
-    /// OSC title the running program last set (shown dim in the toolbar).
+    /// OSC title the running program last set (carried by the window
+    /// title bar — the pane has no toolbar).
     pub title: Option<String>,
     /// One-shot command replacing `config.command` for the NEXT spawn
     /// only (the context menu's "Resume Session" — GTK's
@@ -120,6 +121,17 @@ impl ProcessEntry {
 
     pub fn is_running(&self) -> bool {
         matches!(self.status, Status::Running)
+    }
+
+    /// What to call this process on screen: the OSC title its program set,
+    /// falling back to the configured name until it sets one (and again if
+    /// it clears it).
+    pub fn display_title(&self) -> &str {
+        self.title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&self.config.name)
     }
 
     /// The next `working` state, from the repaints counted since the last

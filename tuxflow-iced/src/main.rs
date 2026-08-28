@@ -7,6 +7,7 @@
 //! ports, tunnels and poll cadence. Add project / add command / add agent
 //! run as inline forms; closing a project detaches its remote sessions.
 
+mod git_view;
 mod keys;
 mod notify;
 mod processes;
@@ -39,7 +40,10 @@ use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_cl
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
 use status_dot::status_dot;
-use theme::{CRASHED, DIM, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT, TEXT_SECONDARY, accent_for};
+use theme::{
+    CRASHED, DIM, GIT_ADDED, GIT_BEHIND, GIT_REMOVED, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT,
+    TEXT_SECONDARY, accent_for,
+};
 use tuxflow_core::config::settings::AppSettings;
 
 /// Ports-poll cadence: fast while a run is settling (a new forward just
@@ -188,11 +192,13 @@ impl Anim {
     }
 }
 
-/// The working-agent sweep: the phase of a band of light travelling across
-/// every card whose agent is producing output. Same tick-chain idiom as
-/// [`Anim`] and generation-stamped for the same reason, but it LOOPS
-/// rather than settling — and it is linear, since an ease would make a
-/// repeating pass lurch at the seam.
+/// The working-agent sweep: the shared phase driving every card whose
+/// agent is producing output — a breath in the card's border ring, and,
+/// on the ACTIVE card only, a band of light crossing its wash
+/// ([`theme::project_card`]). Same tick-chain idiom as [`Anim`] and
+/// generation-stamped for the same reason, but it LOOPS rather than
+/// settling — and it is linear, since an ease would make a repeating pass
+/// lurch at the seam.
 #[derive(Default)]
 struct Sweep {
     phase: f32,
@@ -243,8 +249,19 @@ fn main() -> iced::Result {
     let window = tuxflow_core::config::settings::AppSettings::load().window;
     iced::application(App::new, App::update, App::view)
         .theme(|_: &App| iced::Theme::Dark)
+        // The pane carries no toolbar, so the window title says what it
+        // used to: which project, and what the selected process calls
+        // itself right now (its OSC title, else its configured name).
+        // Capped — agents write whole sentences into the OSC title.
         .title(|app: &App| match app.active_project() {
-            Some(p) => format!("TuxFlow - {}", p.name),
+            Some(p) => match p.entries.get(p.selected) {
+                Some(entry) => format!(
+                    "TuxFlow - {}: {}",
+                    p.name,
+                    entry.display_title().chars().take(70).collect::<String>()
+                ),
+                None => format!("TuxFlow - {}", p.name),
+            },
             None => String::from("TuxFlow"),
         })
         .window(iced::window::Settings {
@@ -292,6 +309,10 @@ struct ProjectState {
     poll_chain_started: bool,
     terminals_created: usize,
     git: Option<tuxflow_core::remote::git::GitStatus>,
+    /// Working-tree line counts behind the status bar's changes chip.
+    /// Separate from `git` because it costs its own round trips — the
+    /// porcelain status can't produce `+N −M`.
+    diffstat: tuxflow_core::remote::git::DiffStat,
     /// The project's avatar, resolved once at load; None falls back to the
     /// initials square. Already checked to exist — `view` runs every frame
     /// and must never stat the disk.
@@ -356,6 +377,21 @@ struct App {
     settings: AppSettings,
     /// Settings view state; `Some` = the main pane shows settings.
     settings_ui: Option<settings_ui::State>,
+    /// Git Changes view state; `Some` = the main pane shows it. Like
+    /// settings, it takes the pane rather than floating over it — a diff
+    /// wants the whole window, and GTK's dialog opens at the parent's
+    /// full size for the same reason.
+    git_ui: Option<git_view::State>,
+    /// A one-click status-bar sync (fetch + ff-pull + push) is in flight.
+    /// The chip's counters hide while it runs: showing the pre-sync
+    /// numbers next to a spinner reads as "the sync did nothing".
+    git_syncing: bool,
+    /// Identifies the open Git Changes view's poll chain, so a rapid
+    /// close-and-reopen doesn't leave two of them polling one view.
+    git_tick_stamp: u64,
+    /// A (heading, body) message awaiting an OK — GTK's AlertDialog for
+    /// things that failed but need no decision.
+    notice: Option<(String, String)>,
     composer: String,
     /// Header toggle (GTK: the AdwOverlaySplitView sidebar). Runtime-only,
     /// like GTK — a fresh launch always shows the sidebar.
@@ -561,7 +597,17 @@ enum Event {
     GitPolled {
         project: u64,
         status: Option<tuxflow_core::remote::git::GitStatus>,
+        diffstat: tuxflow_core::remote::git::DiffStat,
     },
+    /// Status-bar sync chip: fetch, ff-pull if behind, push if ahead.
+    GitSync,
+    GitSynced(Result<(), String>),
+    /// Status-bar changes chip → the Git Changes view.
+    OpenGitChanges,
+    GitMsg(git_view::Msg),
+    /// Status-bar Clear: empty the selected terminal's grid, child intact.
+    ClearTerminal,
+    NoticeDismiss,
     PortsPollTick(u64),
     PortsPolled {
         project: u64,
@@ -607,7 +653,10 @@ enum Event {
     AddProjectInput(String),
     AddProjectSubmit,
     AddProjectCancel,
+    /// Add a command (or agent) to a project — the form writes into
+    /// whatever project is active, so it names the one it was raised on.
     OpenAddCommand {
+        project: u64,
         agent: bool,
     },
     OpenEditProcess,
@@ -644,6 +693,10 @@ impl App {
             saved,
             app_keys: AppKeys::from_settings(&settings.keybindings),
             settings_ui: None,
+            git_ui: None,
+            git_syncing: false,
+            git_tick_stamp: 0,
+            notice: None,
             composer: String::new(),
             sidebar_visible: true,
             // Settled: a fresh launch shows the sidebar without a glide.
@@ -763,6 +816,7 @@ impl App {
             poll_chain_started: false,
             terminals_created: 0,
             git: None,
+            diffstat: tuxflow_core::remote::git::DiffStat::default(),
             icon: None,
             sweeping: false,
             location,
@@ -1232,12 +1286,342 @@ impl App {
         let id = project.id;
         let location = project.location.clone();
         Task::perform(
-            tokio::task::spawn_blocking(move || tuxflow_core::remote::git::query_status(&location)),
-            move |joined| Event::GitPolled {
-                project: id,
-                status: joined.ok().flatten(),
+            tokio::task::spawn_blocking(move || {
+                let status = tuxflow_core::remote::git::query_status(&location)?;
+                // Only worth the extra round trips once we know it IS a
+                // repo — the diffstat on a non-repo is two failed calls.
+                Some((status, tuxflow_core::remote::git::query_diffstat(&location)))
+            }),
+            move |joined| {
+                let answer = joined.ok().flatten();
+                Event::GitPolled {
+                    project: id,
+                    status: answer.as_ref().map(|(s, _)| s.clone()),
+                    diffstat: answer.map(|(_, d)| d).unwrap_or_default(),
+                }
             },
         )
+    }
+
+    /// The status-bar sync chip: fetch, ff-pull if behind, push if ahead.
+    /// One click, and every failure mode lands in a notice rather than
+    /// silently leaving the counters wrong.
+    fn start_git_sync(&mut self) -> Task<Event> {
+        let Some(location) = self.active_project().map(|p| p.location.clone()) else {
+            return Task::none();
+        };
+        if self.git_syncing {
+            return Task::none();
+        }
+        self.git_syncing = true;
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::sync_with_remote(&location)
+            }),
+            |joined| Event::GitSynced(joined.unwrap_or_else(|e| Err(e.to_string()))),
+        )
+    }
+
+    /// GTK opens an AlertDialog here; the notice card is this shell's
+    /// equivalent — one message, one OK.
+    fn notify_git_failure(&mut self, heading: &str, detail: &str) {
+        self.notice = Some((
+            heading.to_string(),
+            format!("{detail}\n\nOpen Git Changes to resolve it manually."),
+        ));
+    }
+
+    /// Open the Git Changes view on the active project, seeded from what
+    /// the status-bar poll already knows so it renders complete instead of
+    /// blank for a round trip.
+    fn open_git_changes(&mut self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        let seed = git_view::Seed {
+            ahead: project.git.as_ref().map_or(0, |g| g.ahead as usize),
+            behind: project.git.as_ref().map_or(0, |g| g.behind as usize),
+            branch: project.git.as_ref().map(|g| g.branch.clone()),
+        };
+        let (id, location) = (project.id, project.location.clone());
+        self.git_tick_stamp += 1;
+        let stamp = self.git_tick_stamp;
+        self.git_ui = Some(git_view::State::new(id, location, seed, stamp));
+        // Closing the other full-pane views keeps "what is the main area
+        // showing?" a single answer.
+        self.settings_ui = None;
+        Task::batch([
+            self.git_load_files(),
+            self.git_refresh_sync(true),
+            Task::perform(tokio::time::sleep(Duration::from_secs(2)), move |_| {
+                Event::GitMsg(git_view::Msg::Tick(stamp))
+            }),
+        ])
+    }
+
+    /// Reload the changed-file list. Clears the selection, because the
+    /// index it holds is about to mean a different file.
+    fn git_load_files(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.git_ui else {
+            return Task::none();
+        };
+        let generation = state.bump();
+        state.loading = state.files.is_empty();
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::changed_files(&location)
+            }),
+            move |joined| {
+                Event::GitMsg(git_view::Msg::Files {
+                    generation,
+                    files: joined.unwrap_or_default(),
+                })
+            },
+        )
+    }
+
+    /// Load the selected file's diff. Shares the file list's generation:
+    /// a reload invalidates a diff still in flight for the old list.
+    fn git_load_diff(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.git_ui else {
+            return Task::none();
+        };
+        let Some(file) = state.selected_file().cloned() else {
+            state.diff = None;
+            return Task::none();
+        };
+        let generation = state.generation;
+        state.diff_loading = true;
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::load_diff(&location, &file)
+            }),
+            move |joined| {
+                Event::GitMsg(git_view::Msg::Diff {
+                    generation,
+                    diff: Box::new(joined.unwrap_or_default()),
+                })
+            },
+        )
+    }
+
+    /// Branch + ahead/behind + the porcelain hash the poll compares on.
+    /// `fetch` costs a network round trip, so it runs on open and every
+    /// ~30 s, not on every 2 s tick.
+    fn git_refresh_sync(&mut self, fetch: bool) -> Task<Event> {
+        let Some(state) = &self.git_ui else {
+            return Task::none();
+        };
+        let generation = state.generation;
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                use tuxflow_core::remote::git as g;
+                if fetch {
+                    g::fetch(&location);
+                }
+                (
+                    g::commits_ahead(&location),
+                    g::commits_behind(&location),
+                    g::current_branch(&location),
+                    g::status_hash(&location),
+                )
+            }),
+            move |joined| {
+                let (ahead, behind, branch, hash) = joined.unwrap_or((0, 0, None, 0));
+                Event::GitMsg(git_view::Msg::Sync {
+                    generation,
+                    ahead,
+                    behind,
+                    branch,
+                    hash,
+                })
+            },
+        )
+    }
+
+    /// A commit / push / pull from the view, all shaped the same: mark
+    /// busy, run it on a worker, report back under the current generation.
+    fn git_run(&mut self, action: git_view::Busy) -> Task<Event> {
+        let Some(state) = &mut self.git_ui else {
+            return Task::none();
+        };
+        if state.busy.is_some() {
+            return Task::none();
+        }
+        let message = state.commit_message();
+        if action == git_view::Busy::Commit && message.is_empty() {
+            return Task::none();
+        }
+        state.busy = Some(action);
+        state.error = None;
+        let generation = state.generation;
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                use tuxflow_core::remote::git as g;
+                match action {
+                    git_view::Busy::Commit => g::commit_all(&location, &message),
+                    git_view::Busy::Push => g::push(&location),
+                    git_view::Busy::Pull => g::pull(&location),
+                }
+            }),
+            move |joined| {
+                Event::GitMsg(git_view::Msg::Done {
+                    generation,
+                    action,
+                    result: joined.unwrap_or_else(|e| Err(e.to_string())),
+                })
+            },
+        )
+    }
+
+    fn update_git_view(&mut self, msg: git_view::Msg) -> Task<Event> {
+        use git_view::Msg;
+        match msg {
+            Msg::Close => {
+                self.git_ui = None;
+                self.focus_selected_terminal()
+            }
+            Msg::Refresh => Task::batch([self.git_load_files(), self.git_refresh_sync(true)]),
+            Msg::SelectFile(index) => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                state.selected = Some(index);
+                self.git_load_diff()
+            }
+            Msg::MessageAction(action) => {
+                if let Some(state) = &mut self.git_ui {
+                    state.message.perform(action);
+                }
+                Task::none()
+            }
+            Msg::Commit => self.git_run(git_view::Busy::Commit),
+            Msg::Push => self.git_run(git_view::Busy::Push),
+            Msg::Pull => self.git_run(git_view::Busy::Pull),
+            Msg::DismissError => {
+                if let Some(state) = &mut self.git_ui {
+                    state.error = None;
+                }
+                Task::none()
+            }
+            Msg::Tick(stamp) => {
+                let Some(state) = &self.git_ui else {
+                    return Task::none();
+                };
+                // A stale chain from a previous open: let it die.
+                if state.stamp != stamp {
+                    return Task::none();
+                }
+                let ticks = state.ticks;
+                if let Some(state) = &mut self.git_ui {
+                    state.ticks = ticks.wrapping_add(1);
+                }
+                let next = Task::perform(tokio::time::sleep(Duration::from_secs(2)), move |_| {
+                    Event::GitMsg(Msg::Tick(stamp))
+                });
+                Task::batch([self.git_refresh_sync(ticks % 15 == 0), next])
+            }
+            Msg::Files { generation, files } => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                if state.generation != generation {
+                    return Task::none();
+                }
+                state.loading = false;
+                // Hold the selection on the same PATH, not the same index:
+                // a file leaving the list above the selected one would
+                // otherwise silently move the selection onto its neighbour.
+                let held = state.selected_file().map(|f| f.path.clone());
+                state.files = files;
+                state.selected = held
+                    .and_then(|path| state.files.iter().position(|f| f.path == path))
+                    .or(if state.files.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
+                self.git_load_diff()
+            }
+            Msg::Diff { generation, diff } => {
+                if let Some(state) = &mut self.git_ui
+                    && state.generation == generation
+                {
+                    state.diff_loading = false;
+                    state.diff = Some(*diff);
+                }
+                Task::none()
+            }
+            Msg::Sync {
+                generation,
+                ahead,
+                behind,
+                branch,
+                hash,
+            } => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                if state.generation != generation {
+                    return Task::none();
+                }
+                // A write action owns its own counter until it reports —
+                // repainting the pre-push number over a push in flight
+                // reads as "the push did nothing".
+                if state.busy.is_none() {
+                    state.ahead = ahead;
+                    state.behind = behind;
+                }
+                if branch.is_some() {
+                    state.branch = branch;
+                }
+                let changed = state.last_hash != 0 && state.last_hash != hash;
+                state.last_hash = hash;
+                if changed {
+                    self.git_load_files()
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::Done {
+                generation,
+                action,
+                result,
+            } => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                if state.generation != generation {
+                    return Task::none();
+                }
+                state.busy = None;
+                match result {
+                    Ok(()) => {
+                        if action == git_view::Busy::Commit {
+                            state.message = iced::widget::text_editor::Content::new();
+                        }
+                        // The counters and the file list both moved; a
+                        // fetch isn't needed since we just talked to the
+                        // remote ourselves.
+                        Task::batch([
+                            self.git_load_files(),
+                            self.git_refresh_sync(false),
+                            // The status bar's chip is showing the numbers
+                            // from before this action.
+                            self.poll_git(),
+                        ])
+                    }
+                    Err(detail) => {
+                        state.error = Some((action.failure_heading().to_string(), detail));
+                        Task::none()
+                    }
+                }
+            }
+        }
     }
 
     /// Move the selected process within its project and persist the order
@@ -1686,6 +2070,17 @@ impl App {
     }
 
     fn update(&mut self, event: Event) -> Task<Event> {
+        // The Git Changes view belongs to ONE project. `self.active` moves
+        // from eight different places (row click, palette, digit switcher,
+        // close, reorder…), so this is checked here rather than chased
+        // through each of them — a stale view would otherwise sit in the
+        // main pane showing another project's repo while the sidebar and
+        // the status bar both say something else, and keep polling it.
+        if let Some(state) = &self.git_ui
+            && self.active_project().map(|p| p.id) != Some(state.project)
+        {
+            self.git_ui = None;
+        }
         match event {
             Event::WindowResized(size) => {
                 self.window_size = size;
@@ -2130,9 +2525,39 @@ impl App {
                 });
                 Task::batch([poll, next])
             }
-            Event::GitPolled { project, status } => {
+            Event::GitPolled {
+                project,
+                status,
+                diffstat,
+            } => {
                 if let Some(pidx) = self.project_index(project) {
                     self.projects[pidx].git = status;
+                    self.projects[pidx].diffstat = diffstat;
+                }
+                Task::none()
+            }
+            Event::GitSync => self.start_git_sync(),
+            Event::GitSynced(result) => {
+                self.git_syncing = false;
+                if let Err(detail) = result {
+                    self.notify_git_failure("Sync Failed", &detail);
+                }
+                // Repaint the counters from what the sync actually left
+                // behind, not from what we assumed it would.
+                self.poll_git()
+            }
+            Event::OpenGitChanges => self.open_git_changes(),
+            Event::NoticeDismiss => {
+                self.notice = None;
+                Task::none()
+            }
+            Event::GitMsg(msg) => self.update_git_view(msg),
+            Event::ClearTerminal => {
+                if let Some(project) = self.projects.get_mut(self.active)
+                    && let Some(entry) = project.entries.get_mut(project.selected)
+                    && let Some(terminal) = entry.terminal.as_mut()
+                {
+                    terminal.clear();
                 }
                 Task::none()
             }
@@ -2238,12 +2663,17 @@ impl App {
                 {
                     return self.finish_capture(action, &key, modifiers);
                 }
-                // Esc peels overlays top-down: confirmation card, context
-                // menu, then settings like the other panels.
+                // Esc peels overlays top-down: notice, confirmation card,
+                // context menu, then the full-pane views like the other
+                // panels.
                 if matches!(
                     key.as_ref(),
                     iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
                 ) {
+                    if self.notice.is_some() {
+                        self.notice = None;
+                        return Task::none();
+                    }
                     if self.confirm.is_some() {
                         self.confirm = None;
                         return Task::none();
@@ -2255,6 +2685,13 @@ impl App {
                     if self.settings_ui.is_some() {
                         self.settings_ui = None;
                         return Task::none();
+                    }
+                    // The commit box is a text_editor, which — like the
+                    // filter's text_input — eats the first Esc to unfocus
+                    // itself. The second reaches here and closes the view.
+                    if self.git_ui.is_some() {
+                        self.git_ui = None;
+                        return self.focus_selected_terminal();
                     }
                 }
                 // Palette navigation first (its input consumes typing but
@@ -2464,25 +2901,35 @@ impl App {
                 self.active = self.projects.len() - 1;
                 task
             }
-            Event::OpenAddCommand { agent } => {
-                if self.active_project().is_some() {
-                    self.add_command = Some(ProcessForm {
-                        name: String::new(),
-                        command: String::new(),
-                        working_dir: String::new(),
-                        agent,
-                        start_with_project: false,
-                        auto_restart: false,
-                        open_in_browser: false,
-                        editing: None,
-                        original_category: if agent {
-                            ProcessCategory::Agent
-                        } else {
-                            ProcessCategory::Command
-                        },
-                    });
+            Event::OpenAddCommand { project, agent } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                // Submit adds to the ACTIVE project, so raising the form on
+                // another card has to switch to it first (as selecting one
+                // of its processes would).
+                let switched = self.active != pidx;
+                self.active = pidx;
+                self.add_command = Some(ProcessForm {
+                    name: String::new(),
+                    command: String::new(),
+                    working_dir: String::new(),
+                    agent,
+                    start_with_project: false,
+                    auto_restart: false,
+                    open_in_browser: false,
+                    editing: None,
+                    original_category: if agent {
+                        ProcessCategory::Agent
+                    } else {
+                        ProcessCategory::Command
+                    },
+                });
+                if switched {
+                    self.poll_git()
+                } else {
+                    Task::none()
                 }
-                Task::none()
             }
             Event::OpenEditProcess => {
                 if let Some(project) = self.active_project() {
@@ -2727,7 +3174,8 @@ impl App {
         let base: Element<'_, Event> = column![body, hline(), self.view_status_bar()].into();
 
         // Overlay order: palette, then a context menu, then a pending
-        // confirmation on the very top.
+        // confirmation, then a notice on the very top — a notice reports
+        // something that already happened, so it outranks a question.
         let mut layers = vec![base];
         if self.palette_open {
             layers.push(self.view_palette());
@@ -2737,6 +3185,9 @@ impl App {
         }
         if self.confirm.is_some() {
             layers.push(self.view_confirm());
+        }
+        if let Some((heading, body)) = &self.notice {
+            layers.push(self.view_notice(heading, body));
         }
         if layers.len() == 1 {
             layers.pop().expect("base layer")
@@ -2769,6 +3220,25 @@ impl App {
                     items.push(Some((
                         "New Terminal",
                         Event::AddTerminal(project.id),
+                        false,
+                    )));
+                    // GTK keeps these two in the command palette; here the
+                    // pane toolbar was their only home, so they join the
+                    // other creator on the project's own menu.
+                    items.push(Some((
+                        "New Command",
+                        Event::OpenAddCommand {
+                            project: project.id,
+                            agent: false,
+                        },
+                        false,
+                    )));
+                    items.push(Some((
+                        "New Agent",
+                        Event::OpenAddCommand {
+                            project: project.id,
+                            agent: true,
+                        },
                         false,
                     )));
                     items.push(Some((
@@ -2998,6 +3468,51 @@ impl App {
             .center_y(Length::Fill);
 
         iced::widget::stack![backdrop, placed].into()
+    }
+
+    /// Report-only card: what GTK opens an AlertDialog for when something
+    /// failed and there is nothing to decide. Same furniture as the
+    /// confirmation, one button.
+    fn view_notice<'a>(&'a self, heading: &'a str, body: &'a str) -> Element<'a, Event> {
+        let card = container(
+            column![
+                text(heading).size(15).font(bold()).color(TEXT),
+                text(body).size(12).color(TEXT_SECONDARY),
+                container(
+                    button(text("OK").size(12))
+                        .padding([6, 16])
+                        .style(theme::pill_button(LOCAL_ACCENT))
+                        .on_press(Event::NoticeDismiss),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(380)
+        .style(theme::form_card);
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::NoticeDismiss);
+
+        iced::widget::stack![
+            backdrop,
+            container(card)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .into()
     }
 
     /// The command palette: a dimmed backdrop with a centered card —
@@ -3482,16 +3997,36 @@ impl App {
 
         let hovered = self.hovered_row == Some((project.id, Some(index)));
 
+        // GTK hangs the command off the whole row (`set_tooltip_text` in
+        // sidebar/process_row.rs); here it rides the NAME instead, because
+        // iced opens a parent's card *and* a child's at once where GTK
+        // lets the innermost win — over the row it would collide with the
+        // ↗ and the lifecycle glyphs, whose tooltips sit at the same edge.
+        // The name is the row's Fill element, so that is everything but
+        // the dot and the trailing pills anyway.
+        let label = match entry.config.command.trim() {
+            // A plain terminal carries no command (it spawns a login
+            // shell); an empty card is worse than no card.
+            "" => clipped_label(text(name).size(12.5)),
+            command => tip_after(
+                clipped_label(text(name).size(12.5)),
+                command.to_string(),
+                iced::widget::tooltip::Position::Bottom,
+                // Instant is right for a glyph you had to aim at; this
+                // one covers most of the row, so without the delay it
+                // fires on every row the pointer crosses on its way
+                // somewhere else. GTK's own tooltip timeout, near enough.
+                Duration::from_millis(500),
+            ),
+        };
+
         // Fixed content height: hover swaps elements in and out (hint ↔
         // glyph cluster), and the row must measure the same with any of
         // them or the rows below shift while the pointer moves.
-        let mut content = row![
-            status_dot(dot_color, working),
-            clipped_label(text(name).size(12.5)),
-        ]
-        .spacing(8)
-        .height(17)
-        .align_y(iced::Alignment::Center);
+        let mut content = row![status_dot(dot_color, working), label]
+            .spacing(8)
+            .height(17)
+            .align_y(iced::Alignment::Center);
 
         // Ctrl+1..9 keycaps, revealed only while Ctrl is actually down.
         //
@@ -3675,6 +4210,9 @@ impl App {
         if let Some(state) = &self.settings_ui {
             return settings_ui::view(state, &self.settings).map(Event::SettingsMsg);
         }
+        if let Some(state) = &self.git_ui {
+            return git_view::view(state).map(Event::GitMsg);
+        }
         if let Some(form) = &self.add_command {
             return self.view_add_command(form);
         }
@@ -3743,11 +4281,17 @@ impl App {
                         button(text("+ command").size(12))
                             .padding([6, 14])
                             .style(theme::primary(accent))
-                            .on_press(Event::OpenAddCommand { agent: false }),
+                            .on_press(Event::OpenAddCommand {
+                                project: project.id,
+                                agent: false,
+                            }),
                         button(text("+ agent").size(12))
                             .padding([6, 14])
                             .style(theme::primary(accent))
-                            .on_press(Event::OpenAddCommand { agent: true }),
+                            .on_press(Event::OpenAddCommand {
+                                project: project.id,
+                                agent: true,
+                            }),
                     ]
                     .spacing(8),
                 ]
@@ -3760,112 +4304,6 @@ impl App {
             .into();
         };
 
-        let (status_color, status_word) = match &entry.status {
-            Status::Running => (accent, String::from("\u{25cf} running")),
-            Status::Stopped => (STOPPED, String::from("\u{25cf} stopped")),
-            Status::Crashed(Some(code)) => {
-                (CRASHED, format!("\u{25cf} crashed \u{00b7} exit {code}"))
-            }
-            Status::Crashed(None) => (CRASHED, String::from("\u{25cf} crashed")),
-            Status::Restarting(n) => (
-                RESTARTING,
-                format!(
-                    "\u{25cf} restarting {n}/{}",
-                    processes::MAX_RESTART_ATTEMPTS
-                ),
-            ),
-            Status::Reconnecting(n) => (RESTARTING, format!("\u{25cf} reconnecting \u{00b7} {n}")),
-        };
-        let title: String = entry
-            .title
-            .as_deref()
-            .unwrap_or_default()
-            .chars()
-            .take(70)
-            .collect();
-        let mut controls = row![
-            text(&entry.config.name).size(13.5).font(bold()).color(TEXT),
-            container(text(status_word).size(10.5))
-                .padding([3, 10])
-                .style(theme::status_pill(status_color)),
-            clipped_label(text(title).size(11).color(DIM)),
-        ]
-        .spacing(10)
-        .align_y(iced::Alignment::Center);
-
-        if display_badge(project, &entry.config.name).is_some() {
-            controls = controls.push(
-                button(text("\u{2197} open").size(11.5))
-                    .padding([4, 12])
-                    .style(theme::pill_button(accent))
-                    .on_press(Event::OpenBadge),
-            );
-        }
-        controls = controls
-            .push(
-                button(text("\u{270e} edit").size(11.5))
-                    .padding([4, 12])
-                    .style(theme::pill_button(accent))
-                    .on_press(Event::OpenEditProcess),
-            )
-            .push(
-                button(text("+ command").size(11.5))
-                    .padding([4, 12])
-                    .style(theme::pill_button(accent))
-                    .on_press(Event::OpenAddCommand { agent: false }),
-            )
-            .push(
-                button(text("+ agent").size(11.5))
-                    .padding([4, 12])
-                    .style(theme::pill_button(accent))
-                    .on_press(Event::OpenAddCommand { agent: true }),
-            );
-        match entry.status {
-            Status::Running => {
-                controls = controls
-                    .push(
-                        button(text("\u{27f3} restart").size(11.5))
-                            .padding([4, 12])
-                            .style(theme::pill_button(accent))
-                            .on_press(Event::Restart {
-                                project: project.id,
-                                index: project.selected,
-                            }),
-                    )
-                    .push(
-                        button(text("\u{25a0} stop").size(11.5))
-                            .padding([4, 12])
-                            .style(theme::pill_intent(accent, CRASHED))
-                            .on_press(Event::Stop {
-                                project: project.id,
-                                index: project.selected,
-                            }),
-                    );
-            }
-            Status::Restarting(_) | Status::Reconnecting(_) => {
-                controls = controls.push(
-                    button(text("\u{25a0} cancel").size(11.5))
-                        .padding([4, 12])
-                        .style(theme::pill_intent(accent, CRASHED))
-                        .on_press(Event::Stop {
-                            project: project.id,
-                            index: project.selected,
-                        }),
-                );
-            }
-            Status::Stopped | Status::Crashed(_) => {
-                controls = controls.push(
-                    button(text("\u{25b6} start").size(11.5))
-                        .padding([4, 12])
-                        .style(theme::primary(accent))
-                        .on_press(Event::Start {
-                            project: project.id,
-                            index: project.selected,
-                        }),
-                );
-            }
-        }
-
         let body: Element<'_, Event> = match &entry.terminal {
             Some(term) => container(TerminalView::show(term).map(Event::Terminal))
                 .padding(iced::Padding {
@@ -3877,8 +4315,8 @@ impl App {
                 .style(theme::terminal_pane)
                 .into(),
             // Only before a process's FIRST run: from then on its terminal
-            // stays for good, showing what the last run printed, and the
-            // toolbar pill carries the status the pane used to spell out.
+            // stays for good, showing what the last run printed — and its
+            // exit banner, which is where the status is spelled out.
             None => {
                 let label = match entry.status {
                     Status::Crashed(_) => {
@@ -3894,13 +4332,11 @@ impl App {
             }
         };
 
-        let mut col = column![
-            container(controls)
-                .padding([7, 12])
-                .width(Length::Fill)
-                .style(theme::chrome),
-            hline(),
-        ];
+        // No strip above the terminal: the process name, its OSC title and
+        // its status live in the window title bar and the sidebar row, and
+        // the actions that were pills here are on the row's hover cluster
+        // and its context menu.
+        let mut col = column![];
 
         if self.search_open {
             let hint: Element<'_, Event> = match self.search_hit {
@@ -4072,46 +4508,80 @@ impl App {
         form_card(col)
     }
 
+    /// The bottom bar, GTK's `status_bar.rs` laid out in the same order:
+    /// remote hint + per-project counter + across-projects total on the
+    /// left, the git chips and the action buttons on the right.
     fn view_status_bar(&'_ self) -> Element<'_, Event> {
-        let (left, badge, accent) = match self.active_project() {
-            Some(project) => {
-                let left = format!(
-                    "{} \u{2014} {}/{} running",
-                    project.name,
-                    project.running(),
-                    project.entries.len()
-                );
-                let badge = project
-                    .entries
-                    .get(project.selected)
-                    .and_then(|e| display_badge(project, &e.config.name))
-                    .unwrap_or_default();
-                (left, badge, accent_for(project.location.is_remote()))
-            }
-            None => (String::from("no projects"), String::new(), LOCAL_ACCENT),
-        };
+        let project = self.active_project();
+        let accent = project.map_or(LOCAL_ACCENT, |p| accent_for(p.location.is_remote()));
 
-        let mut bar = row![text(left).size(11).color(TEXT_SECONDARY)]
-            .spacing(8)
-            .align_y(iced::Alignment::Center);
-        if let Some(git) = self.active_project().and_then(|p| p.git.as_ref()) {
-            let mut label = format!("\u{2387} {}", git.branch);
-            if git.ahead > 0 {
-                label.push_str(&format!(" \u{2191}{}", git.ahead));
-            }
-            if git.behind > 0 {
-                label.push_str(&format!(" \u{2193}{}", git.behind));
-            }
-            if git.changed > 0 {
-                label.push_str(&format!(" \u{00b1}{}", git.changed));
-            }
-            bar = bar.push(
-                container(text(label).size(10.5))
-                    .padding([2, 9])
-                    .style(theme::pill),
-            );
+        let mut bar = row![].spacing(8).align_y(iced::Alignment::Center);
+
+        // ── Left: where and how much is running ─────────────────────────
+        if let Some(hint) = project.and_then(|p| remote_hint(&p.location)) {
+            bar = bar.push(tip(
+                symbolic(ICON_REMOTE, 13.0, DIM).into(),
+                hint,
+                iced::widget::tooltip::Position::Top,
+            ));
         }
+        if let Some(p) = project {
+            let label = if p.entries.is_empty() {
+                p.name.clone()
+            } else {
+                format!("{} {}/{}", p.name, p.running(), p.entries.len())
+            };
+            bar = bar.push(text(label).size(11).color(TEXT_SECONDARY));
+        }
+
+        // Across every open project — the counter that says something is
+        // still running in a project you aren't looking at.
+        let total: usize = self.projects.iter().map(|p| p.entries.len()).sum();
+        if total > 0 {
+            let running: usize = self.projects.iter().map(|p| p.running()).sum();
+            if project.is_some() {
+                bar = bar.push(text("\u{00b7}").size(11).color(DIM));
+            }
+            let counter = text(format!("Total {running}/{total}")).size(11).color(DIM);
+            bar = match self.running_summary() {
+                Some(summary) => bar.push(tip(
+                    counter.into(),
+                    summary,
+                    iced::widget::tooltip::Position::Top,
+                )),
+                None => bar.push(counter),
+            };
+        }
+
         bar = bar.push(iced::widget::space::horizontal());
+
+        // ── Right: git chips, then the actions ──────────────────────────
+        if let Some(chip) = self.view_git_sync_chip() {
+            bar = bar.push(chip);
+        }
+        if let Some(chip) = self.view_git_changes_chip() {
+            bar = bar.push(chip);
+        }
+
+        bar = bar.push(tip(
+            button(symbolic(ICON_FOCUS, 13.0, TEXT_SECONDARY))
+                .padding([3, 7])
+                .style(theme::toolbar_icon(!self.sidebar_visible))
+                .on_press(Event::ToggleSidebar)
+                .into(),
+            String::from("Focus"),
+            iced::widget::tooltip::Position::Top,
+        ));
+
+        // The badge keeps its URL text — it is the one chip whose VALUE
+        // matters, not just its action.
+        let badge = project
+            .and_then(|p| {
+                p.entries
+                    .get(p.selected)
+                    .and_then(|e| display_badge(p, &e.config.name))
+            })
+            .unwrap_or_default();
         if !badge.is_empty() {
             bar = bar.push(
                 button(
@@ -4129,11 +4599,176 @@ impl App {
             );
         }
 
+        // Clear / Stop / Restart act on the SELECTED process, so they are
+        // dead without one. Stop is hidden rather than disabled when it
+        // isn't running — you can't stop what isn't going (GTK parity).
+        let selected = project.and_then(|p| {
+            p.entries
+                .get(p.selected)
+                .map(|e| (p.id, p.selected, e.is_running()))
+        });
+        if let Some((id, index, running)) = selected {
+            bar = bar.push(tip(
+                button(symbolic(ICON_CLEAR, 13.0, TEXT_SECONDARY))
+                    .padding([3, 7])
+                    .style(theme::toolbar_icon(false))
+                    .on_press(Event::ClearTerminal)
+                    .into(),
+                String::from("Clear"),
+                iced::widget::tooltip::Position::Top,
+            ));
+            if running {
+                bar = bar.push(tip(
+                    button(symbolic(ICON_STOP, 13.0, CRASHED))
+                        .padding([3, 7])
+                        .style(theme::toolbar_icon(false))
+                        .on_press(Event::Stop { project: id, index })
+                        .into(),
+                    String::from("Stop"),
+                    iced::widget::tooltip::Position::Top,
+                ));
+            }
+            bar = bar.push(tip(
+                button(symbolic(ICON_RESTART, 13.0, TEXT_SECONDARY))
+                    .padding([3, 7])
+                    .style(theme::toolbar_icon(false))
+                    .on_press(Event::Restart { project: id, index })
+                    .into(),
+                String::from("Restart"),
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
+
         container(bar)
             .padding([5, 12])
             .width(Length::Fill)
             .style(theme::chrome)
             .into()
+    }
+
+    /// "project: proc, proc" per project, for the total counter's tooltip.
+    /// None when nothing is running — an empty tooltip is worse than none.
+    fn running_summary(&self) -> Option<String> {
+        let lines: Vec<String> = self
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let names: Vec<&str> = p
+                    .entries
+                    .iter()
+                    .filter(|e| e.is_running())
+                    .map(|e| e.config.name.as_str())
+                    .collect();
+                (!names.is_empty()).then(|| format!("{}: {}", p.name, names.join(", ")))
+            })
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+
+    /// Branch + ↓ to pull / ↑ to push; one click syncs both ways. Needs a
+    /// branch as well as a repo — a detached HEAD has nothing to pull to
+    /// or push from, so the whole chip goes away.
+    fn view_git_sync_chip(&'_ self) -> Option<Element<'_, Event>> {
+        let git = self.active_project()?.git.as_ref()?;
+        if git.branch.is_empty() || git.branch == "(detached)" {
+            return None;
+        }
+
+        let mut content = row![text(format!("\u{2387} {}", git.branch)).size(10.5)]
+            .spacing(5)
+            .align_y(iced::Alignment::Center);
+        // While a sync runs the counters stand down: the pre-sync numbers
+        // sitting next to "syncing…" read as "the sync did nothing".
+        if self.git_syncing {
+            content = content.push(text("syncing\u{2026}").size(10.5).color(DIM));
+        } else {
+            if git.behind > 0 {
+                content = content.push(
+                    text(format!("\u{2193}{}", git.behind))
+                        .size(10.5)
+                        .color(GIT_BEHIND),
+                );
+            }
+            if git.ahead > 0 {
+                content = content.push(
+                    text(format!("\u{2191}{}", git.ahead))
+                        .size(10.5)
+                        .color(GIT_ADDED),
+                );
+            }
+        }
+
+        let hint = match (git.ahead, git.behind) {
+            _ if self.git_syncing => String::from("Syncing\u{2026}"),
+            (0, 0) => String::from("Pull & Push (in sync \u{2014} click to fetch)"),
+            (a, 0) => format!("Pull & Push ({a} to push)"),
+            (0, b) => format!("Pull & Push ({b} to pull)"),
+            (a, b) => format!("Pull & Push ({a} to push, {b} to pull)"),
+        };
+
+        let mut chip = button(content)
+            .padding([3, 9])
+            .style(theme::pill_button(TEXT_SECONDARY));
+        if !self.git_syncing {
+            chip = chip.on_press(Event::GitSync);
+        }
+        Some(tip(chip.into(), hint, iced::widget::tooltip::Position::Top))
+    }
+
+    /// Working-tree `+N −M`; click opens the Git Changes view. Shown for
+    /// any repo, counters and all, even clean — the way in has to be there
+    /// before there is anything to see.
+    fn view_git_changes_chip(&'_ self) -> Option<Element<'_, Event>> {
+        let project = self.active_project()?;
+        project.git.as_ref()?;
+        let stat = project.diffstat;
+
+        let mut content = row![symbolic(ICON_CHANGES, 12.0, TEXT_SECONDARY)]
+            .spacing(5)
+            .align_y(iced::Alignment::Center);
+        if stat.added > 0 {
+            content = content.push(
+                text(format!("+{}", git_view::compact_count(stat.added)))
+                    .size(10.5)
+                    .color(GIT_ADDED),
+            );
+        }
+        if stat.removed > 0 {
+            content = content.push(
+                text(format!("\u{2212}{}", git_view::compact_count(stat.removed)))
+                    .size(10.5)
+                    .color(GIT_REMOVED),
+            );
+        }
+
+        // Exact numbers live in the tooltip; the chip carries the compact
+        // ones. Untracked files can't show in the line counts — git diff
+        // doesn't see them — so they are named here instead.
+        let mut parts = Vec::new();
+        if stat.files > 0 {
+            parts.push(format!(
+                "{} files: +{} \u{2212}{}",
+                stat.files, stat.added, stat.removed
+            ));
+        }
+        if stat.untracked > 0 {
+            parts.push(format!("{} untracked", stat.untracked));
+        }
+        let hint = if parts.is_empty() {
+            String::from("Git Changes")
+        } else {
+            format!("Git Changes ({})", parts.join(", "))
+        };
+
+        Some(tip(
+            button(content)
+                .padding([3, 9])
+                .style(theme::pill_button(TEXT_SECONDARY))
+                .on_press(Event::OpenGitChanges)
+                .into(),
+            hint,
+            iced::widget::tooltip::Position::Top,
+        ))
     }
 
     /// Arm (or re-arm) the debounced geometry save: one write ~1 s after
@@ -4600,24 +5235,21 @@ fn display_badge(project: &ProjectState, name: &str) -> Option<String> {
 fn row_action(
     icon: &'static [u8],
     tint: iced::Color,
-    tip: String,
+    label: String,
     event: Event,
 ) -> Element<'static, Event> {
-    iced::widget::tooltip(
+    tip(
         // 12px icon + 2px vertical padding = 16px, safely under the
         // row's text line — a taller button would grow the row on hover
         // and shove everything below it down a few pixels.
         button(symbolic(icon, 12.0, tint))
             .padding([2, 4])
             .style(theme::toolbar_icon(false))
-            .on_press(event),
-        text(tip).size(11),
+            .on_press(event)
+            .into(),
+        label,
         iced::widget::tooltip::Position::Bottom,
     )
-    .gap(4)
-    .padding(7)
-    .style(theme::tooltip)
-    .into()
 }
 
 fn open_badge(project: &ProjectState, entry: &ProcessEntry) {
@@ -4716,6 +5348,10 @@ const ICON_ADD: &[u8] = include_bytes!("../assets/icons/list-add-symbolic.svg");
 const ICON_PLAY: &[u8] = include_bytes!("../assets/icons/media-playback-start-symbolic.svg");
 const ICON_STOP: &[u8] = include_bytes!("../assets/icons/media-playback-stop-symbolic.svg");
 const ICON_RESTART: &[u8] = include_bytes!("../assets/icons/view-refresh-symbolic.svg");
+const ICON_CHANGES: &[u8] = include_bytes!("../assets/icons/send-to-symbolic.svg");
+const ICON_FOCUS: &[u8] = include_bytes!("../assets/icons/focus-windows-symbolic.svg");
+const ICON_CLEAR: &[u8] = include_bytes!("../assets/icons/edit-clear-symbolic.svg");
+const ICON_REMOTE: &[u8] = include_bytes!("../assets/icons/tuxflow-remote-symbolic.svg");
 
 /// A symbolic icon: the baked-in fill is overridden by the tint, which
 /// is what makes these behave like GTK's -symbolic icons.
@@ -4724,6 +5360,42 @@ fn symbolic(bytes: &'static [u8], px: f32, tint: iced::Color) -> iced::widget::s
         .width(px)
         .height(px)
         .style(move |_, _| iced::widget::svg::Style { color: Some(tint) })
+}
+
+/// Hang a tooltip on anything. GTK's icon-only chips are unreadable
+/// without one, so every glyph-only control in the app goes through here.
+fn tip<'a>(
+    content: Element<'a, Event>,
+    label: String,
+    position: iced::widget::tooltip::Position,
+) -> Element<'a, Event> {
+    tip_after(content, label, position, Duration::ZERO)
+}
+
+/// `tip` that waits before opening — for hints hung on something the
+/// pointer crosses on its way elsewhere (a whole sidebar row), rather
+/// than on a control it was aimed at.
+fn tip_after<'a>(
+    content: Element<'a, Event>,
+    label: String,
+    position: iced::widget::tooltip::Position,
+    delay: Duration,
+) -> Element<'a, Event> {
+    iced::widget::tooltip(content, text(label).size(11), position)
+        .gap(4)
+        .padding(7)
+        .delay(delay)
+        .style(theme::tooltip)
+        .into()
+}
+
+/// `host:dir` for a remote project — what the status bar's remote glyph
+/// says on hover. None for a local one: the icon isn't shown at all.
+fn remote_hint(location: &ProjectLocation) -> Option<String> {
+    match location {
+        ProjectLocation::Local(_) => None,
+        ProjectLocation::Ssh { host, dir } => Some(format!("{host}:{dir}")),
+    }
 }
 
 #[cfg(test)]

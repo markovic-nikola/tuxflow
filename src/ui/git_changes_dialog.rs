@@ -1,9 +1,10 @@
+//! The Git Changes dialog: file list, per-file diff, commit box and
+//! push/pull. Every git call it makes now lives in
+//! `tuxflow_core::remote::git` — both shells run on that plumbing, so
+//! only the widgets are left here.
+
 use std::cell::Cell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::path::Path;
 use std::rc::Rc;
-use std::sync::LazyLock;
 
 use tokio::sync::oneshot;
 
@@ -11,236 +12,27 @@ use adw::prelude::*;
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use syntect::highlighting::ThemeSet;
-use syntect::parsing::SyntaxSet;
 
-use crate::remote::{ProjectLocation, sh_quote, ssh_mux_options};
+use crate::remote::ProjectLocation;
+use tuxflow_core::remote::git::{
+    ChangedFile, DiffResult, FileStatus, changed_files, commit_all, load_diff, pull, push,
+    status_hash,
+};
 
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_nonewlines);
-static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+// window.rs imports its git helpers from here; re-exporting keeps those
+// call sites unchanged now that the implementations live in core.
+pub use tuxflow_core::remote::git::{
+    commits_ahead, commits_behind, current_branch, diff_shortstat, fetch as git_fetch,
+    has_git_repo, sync_with_remote, untracked_count,
+};
 
-#[derive(Clone)]
-enum FileStatus {
-    Modified,
-    Added,
-    Deleted,
-    Renamed,
-    Untracked,
-}
-
-#[derive(Clone)]
-struct ChangedFile {
-    path: String,
-    status: FileStatus,
-    staged: bool,
-}
-
-struct DiffResult {
-    text: String,
-    /// (line_index, byte_offset_in_line, length, hex_color)
-    highlights: Vec<(usize, usize, usize, String)>,
-}
-
-impl FileStatus {
-    fn label(&self) -> &str {
-        match self {
-            Self::Modified => "M",
-            Self::Added => "A",
-            Self::Deleted => "D",
-            Self::Renamed => "R",
-            Self::Untracked => "U",
-        }
-    }
-
-    fn css_class(&self) -> &str {
-        match self {
-            Self::Modified => "git-status-modified",
-            Self::Added => "git-status-added",
-            Self::Deleted => "git-status-deleted",
-            Self::Renamed => "git-status-modified",
-            Self::Untracked => "git-status-untracked",
-        }
-    }
-}
-
-fn parse_status_line(line: &str) -> Option<ChangedFile> {
-    if line.len() < 4 {
-        return None;
-    }
-    let bytes = line.as_bytes();
-    let index = bytes[0];
-    let worktree = bytes[1];
-    let path = line[3..].to_string();
-
-    let (status, staged) = match (index, worktree) {
-        (b'?', b'?') => (FileStatus::Untracked, false),
-        (b'A', _) => (FileStatus::Added, true),
-        (b'D', _) => (FileStatus::Deleted, true),
-        (b'R', _) => (FileStatus::Renamed, true),
-        (b'M', _) => (FileStatus::Modified, true),
-        (_, b'M') => (FileStatus::Modified, false),
-        (_, b'D') => (FileStatus::Deleted, false),
-        _ => return None,
-    };
-
-    Some(ChangedFile {
-        path,
-        status,
-        staged,
-    })
-}
-
-/// Build a git invocation for the machine that owns the project files:
-/// plain `git` in the project dir locally, or `ssh host 'cd dir && git …'`
-/// over the shared ControlMaster connection for remote projects. Every
-/// caller runs the command on a worker thread, so remote latency is fine.
-fn git_command(location: &ProjectLocation, args: &[&str]) -> std::process::Command {
-    match location {
-        ProjectLocation::Local(dir) => {
-            let mut cmd = std::process::Command::new("git");
-            cmd.args(args).current_dir(dir);
-            cmd
-        }
-        ProjectLocation::Ssh { host, dir } => {
-            let mut cmd = std::process::Command::new("ssh");
-            cmd.args(ssh_mux_options());
-            cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]);
-            cmd.arg(host);
-            let git_args = args
-                .iter()
-                .map(|a| sh_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            cmd.arg(format!("cd {} && git {}", sh_quote(dir), git_args));
-            cmd
-        }
-    }
-}
-
-fn load_changed_files(location: &ProjectLocation) -> Vec<ChangedFile> {
-    let output = git_command(location, &["status", "--porcelain=v1"]).output();
-
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().filter_map(parse_status_line).collect()
-}
-
-fn git_status_hash(location: &ProjectLocation) -> u64 {
-    let output = git_command(location, &["status", "--porcelain=v1"]).output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let mut hasher = DefaultHasher::new();
-            o.stdout.hash(&mut hasher);
-            hasher.finish()
-        }
-        _ => 0,
-    }
-}
-
-pub fn commits_ahead(location: &ProjectLocation) -> usize {
-    let output = git_command(location, &["rev-list", "--count", "@{u}..HEAD"]).output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0),
-        _ => 0,
-    }
-}
-
-pub fn commits_behind(location: &ProjectLocation) -> usize {
-    let output = git_command(location, &["rev-list", "--count", "HEAD..@{u}"]).output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0),
-        _ => 0,
-    }
-}
-
-pub fn dirty_file_count(location: &ProjectLocation) -> usize {
-    let output = git_command(location, &["status", "--porcelain=v1"]).output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count(),
-        _ => 0,
-    }
-}
-
-/// Working-tree line stats vs HEAD: (files_changed, added, removed).
-/// Includes staged changes; untracked files are NOT counted (git diff
-/// doesn't see them) — track those separately via `untracked_count`.
-pub fn diff_shortstat(location: &ProjectLocation) -> (usize, usize, usize) {
-    let output = git_command(location, &["diff", "HEAD", "--shortstat"]).output();
-    let text = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return (0, 0, 0),
-    };
-    // " 3 files changed, 120 insertions(+), 45 deletions(-)"
-    let mut files = 0;
-    let mut added = 0;
-    let mut removed = 0;
-    for part in text.split(',') {
-        let num: usize = part
-            .trim()
-            .split(' ')
-            .next()
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0);
-        if part.contains("file") {
-            files = num;
-        } else if part.contains("insertion") {
-            added = num;
-        } else if part.contains("deletion") {
-            removed = num;
-        }
-    }
-    (files, added, removed)
-}
-
-pub fn untracked_count(location: &ProjectLocation) -> usize {
-    let output = git_command(location, &["status", "--porcelain=v1"]).output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .filter(|l| l.starts_with("??"))
-            .count(),
-        _ => 0,
-    }
-}
-
-/// One-click sync: fetch, fast-forward pull if behind, push if ahead.
-/// `--ff-only` keeps it safe — diverged histories error out instead of
-/// merging, and the caller should point the user at the Git Changes
-/// dialog. Blocking (several network round trips) — call on a worker.
-pub fn sync_with_remote(location: &ProjectLocation) -> Result<(), String> {
-    run_git_command(location, &["fetch"])?;
-    if commits_behind(location) > 0 {
-        run_git_command(location, &["pull", "--ff-only"])?;
-    }
-    // commits_ahead needs an upstream to compare against, so a plain
-    // `git push` is always enough when it's > 0.
-    if commits_ahead(location) > 0 {
-        run_git_command(location, &["push"])?;
-    }
-    Ok(())
-}
-
-/// Whether the project root contains a `.git`. Local is a cheap stat;
-/// remote is an ssh round trip — call off the main thread for remote.
-pub fn has_git_repo(location: &ProjectLocation) -> bool {
-    match location {
-        ProjectLocation::Local(dir) => dir.join(".git").exists(),
-        ProjectLocation::Ssh { host, dir } => {
-            crate::remote::fs::remote_dir_exists(host, &format!("{}/.git", dir)).unwrap_or(false)
-        }
+/// GTK-only half of `FileStatus`: which stylesheet class paints the badge.
+fn status_css_class(status: FileStatus) -> &'static str {
+    match status {
+        FileStatus::Modified | FileStatus::Renamed => "git-status-modified",
+        FileStatus::Added => "git-status-added",
+        FileStatus::Deleted => "git-status-deleted",
+        FileStatus::Untracked => "git-status-untracked",
     }
 }
 
@@ -264,30 +56,6 @@ fn update_pull_button(btn: &gtk4::Button, behind: usize) {
     }
 }
 
-pub fn git_fetch(location: &ProjectLocation) {
-    let _ = git_command(location, &["fetch"]).output();
-}
-
-fn run_git_command(location: &ProjectLocation, args: &[&str]) -> Result<String, String> {
-    let output = git_command(location, args)
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
-}
-
-pub fn current_branch(location: &ProjectLocation) -> Option<String> {
-    let name = run_git_command(location, &["branch", "--show-current"])
-        .ok()?
-        .trim()
-        .to_string();
-    if name.is_empty() { None } else { Some(name) }
-}
-
 fn show_error_dialog(parent: &impl IsA<gtk4::Widget>, heading: &str, message: &str) {
     let dialog = adw::AlertDialog::builder()
         .heading(heading)
@@ -298,114 +66,6 @@ fn show_error_dialog(parent: &impl IsA<gtk4::Widget>, heading: &str, message: &s
     dialog.present(Some(parent));
 }
 
-fn load_diff_for_file(location: &ProjectLocation, file: &ChangedFile) -> DiffResult {
-    let output = if matches!(file.status, FileStatus::Untracked) {
-        git_command(
-            location,
-            &["diff", "--no-index", "--", "/dev/null", &file.path],
-        )
-        .output()
-    } else if file.staged {
-        git_command(location, &["diff", "--cached", "--", &file.path]).output()
-    } else {
-        git_command(location, &["diff", "--", &file.path]).output()
-    };
-
-    // Cap diff text before highlighting. Minified files produce one giant
-    // line that blows past the 5000-line guard, then locks the main thread
-    // inside apply_styling's per-token iter_at_offset walks. The byte cap
-    // is the real guard; the line cap handles ordinary huge diffs.
-    const MAX_DIFF_BYTES: usize = 256 * 1024;
-    const MAX_DIFF_LINES: usize = 5000;
-
-    let text = match output {
-        Ok(o) => {
-            let raw = String::from_utf8_lossy(&o.stdout);
-            // Strip diff header lines and hunk headers (@@)
-            let mut text: String = raw
-                .lines()
-                .skip_while(|l| !l.starts_with("@@"))
-                .filter(|l| !l.starts_with("@@"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if text.len() > MAX_DIFF_BYTES {
-                let mut cut = MAX_DIFF_BYTES;
-                while cut > 0 && !text.is_char_boundary(cut) {
-                    cut -= 1;
-                }
-                text.truncate(cut);
-                text.push_str("\n\n... (truncated — diff exceeds 256 KB)");
-                text
-            } else {
-                let lines: Vec<&str> = text.lines().collect();
-                if lines.len() > MAX_DIFF_LINES {
-                    let mut truncated: String = lines[..MAX_DIFF_LINES].join("\n");
-                    truncated.push_str("\n\n... (truncated — diff exceeds 5000 lines)");
-                    truncated
-                } else {
-                    text
-                }
-            }
-        }
-        Err(_) => String::from("Failed to load diff"),
-    };
-
-    let highlights = highlight_diff(&text, &file.path);
-    DiffResult { text, highlights }
-}
-
-fn highlight_diff(text: &str, file_path: &str) -> Vec<(usize, usize, usize, String)> {
-    use syntect::easy::HighlightLines;
-
-    // Minified files (bundled JS/CSS) have one logical line that's tens or
-    // hundreds of KB long. syntect emits thousands of style spans for such a
-    // line, and the downstream tag application on the main thread chokes on
-    // applying them. Skip highlighting entirely — `+`/`-` background bands
-    // from apply_styling still convey the diff.
-    const MAX_HIGHLIGHTABLE_LINE: usize = 2000;
-    if text.lines().any(|l| l.len() > MAX_HIGHLIGHTABLE_LINE) {
-        return Vec::new();
-    }
-
-    let ss = &*SYNTAX_SET;
-    let ts = &*THEME_SET;
-    let theme = &ts.themes["base16-eighties.dark"];
-
-    let ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let syntax = ss
-        .find_syntax_by_extension(ext)
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-    let mut h = HighlightLines::new(syntax, theme);
-
-    let mut highlights = Vec::new();
-    for (line_idx, line) in text.lines().enumerate() {
-        let (prefix_len, code) = match line.as_bytes().first() {
-            Some(b'+') if !line.starts_with("+++") => (1, &line[1..]),
-            Some(b'-') if !line.starts_with("---") => (1, &line[1..]),
-            Some(b' ') => (1, &line[1..]),
-            _ => continue,
-        };
-
-        if let Ok(ranges) = h.highlight_line(code, ss) {
-            let mut byte_offset = prefix_len;
-            for (style, token) in ranges {
-                if !token.is_empty() {
-                    let color = format!(
-                        "#{:02x}{:02x}{:02x}",
-                        style.foreground.r, style.foreground.g, style.foreground.b
-                    );
-                    highlights.push((line_idx, byte_offset, token.len(), color));
-                }
-                byte_offset += token.len();
-            }
-        }
-    }
-    highlights
-}
-
 fn build_file_row(file: &ChangedFile) -> gtk4::Box {
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     row.add_css_class("git-file-row");
@@ -414,7 +74,7 @@ fn build_file_row(file: &ChangedFile) -> gtk4::Box {
 
     let badge = gtk4::Label::builder()
         .label(file.status.label())
-        .css_classes([file.status.css_class()])
+        .css_classes([status_css_class(file.status)])
         .build();
     row.append(&badge);
 
@@ -771,7 +431,7 @@ impl GitChangesDialog {
 
                     let (tx, rx) = oneshot::channel::<DiffResult>();
                     std::thread::spawn(move || {
-                        let result = load_diff_for_file(&dir, &file);
+                        let result = load_diff(&dir, &file);
                         let _ = tx.send(result);
                     });
 
@@ -842,15 +502,10 @@ impl GitChangesDialog {
             let cb = btn.clone();
             let (tx, rx) = oneshot::channel::<Result<usize, String>>();
             std::thread::spawn(move || {
-                if let Err(e) = run_git_command(&dir, &["add", "-A"]) {
-                    let _ = tx.send(Err(e));
-                    return;
-                }
-                if let Err(e) = run_git_command(&dir, &["commit", "-m", &msg]) {
-                    let _ = tx.send(Err(e));
-                    return;
-                }
-                let _ = tx.send(Ok(commits_ahead(&dir)));
+                let _ = tx.send(match commit_all(&dir, &msg) {
+                    Ok(()) => Ok(commits_ahead(&dir)),
+                    Err(e) => Err(e),
+                });
             });
             let on_changed = on_changed_commit.clone();
             glib::spawn_future_local(async move {
@@ -907,31 +562,10 @@ impl GitChangesDialog {
             let pb = push_btn_push.clone();
             let (tx, rx) = oneshot::channel::<Result<usize, String>>();
             std::thread::spawn(move || {
-                // Try normal push first; if no upstream, push with -u
-                let result = match run_git_command(&dir, &["push"]) {
-                    Ok(out) => Ok(out),
-                    Err(e) if e.contains("no upstream") || e.contains("set-upstream") => {
-                        // Get current branch name
-                        let branch = run_git_command(&dir, &["branch", "--show-current"])
-                            .unwrap_or_default()
-                            .trim()
-                            .to_string();
-                        if branch.is_empty() {
-                            Err(e)
-                        } else {
-                            run_git_command(&dir, &["push", "-u", "origin", &branch])
-                        }
-                    }
+                let _ = tx.send(match push(&dir) {
+                    Ok(()) => Ok(commits_ahead(&dir)),
                     Err(e) => Err(e),
-                };
-                match result {
-                    Ok(_) => {
-                        let _ = tx.send(Ok(commits_ahead(&dir)));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                    }
-                }
+                });
             });
             let pushing_done = pushing_click.clone();
             let on_changed = on_changed_push.clone();
@@ -977,30 +611,10 @@ impl GitChangesDialog {
             let fs = files_store_pull.clone();
             let (tx, rx) = oneshot::channel::<Result<(usize, usize), String>>();
             std::thread::spawn(move || {
-                let result = run_git_command(&dir, &["pull", "--ff-only"]).or_else(|e| {
-                    // Transient: initial pull occasionally fails with "no such ref
-                    // was fetched" or "Cannot fast-forward to multiple branches"
-                    // when the prior fetch left the upstream config in an
-                    // intermediate state. An explicit fetch + retry clears it up.
-                    if e.contains("no such ref was fetched")
-                        || e.contains("Cannot fast-forward to multiple branches")
-                    {
-                        run_git_command(&dir, &["fetch"])
-                            .and_then(|_| run_git_command(&dir, &["pull", "--ff-only"]))
-                    } else {
-                        Err(e)
-                    }
+                let _ = tx.send(match pull(&dir) {
+                    Ok(()) => Ok((commits_ahead(&dir), commits_behind(&dir))),
+                    Err(e) => Err(e),
                 });
-                match result {
-                    Ok(_) => {
-                        let ahead = commits_ahead(&dir);
-                        let behind = commits_behind(&dir);
-                        let _ = tx.send(Ok((ahead, behind)));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
-                    }
-                }
             });
             let pulling_done = pulling_click.clone();
             let dir_reload = dir_pull.clone();
@@ -1077,7 +691,7 @@ impl GitChangesDialog {
                 if fetch_tick % 15 == 0 {
                     git_fetch(&dir);
                 }
-                let hash = git_status_hash(&dir);
+                let hash = status_hash(&dir);
                 let ahead = commits_ahead(&dir);
                 let behind = commits_behind(&dir);
                 let branch = current_branch(&dir);
@@ -1147,7 +761,7 @@ impl GitChangesDialog {
         let (tx, rx) = oneshot::channel::<Vec<ChangedFile>>();
 
         std::thread::spawn(move || {
-            let files = load_changed_files(&location);
+            let files = changed_files(&location);
             let _ = tx.send(files);
         });
 

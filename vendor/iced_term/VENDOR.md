@@ -260,3 +260,19 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    Covered by live-PTY tests in `backend.rs`: a second run keeps the first
    one's output, a run that died inside the alt screen comes back to the
    primary one, and `shutdown` kills the child while the grid survives.
+
+17. **`clear()`: empty the grid without touching the child** (needed by the
+    migration's status-bar port — GTK's Clear button is `VteTerminal::reset`).
+    - `Backend::clear` / `Terminal::clear` wipe viewport, scrollback and
+      cursor position under the `FairMutex` the PTY loop already takes. Patch
+      16's `feed` could not serve here: it is documented as safe only BETWEEN
+      runs, and Clear's whole point is being pressed at a running process —
+      two parsers over one grid interleave mid-sequence.
+    - Order is load-bearing the other way round from `respawn`'s. On the
+      primary screen alacritty implements `ClearMode::All` as "scroll the
+      viewport up into the history" (the xterm behaviour that makes `clear`
+      preserve scrollback), so `ClearMode::Saved` has to come AFTER it. Doing
+      the history first leaves the screen you just cleared sitting in it.
+    - `clear_viewport` does not move the cursor, so `goto(0, 0)` follows, and
+      the display is scrolled back to the bottom: someone who hits Clear while
+      scrolled up is asking for the empty screen, not their old reading spot.

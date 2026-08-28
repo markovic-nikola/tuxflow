@@ -114,6 +114,14 @@ impl Terminal {
         spawned
     }
 
+    /// Empty the grid and its scrollback, leaving any running child alone
+    /// (`backend::Backend::clear`). Safe at any time, unlike `feed`.
+    pub fn clear(&mut self) {
+        self.backend.clear();
+        let _ = self.backend.sync();
+        self.redraw();
+    }
+
     /// Write the embedder's own bytes into the grid, between runs only
     /// (`backend::Backend::feed`).
     pub fn feed(&mut self, bytes: &[u8]) {

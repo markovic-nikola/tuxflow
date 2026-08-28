@@ -52,7 +52,8 @@ memory, rendering under your real workload.
   reconnect ("connection lost", endless retry, no crash).
 - **Ports**: badge on the sidebar row, auto-tunnel (remap on collision),
   Ctrl+click a printed URL opens through the rewritten forward, ↗ open
-  chip in the toolbar and status bar, one-shot auto-open if enabled.
+  glyph on the row and chip in the status bar, one-shot auto-open if
+  enabled.
 - **Clipboard**: drag-select publishes to PRIMARY, middle-click pastes,
   Ctrl+Shift+C fetches the newest tmux buffer (incl. agent OSC 52),
   image paste uploads and types the remote path.
@@ -61,7 +62,7 @@ memory, rendering under your real workload.
   60 s of stability resets), notifications per your settings flags.
 - **Output survives the run** (GTK's one-VTE-per-process): a command that
   finishes, crashes or is stopped leaves everything it printed on screen —
-  the status moves to the toolbar pill. A bad exit gets the same
+  the status is the sidebar dot and the exit banner. A bad exit gets the same
   `[tuxflow] …` line GTK feeds (exit 127 names the host and the command),
   and starting it again appends under a dim rule rather than on a blank
   pane, so a crash loop reads as a stack of runs. Worth pushing on: a TUI
@@ -84,9 +85,14 @@ memory, rendering under your real workload.
   step aside while the glyphs are in. A row with a detected URL grows a
   standing ↗ that opens it through the tunnel map — any row, not just
   the selected one.
+- **Bare terminal pane**: no strip above the terminal. The window title
+  bar names what you are looking at — `TuxFlow - {project}: {process}`,
+  where the process half is its OSC title while a program sets one (an
+  agent's current task) and its configured name otherwise.
 - **Right-click menus** (the GTK popovers): a project header offers
   Start / Stop / Restart All, New Terminal (the card's old "+ terminal"
-  pill lives here now), Open in Editor, Copy Path, and Remove
+  pill lives here now), New Command / New Agent (the pane toolbar's old
+  pills), Open in Editor, Copy Path, and Remove
   Project behind the confirmation card; a process row offers
   Start / Stop, Restart, Resume Session (agents), Open in Browser (when
   a URL is live), Edit / Copy Command, and Delete Command (also
@@ -102,14 +108,42 @@ memory, rendering under your real workload.
   here too). Rows whose consumer only exists in the GTK shell say so in
   their subtitle. Window geometry (size/position/maximized) persists —
   debounced, so even a cargo-watch kill keeps the last position.
+- **The bottom bar** (ported to GTK's layout): on the left, the remote
+  glyph for ssh projects (hover for `host:dir`), this project's
+  `running/total`, and `Total r/t` across every open project — hover that
+  one to see which processes are alive where. On the right, two git chips
+  and the action buttons.
+  - The **sync chip** shows `⎇ branch` with `↓N` amber (to pull) and
+    `↑N` green (to push). One click fetches, fast-forward pulls, then
+    pushes; the counters hide while it runs. A diverged history can't
+    fast-forward, so it fails on purpose — you should get a card with
+    git's own explanation, not a silent no-op.
+  - The **changes chip** shows `+N −M` against HEAD (hover for the exact
+    numbers and the untracked count, which line counts can't include).
+    Click it for the **Git Changes** view.
+  - **Focus** hides the sidebar (same as Ctrl+\). **Clear** empties the
+    selected terminal — scrollback included — WITHOUT touching the
+    process, so try it on something mid-output and confirm the program
+    keeps printing. **Stop** only appears while the selection is running;
+    **Restart** is always there.
+- **Git Changes** (the changes chip): file list with `M`/`A`/`D`/`R`/`U`
+  badges, syntax-highlighted diff per file, a commit box (Commit stages
+  everything, like GTK), and Push / Pull. It refreshes itself every 2 s
+  and re-fetches every ~30 s, so edits in your editor show up without a
+  click. Esc closes it — twice if the commit box has focus, since the
+  first Esc unfocuses the field. Worth poking at: an untracked file
+  (diffed against /dev/null, so it reads as all additions), a big diff
+  (capped at 5000 lines / 256 KB), and switching project while it's open
+  (it should close rather than show the wrong repo).
 
 ## Not there yet (deliberate, GTK still covers these)
 
 - Drag-and-drop reorder (use Alt+Shift+Up/Down).
-- Local-only trio: file watcher restarts, MCP socket, update chip.
+- Local-only trio: file watcher restarts, MCP socket, update chip — the
+  update chip is why the bottom bar still has no "Update available".
 - Voice bridge for remote agents.
-- Menu stragglers: Edit Project (dialog not ported), Clear Output /
-  Redraw Terminal (no backend command; redraw was a VTE workaround).
+- Menu stragglers: Edit Project (dialog not ported), Redraw Terminal (a
+  VTE workaround with nothing to port).
 
 ## Reporting
 

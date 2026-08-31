@@ -255,32 +255,17 @@ impl CommandPalette {
     }
 
     fn default_items() -> Vec<PaletteItem> {
-        vec![
-            // Matches sidebar order: AGENTS → COMMANDS → TERMINALS → SSH
-            PaletteItem {
+        // Matches sidebar order: AGENTS → COMMANDS → TERMINALS → SSH
+        let mut items: Vec<PaletteItem> = tuxflow_core::util::agents::AGENT_PRESETS
+            .iter()
+            .map(|preset| PaletteItem {
                 category: "AGENT".to_string(),
-                label: "New Claude agent".to_string(),
+                label: format!("New {} agent", preset.label),
                 icon: "ai-brain-symbolic".to_string(),
-                action: "new_agent:claude".to_string(),
-            },
-            PaletteItem {
-                category: "AGENT".to_string(),
-                label: "New Codex agent".to_string(),
-                icon: "ai-brain-symbolic".to_string(),
-                action: "new_agent:codex".to_string(),
-            },
-            PaletteItem {
-                category: "AGENT".to_string(),
-                label: "New Gemini agent".to_string(),
-                icon: "ai-brain-symbolic".to_string(),
-                action: "new_agent:gemini".to_string(),
-            },
-            PaletteItem {
-                category: "AGENT".to_string(),
-                label: "New OpenCode agent".to_string(),
-                icon: "ai-brain-symbolic".to_string(),
-                action: "new_agent:opencode".to_string(),
-            },
+                action: format!("new_agent:{}", preset.slug),
+            })
+            .collect();
+        items.extend([
             PaletteItem {
                 category: "AGENT".to_string(),
                 label: "New custom agent".to_string(),
@@ -329,7 +314,8 @@ impl CommandPalette {
                 icon: "view-refresh-symbolic".to_string(),
                 action: "restart_all".to_string(),
             },
-        ]
+        ]);
+        items
     }
 
     pub fn add_navigation_items(&self, process_names: &[String]) {

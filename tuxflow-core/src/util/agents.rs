@@ -35,6 +35,69 @@ impl AgentKind {
     }
 }
 
+/// One entry in the "which agent?" list both shells offer when adding an
+/// agent process.
+///
+/// Deliberately NOT keyed on [`AgentKind`]. That enum earns its variants by
+/// having behaviour attached — a per-agent notification sound, a resume
+/// affordance, OpenCode's own-notifications suppression — and a settings
+/// field behind each. This table is only "what do people run", so it can
+/// carry an agent the app has no special handling for; that one gets
+/// `AgentKind::Unknown`'s defaults, which is honest rather than a
+/// half-wired variant.
+pub struct AgentPreset {
+    /// Menu label.
+    pub label: &'static str,
+    /// Stem for the generated process name, and the `new_agent:<slug>`
+    /// palette action id in the GTK app.
+    pub slug: &'static str,
+    /// What actually gets run. Editable after picking — a preset is a
+    /// starting point, not a constraint.
+    pub command: &'static str,
+}
+
+pub const AGENT_PRESETS: &[AgentPreset] = &[
+    AgentPreset {
+        label: "Claude Code",
+        slug: "claude",
+        command: "claude",
+    },
+    AgentPreset {
+        label: "Codex",
+        slug: "codex",
+        command: "codex",
+    },
+    AgentPreset {
+        label: "Gemini CLI",
+        slug: "gemini",
+        command: "gemini",
+    },
+    AgentPreset {
+        label: "OpenCode",
+        slug: "opencode",
+        command: "opencode",
+    },
+    AgentPreset {
+        label: "Aider",
+        slug: "aider",
+        command: "aider",
+    },
+];
+
+/// A process name that doesn't collide with `taken`: the slug itself, then
+/// `slug-2`, `slug-3`… Agents get added several at a time to one project
+/// (two Claudes on different parts of a task is the normal case), and GTK's
+/// `claude-a1b2c3d4` uuid suffix is unreadable in a sidebar row.
+pub fn unique_agent_name(taken: &[String], slug: &str) -> String {
+    if !taken.iter().any(|n| n == slug) {
+        return slug.to_string();
+    }
+    (2..)
+        .map(|n| format!("{slug}-{n}"))
+        .find(|candidate| !taken.iter().any(|n| n == candidate))
+        .unwrap_or_else(|| slug.to_string())
+}
+
 /// Build a "resume previous session" command for the given agent invocation.
 /// Returns `None` when the agent kind has no CLI affordance for resuming
 /// (Gemini uses an in-app `/restore` slash command) or the command is unknown.
@@ -52,5 +115,46 @@ pub fn resume_command_for(command: &str) -> Option<String> {
         AgentKind::Claude | AgentKind::OpenCode => Some(format!("{token} --continue")),
         AgentKind::Codex => Some(format!("{token} resume --last")),
         AgentKind::Gemini | AgentKind::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every preset's command must resolve back through `from_command`, or a
+    /// picked agent would lose its resume item and notification sound the
+    /// moment it was created. Presets with no integrated kind are allowed —
+    /// they just have to be a deliberate choice, which this pins.
+    #[test]
+    fn presets_map_to_the_kind_they_claim() {
+        for preset in AGENT_PRESETS {
+            let kind = AgentKind::from_command(preset.command);
+            let expected = match preset.slug {
+                "claude" => AgentKind::Claude,
+                "codex" => AgentKind::Codex,
+                "gemini" => AgentKind::Gemini,
+                "opencode" => AgentKind::OpenCode,
+                // Aider has no per-agent sound or resume flag wired up.
+                "aider" => AgentKind::Unknown,
+                other => panic!("preset {other} has no expected kind"),
+            };
+            assert_eq!(kind, expected, "preset {}", preset.label);
+        }
+    }
+
+    /// Adding a second Claude to a project must not collide with the first —
+    /// the iced form refuses a duplicate name outright, so a colliding
+    /// suggestion would read as a dead "add" button.
+    #[test]
+    fn names_step_around_what_is_taken() {
+        assert_eq!(unique_agent_name(&[], "claude"), "claude");
+        let taken = vec!["claude".to_string()];
+        assert_eq!(unique_agent_name(&taken, "claude"), "claude-2");
+        let taken = vec!["claude".to_string(), "claude-2".to_string()];
+        assert_eq!(unique_agent_name(&taken, "claude"), "claude-3");
+        // An unrelated name never pushes the stem along.
+        let taken = vec!["web".to_string(), "codex".to_string()];
+        assert_eq!(unique_agent_name(&taken, "claude"), "claude");
     }
 }

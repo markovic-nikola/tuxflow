@@ -1569,13 +1569,10 @@ impl TuxFlowWindow {
         // processes running on the remote host.
         let is_remote = prepared.location.is_remote();
 
-        let total_detected: usize = prepared
-            .stacks
-            .iter()
-            .map(|s| s.suggested_processes.len())
-            .sum();
-
-        if prepared.config_loaded || total_detected <= 5 {
+        if !crate::detect::detector::needs_command_selection(
+            prepared.config_loaded,
+            &prepared.stacks,
+        ) {
             // Show a small dialog to let the user rename before adding
             let all_processes: Vec<crate::config::schema::ProcessConfig> = prepared
                 .stacks

@@ -7,6 +7,7 @@
 //! ports, tunnels and poll cadence. Add project / add command / add agent
 //! run as inline forms; closing a project detaches its remote sessions.
 
+mod add_project;
 mod git_view;
 mod keys;
 mod notify;
@@ -14,6 +15,7 @@ mod processes;
 mod settings_ui;
 mod status_dot;
 mod theme;
+mod widgets;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,6 +30,8 @@ use iced::{Element, Length, Size, Subscription, Task};
 use iced_term::{BackendCommand, SearchDirection, TerminalView};
 use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
+use tuxflow_core::config::ssh;
+use tuxflow_core::detect::detector;
 use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
 use tuxflow_core::remote::{self, ProjectLocation};
@@ -429,7 +433,7 @@ struct App {
     palette_query: String,
     palette_index: usize,
     palette_input: iced::widget::Id,
-    add_project: Option<String>,
+    add_project: Option<add_project::State>,
     add_command: Option<ProcessForm>,
     /// Live inner size (resize events); the sidebar takes a fraction of
     /// the width (GTK parity). The *position* is never tracked from Moved
@@ -650,9 +654,7 @@ enum Event {
         index: usize,
     },
     OpenAddProject,
-    AddProjectInput(String),
-    AddProjectSubmit,
-    AddProjectCancel,
+    AddProjectMsg(add_project::Msg),
     /// Add a command (or agent) to a project — the form writes into
     /// whatever project is active, so it names the one it was raised on.
     OpenAddCommand {
@@ -787,10 +789,6 @@ impl App {
         tasks.push(Task::done(Event::ActivityTick));
 
         (app, Task::batch(tasks))
-    }
-
-    fn saved_has(&self, saved: &SavedProjects, key: &str) -> bool {
-        saved.directories.iter().any(|d| d == key)
     }
 
     fn open_project(&mut self, key: &str) -> Task<Event> {
@@ -1476,6 +1474,331 @@ impl App {
                 })
             },
         )
+    }
+
+    /// The add-project flow's workspace-touching half — duplicate checks,
+    /// the detection workers, and the persistence that GTK does inside
+    /// `Workspace::finalize_project`.
+    fn update_add_project(&mut self, msg: add_project::Msg) -> Task<Event> {
+        use add_project::Msg;
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        // A verify/detect captures the fields at submit and proceeds with
+        // those. Editing them underneath it would leave the next stage
+        // configuring the path that was submitted rather than the one on
+        // screen, so the inputs are frozen for its duration. The view greys
+        // the two text fields to match; this guard is what also covers the
+        // host picker, which iced gives no way to disable.
+        if state.busy.is_some()
+            && matches!(
+                msg,
+                Msg::HostChoice(_) | Msg::HostInput(_) | Msg::PathInput(_) | Msg::UseSuggestion(_)
+            )
+        {
+            return Task::none();
+        }
+        match msg {
+            Msg::Close => {
+                self.add_project = None;
+                self.focus_selected_terminal()
+            }
+            Msg::Back => {
+                match state.stage {
+                    // Back out of Configure to the picker that produced it,
+                    // keeping what was typed — the detection is cheap to redo
+                    // and a typo in the path is the reason to come back.
+                    add_project::Stage::Configure => {
+                        state.stage = add_project::Stage::Locate;
+                        state.configure = None;
+                        state.error = None;
+                    }
+                    _ => {
+                        state.stage = add_project::Stage::Choose;
+                        state.suggestions.clear();
+                        state.error = None;
+                        state.busy = None;
+                    }
+                }
+                // Whichever way we went, a probe requested from the stage we
+                // just left must not land on the one we are now on.
+                state.probe_stamp += 1;
+                Task::none()
+            }
+            Msg::Pick(kind) => {
+                state.enter(kind);
+                Task::none()
+            }
+            Msg::HostChoice(label) => {
+                // Selecting an alias fills the host field with the ALIAS, so
+                // ssh resolves ProxyJump/IdentityFile/User itself.
+                state.host_choice = label.clone();
+                state.host = match label == add_project::CUSTOM_HOST {
+                    true => String::new(),
+                    false => label,
+                };
+                state.suggestions.clear();
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::HostInput(value) => {
+                state.host = value;
+                // A hand-typed host no longer corresponds to the picked entry.
+                state.host_choice = add_project::CUSTOM_HOST.to_string();
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::PathInput(value) => {
+                state.path = value;
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::UseSuggestion(dir) => {
+                // Filling the field re-triggers completion one level deeper,
+                // which is what makes the list a browser rather than a
+                // one-shot guess.
+                state.path = dir;
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::Suggestions { stamp, dirs } => {
+                // Drop a listing whose keystroke has already been superseded.
+                if stamp == state.stamp {
+                    state.suggestions = dirs;
+                }
+                Task::none()
+            }
+            Msg::Locate => self.locate_project(),
+            Msg::Detected(found) => {
+                state.configured(*found);
+                Task::none()
+            }
+            Msg::Failed { stamp, error } => {
+                if stamp == state.probe_stamp {
+                    state.busy = None;
+                    state.error = Some(error);
+                }
+                Task::none()
+            }
+            Msg::NameInput(value) => {
+                if let Some(c) = &mut state.configure {
+                    c.name = value;
+                }
+                Task::none()
+            }
+            Msg::Toggle(index, on) => {
+                if let Some(c) = &mut state.configure
+                    && let Some(slot) = c.selected.get_mut(index)
+                {
+                    *slot = on;
+                }
+                Task::none()
+            }
+            Msg::SetAll(on) => {
+                if let Some(c) = &mut state.configure {
+                    c.selected.iter_mut().for_each(|s| *s = on);
+                }
+                Task::none()
+            }
+            Msg::Confirm => self.finish_add_project(),
+        }
+    }
+
+    /// Ask for directory completions for what is in the path field now.
+    ///
+    /// The stamp is bumped per keystroke and checked on arrival, so a slow
+    /// listing can't paint over what is being typed now. The remote half is
+    /// debounced because each probe is an ssh round trip; the local half is a
+    /// `read_dir` and answers immediately.
+    fn complete_path(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        state.stamp += 1;
+        let stamp = state.stamp;
+        if !state.can_complete() {
+            state.suggestions.clear();
+            return Task::none();
+        }
+        let host = state.probe_host();
+        let prefix = state.path.trim().to_string();
+        let debounce = host.is_some();
+        Task::perform(
+            async move {
+                if debounce {
+                    tokio::time::sleep(SUGGEST_DEBOUNCE).await;
+                }
+                tokio::task::spawn_blocking(move || remote::fs::list_dirs(host.as_deref(), &prefix))
+                    .await
+                    .unwrap_or_default()
+            },
+            move |dirs| Event::AddProjectMsg(add_project::Msg::Suggestions { stamp, dirs }),
+        )
+    }
+
+    /// Commit the Locate stage: reject a duplicate, then detect. The remote
+    /// half verifies over ssh first (BatchMode, so it can never hang on an
+    /// auth prompt) — `probe_remote` does that as its own first step.
+    fn locate_project(&mut self) -> Task<Event> {
+        let Some(state) = &self.add_project else {
+            return Task::none();
+        };
+        if !state.can_locate() {
+            return Task::none();
+        }
+        let dir = state.path.trim().trim_end_matches('/').to_string();
+        let location = match state.probe_host() {
+            Some(host) => ProjectLocation::Ssh {
+                host,
+                dir: dir.clone(),
+            },
+            // Canonicalize so `/srv/app/.` and a symlinked path can't open
+            // the same project twice under two keys.
+            None => ProjectLocation::Local(
+                PathBuf::from(&dir)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(&dir)),
+            ),
+        };
+        let key = location.key();
+
+        // GTK silently drops a duplicate here, which reads as a dead button.
+        // Say so instead. Resolved before re-borrowing the form.
+        let duplicate = self
+            .projects
+            .iter()
+            .find(|p| p.key() == key)
+            .map(|p| p.name.clone());
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        if let Some(name) = duplicate {
+            state.error = Some(format!("Already open: {name}"));
+            return Task::none();
+        }
+        state.probe_stamp += 1;
+        let stamp = state.probe_stamp;
+
+        match location.clone() {
+            ProjectLocation::Local(path) => {
+                if !path.is_dir() {
+                    state.error = Some(format!("No such directory: {}", path.display()));
+                    return Task::none();
+                }
+                // Local detection is a handful of stats on one directory —
+                // the same call the startup path makes inline.
+                let (name, stacks, config_loaded) = detect_for_add(&path);
+                let found = add_project::Detected {
+                    stamp,
+                    key,
+                    location,
+                    name,
+                    stacks,
+                    config_loaded,
+                };
+                Task::done(Event::AddProjectMsg(add_project::Msg::Detected(Box::new(
+                    found,
+                ))))
+            }
+            ProjectLocation::Ssh { host, dir } => {
+                state.busy = Some(format!("Connecting to {host}\u{2026}"));
+                state.suggestions.clear();
+                let probe_host = host.clone();
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        // conservative = false: the add flow offers everything
+                        // detection can find, and persists the extras as
+                        // custom commands so they survive the next launch.
+                        remote::probe::probe_remote(&probe_host, &dir, false)
+                    }),
+                    move |joined| {
+                        let msg = match joined {
+                            Ok(Ok(probe)) => {
+                                let name = probe
+                                    .config
+                                    .as_ref()
+                                    .map(|c| c.project.name.clone())
+                                    .unwrap_or_else(|| location.base_name());
+                                let config_loaded = probe.config.is_some();
+                                let stacks = match config_loaded {
+                                    // An authored process list isn't a
+                                    // detected stack — nothing to choose.
+                                    true => Vec::new(),
+                                    false => probe.stacks,
+                                };
+                                add_project::Msg::Detected(Box::new(add_project::Detected {
+                                    stamp,
+                                    key: key.clone(),
+                                    location: location.clone(),
+                                    name,
+                                    stacks,
+                                    config_loaded,
+                                }))
+                            }
+                            Ok(Err(e)) => add_project::Msg::Failed {
+                                stamp,
+                                error: connect_hint(&host, &e),
+                            },
+                            Err(e) => add_project::Msg::Failed {
+                                stamp,
+                                error: e.to_string(),
+                            },
+                        };
+                        Event::AddProjectMsg(msg)
+                    },
+                )
+            }
+        }
+    }
+
+    /// Commit the Configure stage — where the project actually joins the
+    /// workspace.
+    ///
+    /// The persistence mirrors GTK's `finalize_project` exactly, and the two
+    /// halves of it are not symmetric. A DESELECTED process is marked deleted
+    /// so the loader keeps filtering it out. A SELECTED one usually needs
+    /// nothing — `open_project` re-detects and finds it again — EXCEPT when
+    /// it sits outside the conservative subset the startup loader re-detects,
+    /// in which case it has no source to come back from and is persisted as a
+    /// custom command instead.
+    fn finish_add_project(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        let Some(c) = &state.configure else {
+            return Task::none();
+        };
+        let name = c.name.trim().to_string();
+        if name.is_empty() {
+            return Task::none();
+        }
+        let key = c.key.clone();
+        let default_dir = c.location.dir_str();
+        let conservative = detector::conservative_names(&c.stacks);
+
+        self.saved.add(&key);
+        if name != c.detected_name {
+            self.saved.set_name(&key, &name);
+        }
+        for (proc, keep) in c.flat().zip(c.selected.iter().copied()) {
+            if !keep {
+                self.saved.add_deleted_process(&key, &proc.name);
+                continue;
+            }
+            if !c.config_loaded && !conservative.contains(&proc.name) {
+                let mut pc = proc.clone();
+                if pc.working_dir.is_none() {
+                    pc.working_dir = Some(default_dir.clone());
+                }
+                self.saved.add_custom_command(&key, pc);
+            }
+        }
+        self.saved.save();
+
+        self.add_project = None;
+        let task = self.open_project(&key);
+        self.active = self.projects.len() - 1;
+        Task::batch([task, self.poll_git()])
     }
 
     fn update_git_view(&mut self, msg: git_view::Msg) -> Task<Event> {
@@ -2693,6 +3016,18 @@ impl App {
                         self.git_ui = None;
                         return self.focus_selected_terminal();
                     }
+                    // The two add forms are full-pane views like the ones
+                    // above, so Esc closes them the same way. Their text
+                    // fields eat the first Esc to unfocus, as everywhere
+                    // else in this shell.
+                    if self.add_project.is_some() {
+                        self.add_project = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.add_command.is_some() {
+                        self.add_command = None;
+                        return self.focus_selected_terminal();
+                    }
                 }
                 // Palette navigation first (its input consumes typing but
                 // not Esc/arrows).
@@ -2870,37 +3205,12 @@ impl App {
                 Task::none()
             }
             Event::OpenAddProject => {
-                self.add_project = Some(String::new());
+                // The host list is read once per raise, not per frame — it is
+                // a file read, and the picker is rebuilt on every keystroke.
+                self.add_project = Some(add_project::State::new(ssh::parse_ssh_config()));
                 Task::none()
             }
-            Event::AddProjectInput(value) => {
-                self.add_project = Some(value);
-                Task::none()
-            }
-            Event::AddProjectCancel => {
-                self.add_project = None;
-                Task::none()
-            }
-            Event::AddProjectSubmit => {
-                let Some(input) = self.add_project.take() else {
-                    return Task::none();
-                };
-                let input = input.trim().to_string();
-                if input.is_empty() {
-                    return Task::none();
-                }
-                let key = normalize_key(&input);
-                if self.projects.iter().any(|p| p.key() == key) {
-                    return Task::none();
-                }
-                if !self.saved_has(&self.saved, &key) {
-                    self.saved.add(&key);
-                    self.saved.save();
-                }
-                let task = self.open_project(&key);
-                self.active = self.projects.len() - 1;
-                task
-            }
+            Event::AddProjectMsg(msg) => self.update_add_project(msg),
             Event::OpenAddCommand { project, agent } => {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
@@ -4216,8 +4526,8 @@ impl App {
         if let Some(form) = &self.add_command {
             return self.view_add_command(form);
         }
-        if let Some(input) = &self.add_project {
-            return view_add_project(input);
+        if let Some(state) = &self.add_project {
+            return add_project::view(state).map(Event::AddProjectMsg);
         }
 
         let Some(project) = self.active_project() else {
@@ -5141,32 +5451,6 @@ fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn view_add_project(input: &str) -> Element<'_, Event> {
-    form_card(
-        column![
-            text("add project").size(16).font(bold()),
-            text_input("/path/to/project  or  ssh://host/path", input)
-                .on_input(Event::AddProjectInput)
-                .on_submit(Event::AddProjectSubmit)
-                .style(theme::input(LOCAL_ACCENT))
-                .padding([8, 14])
-                .size(13),
-            row![
-                button(text("open").size(12).font(bold()))
-                    .padding([7, 16])
-                    .style(theme::primary(LOCAL_ACCENT))
-                    .on_press(Event::AddProjectSubmit),
-                button(text("cancel").size(12))
-                    .padding([7, 16])
-                    .style(theme::pill_button(LOCAL_ACCENT))
-                    .on_press(Event::AddProjectCancel),
-            ]
-            .spacing(8),
-        ]
-        .spacing(14),
-    )
-}
-
 /// Centered elevated card on the terminal surface.
 fn form_card(content: iced::widget::Column<'_, Event>) -> Element<'_, Event> {
     container(
@@ -5178,6 +5462,40 @@ fn form_card(content: iced::widget::Column<'_, Event>) -> Element<'_, Event> {
     .center_y(Length::Fill)
     .style(theme::terminal_pane)
     .into()
+}
+
+/// Debounce before a remote path completion goes out — long enough to skip
+/// probing on every keystroke, short enough to feel live over a warm
+/// ControlMaster connection. GTK's `SUGGEST_DEBOUNCE_MS`.
+const SUGGEST_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Detection for the ADD flow, mirroring GTK's `prepare_project_inner(dir,
+/// conservative: false)`: an authored `tuxflow.toml` wins outright and leaves
+/// nothing to choose between, otherwise the FULL detector runs — the add
+/// dialog offers everything, and `finish_add_project` persists whatever the
+/// startup loader wouldn't re-detect.
+fn detect_for_add(dir: &std::path::Path) -> (String, Vec<detector::DetectedStack>, bool) {
+    use tuxflow_core::config::loader;
+    let base = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("project"));
+    match loader::find_config(dir).and_then(|p| loader::load_config(&p).ok()) {
+        Some(config) => (config.project.name, Vec::new(), true),
+        None => (base, detector::detect_stacks(dir), false),
+    }
+}
+
+/// GTK's advice verbatim: BatchMode can't answer a password or a first-time
+/// host-key prompt, so the fix is always to connect once by hand.
+fn connect_hint(host: &str, err: &ProbeError) -> String {
+    match err {
+        ProbeError::Invalid(msg) => msg.clone(),
+        ProbeError::Unreachable(msg) => format!(
+            "{msg}\n\nIf this host needs a password or first-time host-key \
+             confirmation, connect once in a terminal (ssh {host}), then retry."
+        ),
+    }
 }
 
 /// Canonical project key from user input: ssh URLs pass through, local

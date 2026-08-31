@@ -88,7 +88,64 @@ fn list_remote_raw(
 /// List remote directories whose absolute path starts with `prefix` (which
 /// may end mid-name). Used by the add-remote-project path autocompletion.
 pub fn list_remote_dirs(host: &str, prefix: &str) -> Vec<String> {
-    list_remote_raw(host, prefix, Some("/$"), 10)
+    list_remote_raw(host, prefix, Some("/$"), DIR_SUGGESTION_LIMIT)
+}
+
+/// How many completions a path field offers. Shared by both halves so a
+/// local project's dropdown is never a different length than a remote one's.
+const DIR_SUGGESTION_LIMIT: u32 = 10;
+
+/// Local twin of [`list_remote_dirs`], with a deliberately identical
+/// contract: absolute paths, a trailing `/` on every entry, prefix matched
+/// mid-name, sorted, capped.
+///
+/// This mirrors `ls -1dp -- <prefix>*` rather than doing anything cleverer,
+/// so one completion widget can drive both halves of the add-project dialog
+/// without caring which side of an ssh connection the path lives on. That
+/// includes glob's dotfile rule — a bare `*` does not match `.config`, so
+/// hidden directories surface only once the user types the leading dot.
+pub fn list_local_dirs(prefix: &str) -> Vec<String> {
+    // Split at the last '/': everything through it is the directory to read,
+    // the tail is the partial name being completed.
+    let split = match prefix.rfind('/') {
+        Some(i) => i + 1,
+        None => return Vec::new(), // only absolute paths complete
+    };
+    let (parent, partial) = prefix.split_at(split);
+
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(partial) {
+                return false;
+            }
+            if partial.is_empty() && name.starts_with('.') {
+                return false;
+            }
+            // `ls -p` marks by the resolved type, so a symlink to a
+            // directory is a directory here too.
+            e.path().is_dir()
+        })
+        .map(|e| format!("{}{}/", parent, e.file_name().to_string_lossy()))
+        .collect();
+    out.sort();
+    out.truncate(DIR_SUGGESTION_LIMIT as usize);
+    out
+}
+
+/// Directory completions for either half of the add-project dialog:
+/// `host` present means the path lives on the other end of an ssh
+/// connection. Blocking either way — worker threads only.
+pub fn list_dirs(host: Option<&str>, prefix: &str) -> Vec<String> {
+    match host {
+        Some(host) => list_remote_dirs(host, prefix),
+        None => list_local_dirs(prefix),
+    }
 }
 
 /// Directories (for descending) plus image files — the completion set for

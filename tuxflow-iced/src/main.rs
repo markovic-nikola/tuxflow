@@ -3525,11 +3525,16 @@ impl App {
         if let Some((heading, body)) = &self.notice {
             layers.push(self.view_notice(heading, body));
         }
-        if layers.len() == 1 {
-            layers.pop().expect("base layer")
-        } else {
-            iced::widget::Stack::with_children(layers).into()
-        }
+        // ALWAYS a Stack, even with nothing over the base. Returning the base
+        // directly when there are no overlays would change the ROOT widget's
+        // type as soon as one opens (Column -> Stack), and iced diffs the
+        // tree by widget tag: a tag mismatch at the root discards the whole
+        // subtree's state and rebuilds it. Every scrollable under it snaps
+        // back to the top — right-clicking a project at the bottom of a long
+        // sidebar scrolled it to the first card. A one-child Stack lays out
+        // identically and costs nothing, and it keeps the base at
+        // `children[0]` whether or not a layer sits above it.
+        iced::widget::Stack::with_children(layers).into()
     }
 
     /// The GTK sidebar popovers, rebuilt: a click-away backdrop plus an

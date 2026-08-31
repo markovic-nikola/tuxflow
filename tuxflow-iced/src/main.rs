@@ -36,7 +36,7 @@ use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
 use tuxflow_core::remote::{self, ProjectLocation};
 use tuxflow_core::util::activity;
-use tuxflow_core::util::agents::resume_command_for;
+use tuxflow_core::util::agents::{self, resume_command_for};
 use tuxflow_core::util::banner;
 use tuxflow_core::util::icon_detector;
 use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
@@ -361,6 +361,10 @@ struct ProcessForm {
     command: String,
     working_dir: String,
     agent: bool,
+    /// The user has edited the name, so an agent-preset pick must stop
+    /// rewriting it. Without this, choosing a preset after naming the
+    /// process silently discards the name.
+    name_touched: bool,
     start_with_project: bool,
     auto_restart: bool,
     open_in_browser: bool,
@@ -664,6 +668,8 @@ enum Event {
     OpenEditProcess,
     AddCommandName(String),
     AddCommandCommand(String),
+    /// Index into `agents::AGENT_PRESETS`.
+    AgentPreset(usize),
     FormWorkingDir(String),
     FormToggleStartWith(bool),
     FormToggleAutoRestart(bool),
@@ -1141,6 +1147,7 @@ impl App {
             command: entry.config.command.clone(),
             working_dir: entry.config.working_dir.clone().unwrap_or_default(),
             agent: entry.config.category == ProcessCategory::Agent,
+            name_touched: true,
             start_with_project: entry.config.start_with_project,
             auto_restart: entry.config.auto_restart,
             open_in_browser: entry.config.open_in_browser,
@@ -3225,6 +3232,7 @@ impl App {
                     command: String::new(),
                     working_dir: String::new(),
                     agent,
+                    name_touched: false,
                     start_with_project: false,
                     auto_restart: false,
                     open_in_browser: false,
@@ -3287,7 +3295,25 @@ impl App {
             }
             Event::AddCommandName(value) => {
                 if let Some(form) = &mut self.add_command {
+                    // An emptied field goes back to being the preset's to
+                    // fill, so clearing it and picking another agent works.
+                    form.name_touched = !value.trim().is_empty();
                     form.name = value;
+                }
+                Task::none()
+            }
+            Event::AgentPreset(index) => {
+                let taken: Vec<String> = self
+                    .active_project()
+                    .map(|p| p.entries.iter().map(|e| e.config.name.clone()).collect())
+                    .unwrap_or_default();
+                if let Some(form) = &mut self.add_command
+                    && let Some(preset) = agents::AGENT_PRESETS.get(index)
+                {
+                    form.command = preset.command.to_string();
+                    if !form.name_touched {
+                        form.name = agents::unique_agent_name(&taken, preset.slug);
+                    }
                 }
                 Task::none()
             }
@@ -4755,15 +4781,59 @@ impl App {
                 .into()
         };
 
-        let mut col = column![
-            text(title).size(16).font(bold()),
-            name_row,
-            text_input("command \u{2014} e.g. npm run dev", &form.command)
-                .on_input(Event::AddCommandCommand)
-                .on_submit(Event::AddCommandSubmit)
-                .style(theme::input(accent))
-                .padding([8, 14])
-                .size(13),
+        let mut col = column![text(title).size(16).font(bold())].spacing(14);
+
+        // Picking an agent is choosing WHICH one first; the fields below are
+        // the starting point it fills in, all still editable. Only offered
+        // when creating — an existing process's command is the thing being
+        // edited, and a preset row would silently overwrite it.
+        if form.agent && !editing {
+            let typed = form.command.trim();
+            let mut list = column![].spacing(0);
+            for (i, preset) in agents::AGENT_PRESETS.iter().enumerate() {
+                let picked = typed == preset.command;
+                list = list.push(
+                    button(
+                        row![
+                            text(preset.label).size(12.5).color(TEXT),
+                            iced::widget::space::horizontal(),
+                            text(preset.command).size(11).color(DIM),
+                        ]
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([6, 12])
+                    .style(theme::process_row(accent, picked))
+                    .on_press(Event::AgentPreset(i)),
+                );
+            }
+            col = col.push(
+                column![
+                    text("agent").size(11.5).font(bold()).color(TEXT_SECONDARY),
+                    container(list)
+                        .padding([4, 0])
+                        .style(theme::settings_card)
+                        .width(Length::Fill),
+                ]
+                .spacing(6),
+            );
+        }
+
+        col = col.push(name_row).push(
+            text_input(
+                match form.agent {
+                    true => "command \u{2014} e.g. claude --model opus",
+                    false => "command \u{2014} e.g. npm run dev",
+                },
+                &form.command,
+            )
+            .on_input(Event::AddCommandCommand)
+            .on_submit(Event::AddCommandSubmit)
+            .style(theme::input(accent))
+            .padding([8, 14])
+            .size(13),
+        );
+        col = col.push(
             text_input(
                 "working directory \u{2014} optional, defaults to the project",
                 &form.working_dir,
@@ -4772,23 +4842,34 @@ impl App {
             .style(theme::input(accent))
             .padding([8, 14])
             .size(13),
-            iced::widget::checkbox(form.start_with_project)
-                .label("start with project")
-                .on_toggle(Event::FormToggleStartWith)
-                .size(16)
-                .text_size(12.5),
-            iced::widget::checkbox(form.auto_restart)
-                .label("restart on crash")
-                .on_toggle(Event::FormToggleAutoRestart)
-                .size(16)
-                .text_size(12.5),
-            iced::widget::checkbox(form.open_in_browser)
-                .label("open in browser when a port appears")
-                .on_toggle(Event::FormToggleOpenBrowser)
-                .size(16)
-                .text_size(12.5),
-        ]
-        .spacing(14);
+        );
+        col = col
+            .push(
+                iced::widget::checkbox(form.start_with_project)
+                    .label("start with project")
+                    .on_toggle(Event::FormToggleStartWith)
+                    .size(16)
+                    .text_size(12.5),
+            )
+            .push(
+                iced::widget::checkbox(form.auto_restart)
+                    .label("restart on crash")
+                    .on_toggle(Event::FormToggleAutoRestart)
+                    .size(16)
+                    .text_size(12.5),
+            );
+        // An agent serves no port, so "open in browser when a port appears"
+        // is dead weight on this form. The stored flag is left alone rather
+        // than forced off, so nothing changes under an existing process.
+        if !form.agent {
+            col = col.push(
+                iced::widget::checkbox(form.open_in_browser)
+                    .label("open in browser when a port appears")
+                    .on_toggle(Event::FormToggleOpenBrowser)
+                    .size(16)
+                    .text_size(12.5),
+            );
+        }
 
         let mut buttons = row![
             button(

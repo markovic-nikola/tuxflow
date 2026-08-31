@@ -11,9 +11,7 @@
 //! file-watch, mic…) still edit the shared settings.toml and say so in
 //! their subtitle rather than pretending.
 
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_input, toggler,
-};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
 use iced::{Element, Length};
 use tuxflow_core::config::keybindings::{ShortcutAction, action_metadata};
 use tuxflow_core::config::palette;
@@ -21,7 +19,8 @@ use tuxflow_core::config::settings::{AppSettings, EDITOR_CHOICES, TERMINAL_CHOIC
 use tuxflow_core::mcp::setup;
 use tuxflow_core::util::sounds::BUNDLED_SOUNDS;
 
-use crate::theme::{self, CRASHED, DIM, TEXT, TEXT_SECONDARY, bold};
+use crate::theme::{self, CRASHED, TEXT_SECONDARY, bold};
+use crate::widgets::{group, label_row, row_base, switch_row};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -665,56 +664,6 @@ fn page_about<'a>() -> iced::widget::Column<'a, Msg> {
 }
 
 // ── Row builders ────────────────────────────────────────────────────────
-
-fn group<'a>(title: &'a str, rows: Vec<Element<'a, Msg>>) -> Element<'a, Msg> {
-    let mut inner = column![].spacing(0);
-    for r in rows {
-        inner = inner.push(r);
-    }
-    let mut outer = column![].spacing(8);
-    if !title.is_empty() {
-        outer = outer.push(text(title).size(11.5).font(bold()).color(TEXT_SECONDARY));
-    }
-    outer
-        .push(
-            container(inner)
-                .padding([6, 0])
-                .style(theme::settings_card)
-                .width(Length::Fill),
-        )
-        .into()
-}
-
-fn row_base<'a>(title: &'a str, subtitle: &'a str, control: Element<'a, Msg>) -> Element<'a, Msg> {
-    let mut left = column![text(title).size(13).color(TEXT)].spacing(3);
-    if !subtitle.is_empty() {
-        left = left.push(text(subtitle).size(10.5).color(DIM));
-    }
-    container(
-        row![left.width(Length::Fill), control]
-            .spacing(12)
-            .align_y(iced::Alignment::Center),
-    )
-    .padding([7, 14])
-    .into()
-}
-
-fn label_row<'a>(title: &'a str, subtitle: &'a str) -> Element<'a, Msg> {
-    row_base(title, subtitle, column![].into())
-}
-
-fn switch_row<'a>(
-    title: &'a str,
-    subtitle: &'a str,
-    active: bool,
-    f: fn(bool) -> Msg,
-) -> Element<'a, Msg> {
-    row_base(
-        title,
-        subtitle,
-        toggler(active).on_toggle(f).size(18).into(),
-    )
-}
 
 fn pick_row<'a>(
     title: &'a str,

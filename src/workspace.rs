@@ -286,12 +286,7 @@ impl Workspace {
         // set) — persist them as custom commands, exactly like the Edit
         // Project enable path does.
         {
-            let mut conservative = detected_stacks.clone();
-            detector::apply_conservative_filter(&mut conservative);
-            let conservative_names: std::collections::HashSet<&str> = conservative
-                .iter()
-                .flat_map(|s| s.suggested_processes.iter().map(|p| p.name.as_str()))
-                .collect();
+            let conservative_names = detector::conservative_names(&detected_stacks);
             let default_dir = location.dir_str();
             let mut mgr = manager.borrow_mut();
             for mut pc in selected_processes {

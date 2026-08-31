@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::config::schema::{ProcessCategory, ProcessConfig};
 use crate::remote::fs::{LocalFs, ProjectFs};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DetectedStack {
     pub name: String,
     pub suggested_processes: Vec<ProcessConfig>,
@@ -127,6 +127,37 @@ pub fn apply_conservative_filter(stacks: &mut Vec<DetectedStack>) {
         }
     }
 }
+
+/// Names in the conservative subset of `stacks` — what the STARTUP loader
+/// would re-detect on its own.
+///
+/// The add-project flow detects with the full `detect_stacks`, so a selection
+/// outside this set has no source to come back from on the next launch and
+/// must be persisted as a custom command instead. Shared by both shells so
+/// that rule can't drift between them.
+pub fn conservative_names(stacks: &[DetectedStack]) -> std::collections::HashSet<String> {
+    let mut conservative = stacks.to_vec();
+    apply_conservative_filter(&mut conservative);
+    conservative
+        .iter()
+        .flat_map(|s| s.suggested_processes.iter().map(|p| p.name.clone()))
+        .collect()
+}
+
+/// Does adding this project warrant the command-SELECTION step, rather than
+/// just asking for a name?
+///
+/// A project with a `tuxflow.toml` has an authored process list — there is
+/// nothing to choose. Otherwise it is worth choosing only once detection
+/// found more than a handful.
+pub fn needs_command_selection(config_loaded: bool, stacks: &[DetectedStack]) -> bool {
+    let total: usize = stacks.iter().map(|s| s.suggested_processes.len()).sum();
+    !config_loaded && total > MAX_UNSELECTED_COMMANDS
+}
+
+/// Above this many detected commands, adding a project asks which ones to
+/// keep instead of taking them all.
+const MAX_UNSELECTED_COMMANDS: usize = 5;
 
 fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
     ProcessConfig {

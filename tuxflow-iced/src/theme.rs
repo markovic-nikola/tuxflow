@@ -519,6 +519,68 @@ pub fn process_row(
     }
 }
 
+/// A pickable card — the add-project flow's Local/Remote fork.
+///
+/// Unlike `process_row`, this one is drawn at rest: it is the only thing on
+/// the pane and has to read as a target rather than as a paragraph, so it
+/// carries the settings card's surface plus an accent edge that lights on
+/// hover.
+pub fn choice_card(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(Background::Color(match hovered {
+                true => alpha(accent, 0.10),
+                false => BG_CARD,
+            })),
+            text_color: TEXT,
+            border: Border {
+                radius: 10.0.into(),
+                width: 1.0,
+                color: alpha(accent, if hovered { 0.55 } else { 0.18 }),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Switch rows, in the accent rather than iced's default blue — the shells
+/// share one accent and a stray blue is the only thing in the window wearing
+/// a colour nobody chose.
+pub fn toggler(
+    accent: Color,
+) -> impl Fn(&Theme, iced::widget::toggler::Status) -> iced::widget::toggler::Style {
+    use iced::widget::toggler::{Status, default};
+    move |theme, status| {
+        let (on, hovered) = match status {
+            Status::Active { is_toggled } => (is_toggled, false),
+            Status::Hovered { is_toggled } => (is_toggled, true),
+            Status::Disabled { .. } => (false, false),
+        };
+        // Geometry (radius, padding ratio) comes from the default so a
+        // future iced can restyle the shape; only the colours are ours.
+        iced::widget::toggler::Style {
+            background: Background::Color(match (on, hovered) {
+                (true, true) => alpha(accent, 0.85),
+                (true, false) => accent,
+                (false, true) => alpha(TEXT_SECONDARY, 0.45),
+                (false, false) => alpha(TEXT_SECONDARY, 0.30),
+            }),
+            background_border_width: 0.0,
+            background_border_color: Color::TRANSPARENT,
+            // The knob stays readable on both sides: dark on the lit track,
+            // light on the grey one.
+            foreground: Background::Color(match on {
+                true => ON_ACCENT,
+                false => alpha(TEXT, 0.85),
+            }),
+            foreground_border_width: 0.0,
+            foreground_border_color: Color::TRANSPARENT,
+            ..default(theme, status)
+        }
+    }
+}
+
 /// Project card header strip: a soft accent tint on hover, and nothing
 /// otherwise. GTK's `.project-active` also washes this row on the active
 /// project, but there the card behind it is undecorated — here the active

@@ -388,3 +388,71 @@ fn tmux_session_survives_client_death_and_reattaches() {
     kill_test_tmux(project.path());
     let _ = client2.wait();
 }
+
+/// `list_local_dirs` is the local twin of `list_remote_dirs`, and the
+/// add-project completion widget drives both through one code path — so its
+/// contract has to match `ls -1dp -- <prefix>*` where it is observable:
+/// directories only, trailing slash, sorted, glob's dotfile rule.
+mod list_local_dirs {
+    use tempfile::TempDir;
+    use tuxflow_core::remote::fs::list_local_dirs;
+
+    fn fixture() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        for dir in ["alpha", "alpine", "beta", ".hidden"] {
+            std::fs::create_dir(tmp.path().join(dir)).unwrap();
+        }
+        // A regular file must never be offered as a directory to descend.
+        std::fs::write(tmp.path().join("alpha.txt"), b"x").unwrap();
+        tmp
+    }
+
+    /// Trailing slash lists the directory's children.
+    #[test]
+    fn lists_children_of_a_complete_dir() {
+        let tmp = fixture();
+        let got = list_local_dirs(&format!("{}/", tmp.path().display()));
+        let names: Vec<&str> = got.iter().map(|p| p.as_str()).collect();
+        assert_eq!(names.len(), 3, "expected 3 visible dirs, got {names:?}");
+        assert!(names.iter().all(|p| p.ends_with('/')), "{names:?}");
+        assert!(names[0].ends_with("/alpha/"), "not sorted: {names:?}");
+        assert!(
+            !names.iter().any(|p| p.contains("alpha.txt")),
+            "listed a plain file: {names:?}"
+        );
+    }
+
+    /// A partial name filters mid-name, as the shell glob would.
+    #[test]
+    fn filters_on_a_partial_name() {
+        let tmp = fixture();
+        let got = list_local_dirs(&format!("{}/alp", tmp.path().display()));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].ends_with("/alpha/"), "{got:?}");
+        assert!(got[1].ends_with("/alpine/"), "{got:?}");
+    }
+
+    /// Glob semantics: a bare `*` skips dotfiles, but typing the dot reveals
+    /// them. Without this the local half would offer `.git`/`.cache` on every
+    /// directory while the remote half (real `ls`) would not.
+    #[test]
+    fn hidden_dirs_need_an_explicit_dot() {
+        let tmp = fixture();
+        let bare = list_local_dirs(&format!("{}/", tmp.path().display()));
+        assert!(
+            !bare.iter().any(|p| p.contains(".hidden")),
+            "dotfile leaked into a bare listing: {bare:?}"
+        );
+        let dotted = list_local_dirs(&format!("{}/.", tmp.path().display()));
+        assert_eq!(dotted.len(), 1, "{dotted:?}");
+        assert!(dotted[0].ends_with("/.hidden/"), "{dotted:?}");
+    }
+
+    /// Relative input and unreadable parents yield nothing rather than
+    /// guessing — the field only ever completes absolute paths.
+    #[test]
+    fn refuses_relative_and_missing() {
+        assert!(list_local_dirs("alpha").is_empty());
+        assert!(list_local_dirs("/nonexistent-zz/xx").is_empty());
+    }
+}

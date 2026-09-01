@@ -8,6 +8,7 @@
 //! run as inline forms; closing a project detaches its remote sessions.
 
 mod add_project;
+mod dnd;
 mod edit_project;
 mod git_view;
 mod keys;
@@ -62,6 +63,9 @@ const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
 const FRAME: Duration = Duration::from_millis(16);
 /// The sidebar cluster's slide-in (design round F).
 const HOVER_SLIDE_MS: f32 = 140.0;
+/// The gap a drop target opens on its targeted edge: GTK's 2px border +
+/// 2px padding (style.css `.drop-target-above/-below`).
+const DROP_GAP: f32 = 4.0;
 /// The sidebar's collapse/expand glide. Longer than the hover glide: it
 /// moves the whole window's layout, and Adwaita's own flap takes ~200ms.
 const SIDEBAR_SLIDE_MS: f32 = 180.0;
@@ -469,6 +473,13 @@ struct App {
     /// index None = the project header. Drives the cluster slide-in.
     hovered_row: Option<(u64, Option<usize>)>,
     hover_anim: Anim,
+    /// A sidebar drag in progress (see [`Drag`]).
+    drag: Option<Drag>,
+    /// Generation of the drag auto-scroll tick chain (the restart-timer
+    /// idiom: a tick carrying an old stamp stops).
+    drag_tick: u64,
+    /// The sidebar list's scrollable, addressed by drag auto-scroll.
+    sidebar_scroll: iced::widget::Id,
     /// Ctrl is down right now, so the rows the digit switcher can reach are
     /// wearing their keycaps. Nothing about the chords depends on this — it
     /// only decides whether the sidebar is currently answering "which one
@@ -508,6 +519,32 @@ struct App {
     geometry_gen: u64,
     next_project_id: u64,
     next_term_id: u64,
+}
+
+/// A sidebar drag from press to release — GTK's DragSource/DropTarget pair
+/// as app state, since iced widgets can neither start a drag nor accept
+/// one. A press on a row opens a CANDIDATE; travelling past
+/// [`dnd::DRAG_THRESHOLD`] makes it a drag (until then a release is a
+/// click, which the row's button handles as usual).
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    /// The row being dragged: (project id, process index / None = header).
+    source: (u64, Option<usize>),
+    /// Window-space press position, for the threshold.
+    origin: iced::Point,
+    /// Pointer offset inside the row and the row's size — the ghost is
+    /// drawn at `pointer - offset`, so it lifts off exactly where the row
+    /// was and stays under the grab point.
+    grab: dnd::Grab,
+    active: bool,
+    /// The slot the pointer is over — a LEGAL target row and which half.
+    /// Illegal rows (another project's process, a process over a header)
+    /// never get here, so no indicator promises a drop that would be
+    /// refused.
+    over: Option<((u64, Option<usize>), dnd::Over)>,
+    /// Pointer distances to the sidebar's visible edges, for auto-scroll;
+    /// None while the pointer is off the list.
+    edges: Option<dnd::Edges>,
 }
 
 /// A right-click's target row: process index, or None for the project
@@ -615,6 +652,30 @@ enum Event {
     },
     /// One frame of the cluster slide-in.
     HoverTick(u64),
+    /// A left press on a sidebar row: a drag candidate (GTK's DragSource
+    /// `prepare`). Becomes a drag once the pointer travels past
+    /// [`dnd::DRAG_THRESHOLD`]; released before that it was a click, and
+    /// the row's button already got it.
+    DragPress {
+        row: (u64, Option<usize>),
+        grab: dnd::Grab,
+    },
+    /// The pointer is over a row's upper (`before`) or lower half while a
+    /// drag is active — GTK's DropTarget `motion`.
+    DragOver {
+        row: (u64, Option<usize>),
+        over: dnd::Over,
+    },
+    /// Pointer distance to the sidebar's visible edges while dragging,
+    /// None off the list.
+    DragEdges(Option<dnd::Edges>),
+    /// One frame of drag auto-scroll.
+    DragTick(u64),
+    /// Left button released anywhere: the drop, or the end of a click.
+    PointerReleased,
+    /// The window lost focus: a held Ctrl comes back up unseen, and a
+    /// drag's release will never arrive.
+    WindowUnfocused,
     /// One frame of the sidebar's collapse/expand glide.
     SidebarTick(u64),
     /// Fixed-interval sample of which agents are producing output.
@@ -655,9 +716,11 @@ enum Event {
     ConfirmProceed,
     AddTerminal(u64),
     ToggleExpanded(u64),
+    /// Keyed by TERMINAL, not entry index: the sidebar can be reordered
+    /// while a backoff runs, and an index would fire the restart — or the
+    /// auto-open below — at whichever row moved into its slot.
     RestartDue {
-        project: u64,
-        index: usize,
+        term: u64,
         generation: u64,
     },
     GitTick,
@@ -712,8 +775,7 @@ enum Event {
         hash: Option<u64>,
     },
     AutoOpenDue {
-        project: u64,
-        index: usize,
+        term: u64,
         generation: u64,
     },
     ComposerChanged(String),
@@ -812,6 +874,9 @@ impl App {
             filter_query: String::new(),
             filter_input: iced::widget::Id::unique(),
             hovered_row: None,
+            drag: None,
+            drag_tick: 0,
+            sidebar_scroll: iced::widget::Id::unique(),
             ctrl_held: false,
             hover_anim: Anim::default(),
             sweep: Sweep::default(),
@@ -1399,7 +1464,6 @@ impl App {
             && project.entries[index].config.category != ProcessCategory::SSH
             && project.entries[index].last_exit == Some(255);
 
-        let project_id = project.id;
         let host = project.location.host().map(String::from);
         let entry = &mut project.entries[index];
 
@@ -1456,16 +1520,15 @@ impl App {
         }
 
         let entry = &mut self.projects[pidx].entries[index];
-        let task = match delay {
-            Some(delay) => {
+        let task = match (delay, entry.term_id) {
+            (Some(delay), Some(term)) => {
                 let generation = entry.restart_generation;
                 Task::perform(tokio::time::sleep(delay), move |_| Event::RestartDue {
-                    project: project_id,
-                    index,
+                    term,
                     generation,
                 })
             }
-            None => Task::none(),
+            _ => Task::none(),
         };
         self.maybe_drop_tunnels(pidx);
         task
@@ -2624,6 +2687,124 @@ impl App {
         Task::none()
     }
 
+    /// Whether the live drag may drop on `target` — GTK's two DropTargets:
+    /// a project lands on another project's HEADER (the target sits on
+    /// `header_row`, so a card's process rows accept nothing), a process on
+    /// another row of the SAME project and category section.
+    fn drop_allowed(&self, target: (u64, Option<usize>)) -> bool {
+        let Some(drag) = &self.drag else {
+            return false;
+        };
+        match (drag.source, target) {
+            ((src, None), (tgt, None)) => src != tgt,
+            ((sp, Some(si)), (tp, Some(ti))) => {
+                sp == tp
+                    && si != ti
+                    && self.project_index(sp).is_some_and(|pidx| {
+                        let entries = &self.projects[pidx].entries;
+                        entries
+                            .get(si)
+                            .zip(entries.get(ti))
+                            .is_some_and(|(a, b)| a.config.category == b.config.category)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// The drop: dispatch on what was dragged (legality was settled while
+    /// aiming — see `drop_allowed`).
+    fn drop(&mut self, source: (u64, Option<usize>), target: (u64, Option<usize>), before: bool) {
+        match (source, target) {
+            ((src, None), (tgt, None)) => self.move_project(src, tgt, before),
+            ((sp, Some(si)), (tp, Some(ti))) if sp == tp => {
+                if let Some(pidx) = self.project_index(sp) {
+                    self.move_process(pidx, si, ti, before);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// GTK's `Workspace::reorder_project`: the MANUAL order is what moves —
+    /// `saved.directories`, the order recent-first sorting falls back on —
+    /// and the sidebar re-sorts by whichever rule is on. With recent-first
+    /// on that is usually no visible change (GTK re-applies the recency
+    /// sort right after the drop for the same reason); the saved order
+    /// still took the move, and shows once the setting is off.
+    fn move_project(&mut self, src: u64, tgt: u64, before: bool) {
+        let key_of = |id| self.project_index(id).map(|i| self.projects[i].key());
+        let (Some(src_key), Some(tgt_key)) = (key_of(src), key_of(tgt)) else {
+            return;
+        };
+        let mut order = self.saved.directories.clone();
+        let (Some(s), Some(t)) = (
+            order.iter().position(|k| k == &src_key),
+            order.iter().position(|k| k == &tgt_key),
+        ) else {
+            return;
+        };
+        let Some(dst) = dnd::drop_index(s, t, before) else {
+            return;
+        };
+        dnd::reorder(&mut order, s, dst);
+        let slot = self
+            .shown_projects()
+            .iter()
+            .position(|&i| self.projects[i].id == tgt);
+        self.saved.reorder_to_match(&order);
+        if self.settings.sidebar.recent_first {
+            self.sort_projects_recent_first();
+        } else {
+            self.sort_projects_manual();
+        }
+        // The pointer stays on the target header's TREE position through
+        // the drop, and iced carries a mouse_area's hover state by
+        // position: the header drawn there now — whichever card the new
+        // order put at that slot — inherits "hovered" without an enter ever
+        // firing, while the old target keeps wearing the cluster wherever
+        // it went. Reconcile by position. A header whose bounds changed
+        // re-evaluates on its own (mouse_area re-checks on a bounds
+        // change), so this only has to be right where nothing moved.
+        if let Some(k) = slot
+            && let Some(&pidx) = self.shown_projects().get(k)
+        {
+            self.hovered_row = Some((self.projects[pidx].id, None));
+        }
+    }
+
+    /// GTK's process drop — `reorder_process` + `save_process_order` — plus
+    /// the index-keyed state that has to follow the rows: the selection and
+    /// an open edit form. The hovered row needs nothing: the pointer stays
+    /// on the target's slot, and whatever the move put there now holds the
+    /// target's old index (pinned in dnd's tests). The two timers that used
+    /// to carry indices are keyed by terminal instead.
+    fn move_process(&mut self, pidx: usize, src: usize, tgt: usize, before: bool) {
+        let Some(dst) = dnd::drop_index(src, tgt, before) else {
+            return;
+        };
+        let project = &mut self.projects[pidx];
+        if src >= project.entries.len() || tgt >= project.entries.len() {
+            return;
+        }
+        dnd::reorder(&mut project.entries, src, dst);
+        project.selected = dnd::remap(project.selected, src, dst);
+        let project_id = project.id;
+        let key = project.key();
+        let order: Vec<String> = project
+            .entries
+            .iter()
+            .map(|e| e.config.name.clone())
+            .collect();
+        if let Some(form) = &mut self.add_command
+            && let Some((id, index)) = form.editing
+            && id == project_id
+        {
+            form.editing = Some((id, dnd::remap(index, src, dst)));
+        }
+        self.saved.set_process_order(&key, order);
+    }
+
     fn entry_for_term(&self, term_id: u64) -> Option<(usize, usize)> {
         for (pidx, project) in self.projects.iter().enumerate() {
             if let Some(eidx) = project
@@ -2683,15 +2864,13 @@ impl App {
             self.open_in_browser(pidx, index);
             Task::none()
         } else if !entry.auto_open_grace {
-            let project_id = project.id;
+            let Some(term) = entry.term_id else {
+                return Task::none();
+            };
             self.projects[pidx].entries[index].auto_open_grace = true;
             let generation = self.projects[pidx].entries[index].restart_generation;
             Task::perform(tokio::time::sleep(AUTO_OPEN_GRACE), move |_| {
-                Event::AutoOpenDue {
-                    project: project_id,
-                    index,
-                    generation,
-                }
+                Event::AutoOpenDue { term, generation }
             })
         } else {
             Task::none()
@@ -3329,17 +3508,113 @@ impl App {
                 if self.hovered_row == Some((project, index)) {
                     self.hovered_row = None;
                 }
+                // Same rule for the drop slot: the pointer left this row for
+                // a gap (or the pane), not for a row that already claimed it.
+                if let Some(drag) = &mut self.drag
+                    && drag.over.is_some_and(|(row, _)| row == (project, index))
+                {
+                    drag.over = None;
+                }
                 Task::none()
             }
             Event::CursorMoved(position) => {
                 self.cursor = position;
+                // A candidate becomes a drag once the pointer has travelled
+                // GTK's threshold; from here the ghost follows the pointer
+                // and the auto-scroll chain runs until the release.
+                if let Some(drag) = &mut self.drag
+                    && !drag.active
+                    && dnd::past_threshold(drag.origin, position)
+                {
+                    drag.active = true;
+                    self.drag_tick += 1;
+                    let generation = self.drag_tick;
+                    return Task::perform(tokio::time::sleep(FRAME), move |_| {
+                        Event::DragTick(generation)
+                    });
+                }
                 Task::none()
             }
             Event::CtrlHeld(down) => {
                 self.ctrl_held = down;
                 Task::none()
             }
+            Event::WindowUnfocused => {
+                // Ctrl+Tab away and the release never arrives; without this
+                // the sidebar comes back still wearing its keycaps — and a
+                // drag in flight would keep its ghost until the next press.
+                self.ctrl_held = false;
+                self.drag = None;
+                Task::none()
+            }
+            Event::DragPress { row, grab } => {
+                // No modal gate needed: a backdrop layer captures the press
+                // before the sensor under it can see one.
+                self.drag = Some(Drag {
+                    source: row,
+                    origin: self.cursor,
+                    grab,
+                    active: false,
+                    over: None,
+                    edges: None,
+                });
+                Task::none()
+            }
+            Event::DragOver { row, over } => {
+                let legal = self.drop_allowed(row);
+                if let Some(drag) = &mut self.drag
+                    && drag.active
+                {
+                    drag.over = legal.then_some((row, over));
+                }
+                Task::none()
+            }
+            Event::DragEdges(edges) => {
+                if let Some(drag) = &mut self.drag {
+                    drag.edges = edges;
+                }
+                Task::none()
+            }
+            Event::PointerReleased => {
+                let Some(drag) = self.drag.take() else {
+                    return Task::none();
+                };
+                if drag.active
+                    && let Some((target, over)) = drag.over
+                {
+                    self.drop(drag.source, target, over.before);
+                }
+                Task::none()
+            }
+            Event::DragTick(generation) => {
+                let Some(drag) = &self.drag else {
+                    return Task::none();
+                };
+                if !drag.active || generation != self.drag_tick {
+                    return Task::none();
+                }
+                let next = Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::DragTick(generation)
+                });
+                let step = dnd::autoscroll_step(drag.edges);
+                if step == 0.0 {
+                    return next;
+                }
+                // Scrolling moves the rows under a still pointer; the row
+                // sensors notice on the redraw this tick triggers and
+                // re-report the slot, so the indicator keeps up.
+                Task::batch([
+                    iced::widget::operation::scroll_by(
+                        self.sidebar_scroll.clone(),
+                        scrollable::AbsoluteOffset { x: 0.0, y: step },
+                    ),
+                    next,
+                ])
+            }
             Event::OpenContextMenu { project, index } => {
+                // A right press mid-drag: the menu is a grab, and the left
+                // release will land under it — drop nothing.
+                self.drag = None;
                 self.context_menu = Some(MenuTarget {
                     project,
                     index,
@@ -3546,12 +3821,8 @@ impl App {
                 }
                 Task::none()
             }
-            Event::RestartDue {
-                project,
-                index,
-                generation,
-            } => {
-                let Some(pidx) = self.project_index(project) else {
+            Event::RestartDue { term, generation } => {
+                let Some((pidx, index)) = self.entry_for_term(term) else {
                     return Task::none();
                 };
                 let due = self.projects[pidx].entries.get(index).is_some_and(|e| {
@@ -3802,12 +4073,8 @@ impl App {
                 }
                 Task::batch(tasks)
             }
-            Event::AutoOpenDue {
-                project,
-                index,
-                generation,
-            } => {
-                let Some(pidx) = self.project_index(project) else {
+            Event::AutoOpenDue { term, generation } => {
+                let Some((pidx, index)) = self.entry_for_term(term) else {
                     return Task::none();
                 };
                 let due = self.projects[pidx]
@@ -4435,6 +4702,11 @@ impl App {
         // confirmation, then a notice on the very top — a notice reports
         // something that already happened, so it outranks a question.
         let mut layers = vec![base];
+        // The lifted row and the drop rule ride above the base while a
+        // drag is active.
+        if self.dragging() {
+            layers.push(self.view_drag_layer());
+        }
         if self.palette_open {
             layers.push(self.view_palette());
         }
@@ -4956,12 +5228,40 @@ impl App {
         SIDEBAR_RAIL + (self.sidebar_width() - SIDEBAR_RAIL) * open
     }
 
+    /// The sidebar filter's query while one is narrowing the list.
+    fn sidebar_filter(&self) -> Option<String> {
+        let query = self.filter_query.trim().to_lowercase();
+        (self.filter_open && !query.is_empty()).then_some(query)
+    }
+
+    /// Whether a card is drawn under the filter: a project matching by
+    /// name keeps all its rows, otherwise it needs a matching process row.
+    fn project_shown(project: &ProjectState, filter: Option<&str>) -> bool {
+        let Some(q) = filter else {
+            return true;
+        };
+        project.name.to_lowercase().contains(q)
+            || project
+                .entries
+                .iter()
+                .any(|e| e.config.name.to_lowercase().contains(q))
+    }
+
+    /// The cards the sidebar draws, in order — the list the view walks, so
+    /// a drop can reconcile the hovered row by tree position.
+    fn shown_projects(&self) -> Vec<usize> {
+        let filter = self.sidebar_filter();
+        (0..self.projects.len())
+            .filter(|&i| Self::project_shown(&self.projects[i], filter.as_deref()))
+            .collect()
+    }
+
     fn view_sidebar(&'_ self) -> Element<'_, Event> {
         // The filter narrows the whole sidebar (GTK semantics): a project
         // matching by name keeps all its rows; otherwise only matching
         // process rows stay, and a project with no match hides entirely.
-        let query = self.filter_query.trim().to_lowercase();
-        let filter = (self.filter_open && !query.is_empty()).then_some(query.as_str());
+        let query = self.sidebar_filter();
+        let filter = query.as_deref();
 
         // Numbered over the whole workspace, not per visible card: a filter
         // hides rows but does not rebind the chords, so the hint a row keeps
@@ -4969,17 +5269,8 @@ impl App {
         let targets = self.switch_targets();
 
         let mut col = column![].spacing(10).padding([12, 10]);
-        for (pidx, project) in self.projects.iter().enumerate() {
-            if let Some(q) = filter {
-                let name_match = project.name.to_lowercase().contains(q);
-                let process_match = project
-                    .entries
-                    .iter()
-                    .any(|e| e.config.name.to_lowercase().contains(q));
-                if !name_match && !process_match {
-                    continue;
-                }
-            }
+        for pidx in self.shown_projects() {
+            let project = &self.projects[pidx];
             col = col.push(self.view_project_block(pidx, project, filter, &targets));
         }
 
@@ -5009,8 +5300,17 @@ impl App {
                 }),
             );
         }
+        // The list root is a drag sensor too: while a drag is active it
+        // reports how close the pointer is to the visible edges, which is
+        // what auto-scroll runs on. Always wrapped, so the tree's shape is
+        // the same with or without a drag.
+        let mut list = dnd::DragArea::new(col);
+        if self.dragging() {
+            list = list.on_track(Event::DragEdges);
+        }
         inner = inner.push(
-            scrollable(col)
+            scrollable(list)
+                .id(self.sidebar_scroll.clone())
                 .direction(scrollable::Direction::Vertical(
                     scrollable::Scrollbar::new().width(4).scroller_width(4),
                 ))
@@ -5059,14 +5359,23 @@ impl App {
         // the project's accent while anything inside is up, alongside the
         // card's border ring. Idle cards keep the plain title.
         let running = project.has_running();
-        let hovered = self.hovered_row == Some((project.id, None));
+        let row_id = (project.id, None);
+        let pointed = self.hovered_row == Some(row_id);
+        let dragging = self.dragging();
+        // No hover chrome under a drag (GTK applies none during DnD): a
+        // pointer crossing rows is aiming, not pointing.
+        let hovered = pointed && !dragging;
+        let slot = self.drop_slot(row_id);
+        let lifted = self.drag_source() == Some(row_id);
+        let title_ink = if running { accent } else { TEXT };
+        let title_ink = if lifted {
+            theme::alpha(title_ink, theme::LIFTED_ALPHA)
+        } else {
+            title_ink
+        };
         let mut title = row![
             icon,
-            clipped_label(text(&project.name).size(13).font(bold()).color(if running {
-                accent
-            } else {
-                TEXT
-            })),
+            clipped_label(text(&project.name).size(13).font(bold()).color(title_ink)),
         ]
         .spacing(9)
         .align_y(iced::Alignment::Center);
@@ -5115,9 +5424,14 @@ impl App {
         }
         // No ✕ here: removing a project lives in the right-click menu
         // behind a confirmation, like GTK.
+        // The wash marks the pointed header — or, under a drag, the header
+        // a drop would land on (GTK's `.drop-target-*` background).
         let header = container(header)
             .width(Length::Fill)
-            .style(theme::project_header(accent, hovered));
+            .style(theme::project_header(
+                accent,
+                pointed && (!dragging || slot.is_some()),
+            ));
         let header = iced::widget::mouse_area(header)
             .on_enter(Event::RowEnter {
                 project: project.id,
@@ -5131,6 +5445,7 @@ impl App {
                 project: project.id,
                 index: None,
             });
+        let header = self.drag_row(header.into(), row_id, slot);
 
         let mut block = column![header].spacing(2);
 
@@ -5209,12 +5524,19 @@ impl App {
         let accent = accent_for(remote);
         let entry = &project.entries[index];
 
-        let dot_color = match entry.status {
-            Status::Running => accent,
-            Status::Stopped => STOPPED,
-            Status::Crashed(_) => CRASHED,
-            Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+        let row_id = (project.id, Some(index));
+        let hovered = self.hovered_row == Some(row_id) && !self.dragging();
+        let slot = self.drop_slot(row_id);
+        let lifted = self.drag_source() == Some(row_id);
+        let selected = pidx == self.active && index == project.selected;
+        let fade = |c: iced::Color| {
+            if lifted {
+                theme::alpha(c, theme::LIFTED_ALPHA)
+            } else {
+                c
+            }
         };
+        let dot_color = fade(dot_color(&entry.status, accent));
         // The light rides the card sweep's phase instead of keeping one of
         // its own: every working row turns in step, and a busy agent still
         // costs exactly one timer no matter how many rows are lit.
@@ -5225,8 +5547,6 @@ impl App {
             .as_deref()
             .unwrap_or(&entry.config.name);
 
-        let hovered = self.hovered_row == Some((project.id, Some(index)));
-
         // GTK hangs the command off the whole row (`set_tooltip_text` in
         // sidebar/process_row.rs); here it rides the NAME instead, because
         // iced opens a parent's card *and* a child's at once where GTK
@@ -5234,12 +5554,26 @@ impl App {
         // lifecycle glyphs, whose tooltips sit at the same edge.
         // The name is the row's Fill element, so that is everything but
         // the dot and the trailing pills anyway.
+        // The lifted row's ink fades like its dot; at rest the button's own
+        // text colour applies (selected or not), so it is only set here
+        // when fading.
+        let label_text = || {
+            let t = text(name).size(12.5);
+            if lifted {
+                t.color(fade(if selected { TEXT } else { TEXT_SECONDARY }))
+            } else {
+                t
+            }
+        };
         let label = match entry.config.command.trim() {
             // A plain terminal carries no command (it spawns a login
             // shell); an empty card is worse than no card.
-            "" => clipped_label(text(name).size(12.5)),
+            "" => clipped_label(label_text()),
+            // Nor mid-drag: rows crossed while aiming would pop their
+            // commands (GTK shows no tooltips during DnD either).
+            _ if self.dragging() => clipped_label(label_text()),
             command => tip_after(
-                clipped_label(text(name).size(12.5)),
+                clipped_label(label_text()),
                 command.to_string(),
                 iced::widget::tooltip::Position::Bottom,
                 // Instant is right for a glyph you had to aim at; this
@@ -5363,7 +5697,6 @@ impl App {
             content = content.push(self.slide_in(cluster));
         }
 
-        let selected = pidx == self.active && index == project.selected;
         let base = button(content)
             .width(Length::Fill)
             .padding([5, 9])
@@ -5373,7 +5706,7 @@ impl App {
                 index,
             });
 
-        iced::widget::mouse_area(base)
+        let area = iced::widget::mouse_area(base)
             .on_enter(Event::RowEnter {
                 project: project.id,
                 index: Some(index),
@@ -5385,8 +5718,170 @@ impl App {
             .on_right_press(Event::OpenContextMenu {
                 project: project.id,
                 index: Some(index),
+            });
+        self.drag_row(area.into(), row_id, slot)
+    }
+
+    /// A drag is past its threshold: the ghost is up and rows are targets.
+    fn dragging(&self) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.active)
+    }
+
+    /// The row a live drag lifted, drawn faded in its seat.
+    fn drag_source(&self) -> Option<(u64, Option<usize>)> {
+        self.drag.as_ref().filter(|d| d.active).map(|d| d.source)
+    }
+
+    /// Which half of `row` the drop indicator marks, if the live drag is
+    /// over it: Some(true) = above, Some(false) = below.
+    fn drop_slot(&self, row: (u64, Option<usize>)) -> Option<bool> {
+        self.drag
+            .as_ref()
+            .filter(|d| d.active)
+            .and_then(|d| d.over)
+            .filter(|(r, _)| *r == row)
+            .map(|(_, over)| over.before)
+    }
+
+    /// A sidebar row wired for drag-and-drop: the press/half sensor around
+    /// it, inside a container that opens GTK's 4px gap on the targeted edge
+    /// (`.drop-target-*`: 2px border + 2px padding). The gap is the half of
+    /// the indicator that survives under the ghost — rows below shift, so
+    /// the slot reads even where the rule itself is covered. The rule is
+    /// drawn in the drag layer (see `view_drag_layer`). Both wrappers are
+    /// ALWAYS in the tree: a wrapper that comes and goes changes the tree's
+    /// shape and resets what it wraps (the overlay-root lesson, per row).
+    fn drag_row<'a>(
+        &'a self,
+        row: Element<'a, Event>,
+        row_id: (u64, Option<usize>),
+        slot: Option<bool>,
+    ) -> Element<'a, Event> {
+        let mut area =
+            dnd::DragArea::new(row).on_press(move |grab| Event::DragPress { row: row_id, grab });
+        if self.dragging() {
+            area = area.on_over(move |over| Event::DragOver { row: row_id, over });
+        }
+        let (top, bottom) = match slot {
+            Some(true) => (DROP_GAP, 0.0),
+            Some(false) => (0.0, DROP_GAP),
+            None => (0.0, 0.0),
+        };
+        container(area)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                top,
+                bottom,
+                left: 0.0,
+                right: 0.0,
             })
             .into()
+    }
+
+    /// The drag layer: the lifted row following the pointer — GTK's drag
+    /// icon (a WidgetPaintable of the row) as a card in the row's own
+    /// colours, sized to the row it left and offset by the grab point, so
+    /// it never jumps at lift-off — with the drop rule above it.
+    fn view_drag_layer(&'_ self) -> Element<'_, Event> {
+        let Some(drag) = self.drag.as_ref().filter(|d| d.active) else {
+            return column![].into();
+        };
+        let Some(pidx) = self.project_index(drag.source.0) else {
+            return column![].into();
+        };
+        let project = &self.projects[pidx];
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
+        let size = drag.grab.size;
+        // The header button pads [2, 4] and a process row [5, 9]; matching
+        // them keeps the ghost's text exactly over where the row's was.
+        let (content, padding): (Element<'_, Event>, iced::Padding) = match drag.source.1 {
+            None => (
+                row![
+                    widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0),
+                    clipped_label(text(&project.name).size(13).font(bold()).color(TEXT)),
+                ]
+                .spacing(9)
+                .align_y(iced::Alignment::Center)
+                .into(),
+                [2, 4].into(),
+            ),
+            Some(index) => {
+                let Some(entry) = project.entries.get(index) else {
+                    return column![].into();
+                };
+                let name = entry
+                    .config
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&entry.config.name);
+                (
+                    row![
+                        status_dot(dot_color(&entry.status, accent), None),
+                        clipped_label(text(name).size(12.5).color(TEXT)),
+                    ]
+                    .spacing(8)
+                    .height(17)
+                    .align_y(iced::Alignment::Center)
+                    .into(),
+                    [5, 9].into(),
+                )
+            }
+        };
+        let card = container(content)
+            .width(size.width)
+            .height(size.height)
+            .padding(padding)
+            .align_y(iced::alignment::Vertical::Center)
+            .style(theme::drag_ghost(accent));
+        let x = (self.cursor.x - drag.grab.offset.x)
+            .min(self.window_size.width - size.width)
+            .max(0.0);
+        let y = (self.cursor.y - drag.grab.offset.y)
+            .min(self.window_size.height - size.height)
+            .max(0.0);
+        let ghost = container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: y,
+                left: x,
+                right: 0.0,
+                bottom: 0.0,
+            });
+        // GTK's 2px accent rule marking the slot, drawn HERE rather than on
+        // the target row: the ghost is grabbed wherever the row was pressed,
+        // so a rule on the row's edge sits under it more often than not.
+        // Placed from the pointer and the offset the row reported, in the
+        // gap the target opened (`drag_row`), in the TARGET's accent.
+        let mut layer = iced::widget::stack![ghost];
+        if let Some((row, over)) = drag.over
+            && let Some(tpidx) = self.project_index(row.0)
+        {
+            let target_accent = accent_for(self.projects[tpidx].location.is_remote());
+            let top = self.cursor.y - over.offset.y;
+            let rule_y = if over.before {
+                top - DROP_GAP + 1.0
+            } else {
+                top + over.size.height + 1.0
+            };
+            let rule = container(column![])
+                .width(over.size.width)
+                .height(2)
+                .style(theme::drop_line(target_accent));
+            layer = layer.push(
+                container(rule)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(iced::Padding {
+                        top: rule_y.max(0.0),
+                        left: (self.cursor.x - over.offset.x).max(0.0),
+                        right: 0.0,
+                        bottom: 0.0,
+                    }),
+            );
+        }
+        layer.into()
     }
 
     /// Eased slide progress (0..1) of the current hover reveal.
@@ -6465,6 +6960,12 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Event::CursorMoved(position))
                 }
+                // A drag ends wherever the button comes up — over the pane,
+                // the ghost, off the list — so the release is read here,
+                // whatever widget captured it.
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Event::PointerReleased),
                 // The keycap reveal. Taken from ModifiersChanged rather than
                 // KeyPressed because a bare modifier is not a key press —
                 // and read regardless of capture status, since the terminal
@@ -6473,9 +6974,9 @@ impl App {
                 iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
                     Some(Event::CtrlHeld(m.control()))
                 }
-                // Ctrl+Tab away and the release never arrives; without this
-                // the sidebar comes back still wearing its keycaps.
-                iced::Event::Window(iced::window::Event::Unfocused) => Some(Event::CtrlHeld(false)),
+                // Focus loss drops held state (keycaps, a drag) — see the
+                // handler.
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Event::WindowUnfocused),
                 _ => None,
             }),
             // exit_on_close_request(false): the close button routes through
@@ -6701,6 +7202,16 @@ fn hline() -> Element<'static, Event> {
 
 /// The sidebar card's group separator: the air under the project header
 /// and between one category's rows and the next.
+/// The sidebar dot's colour for a status (GTK's status-dot classes).
+fn dot_color(status: &Status, accent: iced::Color) -> iced::Color {
+    match status {
+        Status::Running => accent,
+        Status::Stopped => STOPPED,
+        Status::Crashed(_) => CRASHED,
+        Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+    }
+}
+
 fn group_gap() -> Element<'static, Event> {
     container(column![]).height(3).into()
 }

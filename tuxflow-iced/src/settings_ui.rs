@@ -34,13 +34,13 @@ pub enum Page {
 }
 
 const PAGES: &[(Page, &str)] = &[
-    (Page::Appearance, "appearance"),
-    (Page::Sidebar, "sidebar"),
-    (Page::Notifications, "notifications"),
-    (Page::Hotkeys, "hotkeys"),
-    (Page::Tools, "tools"),
-    (Page::Integrations, "integrations"),
-    (Page::About, "about"),
+    (Page::Appearance, "Appearance"),
+    (Page::Sidebar, "Sidebar"),
+    (Page::Notifications, "Notifications"),
+    (Page::Hotkeys, "Hotkeys"),
+    (Page::Tools, "Tools"),
+    (Page::Integrations, "Integrations"),
+    (Page::About, "About"),
 ];
 
 pub struct State {
@@ -160,9 +160,9 @@ pub fn view<'a>(state: &'a State, s: &'a AppSettings) -> Element<'a, Msg> {
     }
 
     let header = row![
-        text("settings").size(16).font(bold()),
+        text("Settings").size(16).font(bold()),
         iced::widget::space::horizontal(),
-        button(text("\u{00d7} close").size(12))
+        button(text("\u{00d7} Close").size(12))
             .padding([5, 12])
             .style(theme::pill_button(theme::accent_for(false)))
             .on_press(Msg::Close),
@@ -207,7 +207,7 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
 
     column![
         group(
-            "theme",
+            "Theme",
             vec![
                 pick_row(
                     "Color Scheme",
@@ -240,7 +240,7 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
             ],
         ),
         group(
-            "terminal",
+            "Terminal",
             vec![
                 pick_row(
                     "Terminal Theme",
@@ -316,7 +316,7 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
 fn page_sidebar<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
     let sb = &s.sidebar;
     column![group(
-        "display",
+        "Display",
         vec![
             switch_row(
                 "Single Project Expand",
@@ -422,12 +422,12 @@ fn page_notifications<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget:
 
     column![
         group(
-            "desktop notifications",
+            "Desktop Notifications",
             vec![
                 row_base(
                     "Send Test",
                     "Fire a sample notification right now",
-                    small_button("send test", Msg::TestNotification),
+                    small_button("Send Test", Msg::TestNotification),
                 ),
                 switch_row(
                     "Process Crash",
@@ -482,7 +482,7 @@ fn page_notifications<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget:
                 ),
             ],
         ),
-        group("sound", sound_rows),
+        group("Sound", sound_rows),
     ]
     .spacing(20)
 }
@@ -496,11 +496,11 @@ fn page_hotkeys<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Colum
                 continue;
             }
             let label: String = if state.capturing == Some(action) {
-                String::from("press a key combo\u{2026}")
+                String::from("Press a key combo\u{2026}")
             } else if let Some((conflicted, holder)) = state.conflict
                 && conflicted == action
             {
-                format!("used by {holder}")
+                format!("Used by {holder}")
             } else {
                 s.keybindings.get(action).to_string()
             };
@@ -540,7 +540,7 @@ fn page_hotkeys<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Colum
             )
             .center_x(Length::Fill),
         )
-        .push(group("fixed shortcuts \u{2014} not changeable", fixed_rows));
+        .push(group("Fixed Shortcuts \u{2014} not changeable", fixed_rows));
     col
 }
 
@@ -555,7 +555,7 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
     };
     column![
         group(
-            "agents",
+            "Agents",
             vec![
                 switch_row(
                     "Message Composer",
@@ -572,7 +572,7 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
             ],
         ),
         group(
-            "default applications",
+            "Default Applications",
             vec![
                 pick_row(
                     "Default Editor",
@@ -611,11 +611,11 @@ fn page_integrations<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::
         rows.push(label_row(name, desc));
     }
 
-    let mut col = column![group("mcp server", rows)].spacing(20);
+    let mut col = column![group("MCP Server", rows)].spacing(20);
 
     for (idx, (title, entries)) in [
-        ("setup: CLI tools", setup::CLI_SETUP),
-        ("setup: IDEs and apps", setup::IDE_SETUP),
+        ("Setup: CLI tools", setup::CLI_SETUP),
+        ("Setup: IDEs and apps", setup::IDE_SETUP),
     ]
     .into_iter()
     .enumerate()
@@ -625,7 +625,7 @@ fn page_integrations<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::
             title,
             "",
             small_button(
-                if open { "hide" } else { "show" },
+                if open { "Hide" } else { "Show" },
                 Msg::ToggleSetup(idx as u8),
             ),
         )];
@@ -636,7 +636,7 @@ fn page_integrations<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::
                     tool,
                     location,
                     small_button(
-                        if copied { "\u{2713} copied" } else { "copy" },
+                        if copied { "\u{2713} Copied" } else { "Copy" },
                         Msg::CopySetup(tool, config),
                     ),
                 ));
@@ -649,14 +649,14 @@ fn page_integrations<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::
 
 fn page_about<'a>() -> iced::widget::Column<'a, Msg> {
     column![group(
-        "tuxflow \u{2014} a Linux-native dev environment manager",
+        "TuxFlow \u{2014} a Linux-native dev environment manager",
         vec![
             label_row("Version", env!("CARGO_PKG_VERSION")),
             label_row("License", "MIT"),
             row_base(
                 "Source Code",
                 "github.com/markovic-nikola/tuxflow",
-                small_button("open", Msg::OpenSource),
+                small_button("Open", Msg::OpenSource),
             ),
         ],
     )]

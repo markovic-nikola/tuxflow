@@ -35,6 +35,11 @@ use crate::workspace::{self, Workspace, WorkspaceRef};
 /// contents and rekeying this registry.
 type ProjectNameCells = Rc<RefCell<HashMap<String, Rc<RefCell<String>>>>>;
 
+// What the bridge may do with the buffer a gesture fetches is decided by
+// core's `ClipRoute` + `tmux_buffer_publishable`, shared with the iced
+// shell so the staleness gates can't drift between them.
+use crate::remote::ClipRoute;
+
 /// Decides which terminal mouse gestures may publish a tmux selection.
 ///
 /// tmux only stores a paste buffer for a drag (`MouseDragEnd1Pane`) or a
@@ -50,18 +55,6 @@ type ProjectNameCells = Rc<RefCell<HashMap<String, Rc<RefCell<String>>>>>;
 /// mouse-tracking apps and a claimed sequence cancels other gestures. So a
 /// click sequence is recognised the way GTK recognises one: same spot, within
 /// the double-click interval.
-/// Why the bridge is fetching a tmux buffer, which decides what it may do
-/// with it — see `tmux_buffer_to_clipboard`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClipRoute {
-    /// A selection gesture just finished in a remote pane. Publishes only a
-    /// buffer tmux made for it, to CLIPBOARD and PRIMARY both.
-    Selection,
-    /// The user pressed copy. Takes the newest buffer at any age — a
-    /// copy-mode `y`, or an OSC 52 the agent in the pane sent.
-    ExplicitCopy,
-}
-
 #[derive(Debug)]
 struct SelectionGesture {
     /// Where and when the last button press landed.
@@ -932,12 +925,6 @@ impl TuxFlowWindow {
     /// second as if it were the first, and the user's clipboard reverted to
     /// scrollback they never selected. Hence `route`.
     fn tmux_buffer_to_clipboard(host: &str, route: ClipRoute, seen: Option<Rc<Cell<u64>>>) {
-        /// How recently tmux must have made a buffer for a selection gesture
-        /// to claim it. Generous next to the ~0.5 s the gesture's own delay
-        /// and ssh round trip cost, but far below the minutes-old buffers
-        /// this exists to reject.
-        const SELECTION_MAX_AGE: Duration = Duration::from_secs(5);
-
         let host = host.to_string();
         crate::util::worker::run(
             move || crate::remote::fetch_tmux_buffer(&host),
@@ -946,23 +933,20 @@ impl TuxFlowWindow {
                     log::debug!("clipboard bridge: no tmux buffer");
                     return;
                 };
-                // A gesture only gets to publish a buffer tmux made *for
-                // that gesture*. An explicit copy asks for the newest buffer
-                // whatever its age — that is also how an agent's OSC 52 copy
-                // is collected, since nothing else knows it happened.
-                if route == ClipRoute::Selection && buf.age > SELECTION_MAX_AGE {
+                // The age and hash gates, shared with the iced shell.
+                let Some(hash) = crate::remote::tmux_buffer_publishable(
+                    &buf,
+                    route,
+                    seen.as_ref().map(|s| s.get()),
+                ) else {
                     log::debug!(
-                        "clipboard bridge: newest buffer is {}s old, not this selection",
+                        "clipboard bridge: not publishing ({}s old, {route:?})",
                         buf.age.as_secs()
                     );
                     return;
-                }
-                let hash = Self::tmux_buffer_hash(&buf.text);
-                if let Some(seen) = seen
-                    && seen.replace(hash) == hash
-                {
-                    log::debug!("clipboard bridge: buffer unchanged");
-                    return;
+                };
+                if let Some(seen) = seen {
+                    seen.set(hash);
                 }
                 let Some(display) = gtk4::gdk::Display::default() else {
                     return;
@@ -980,15 +964,6 @@ impl TuxFlowWindow {
                 }
             },
         );
-    }
-
-    /// Change-detection hash for the tmux clipboard bridge — only stability
-    /// within one app run matters.
-    fn tmux_buffer_hash(text: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        hasher.finish()
     }
 
     fn parse_window_title(title: &str) -> Option<String> {
@@ -1929,7 +1904,7 @@ impl TuxFlowWindow {
                 move || crate::remote::fetch_tmux_buffer(&host),
                 move |buf| {
                     if let Some(buf) = buf {
-                        clip_hash.set(Self::tmux_buffer_hash(&buf.text));
+                        clip_hash.set(crate::remote::fnv64(&buf.text));
                     }
                 },
             );
@@ -2168,9 +2143,8 @@ impl TuxFlowWindow {
                     }
 
                     // Remote: bridge tmux mouse-selections to the local
-                    // PRIMARY selection, where a local terminal's drag-
-                    // selection also lands (see `tmux_buffer_to_selection`
-                    // for why it must stay off CLIPBOARD), and only for
+                    // clipboard — CLIPBOARD and PRIMARY both, exactly where
+                    // a local terminal's drag-selection lands — and only for
                     // gestures that could have made one (`SelectionGesture`).
                     //
                     // EventControllerLegacy, not a gesture: VTE claims mouse

@@ -335,3 +335,28 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     keep priority, and Ctrl+Space / Ctrl+Shift+Space gained their xterm
     NUL rows so the fallback can't type a plain space where a control code
     belongs.
+
+21. **`Action::ReportedSelectionGesture` + the empty-Copy guard** — the
+    copy-on-select hooks. When the pane's application owns the mouse
+    (tmux), every press/drag/release leaves as reports and the widget
+    selects nothing — but the APP may have just selected plenty, out of
+    the widget's sight. The release handler now classifies the finished
+    report gesture the way the embedder's GTK twin does: a drag that
+    crossed a cell boundary (reports are per cell — less movement cannot
+    have begun a selection over there) or a double/triple click (tmux's
+    word/line copies) pushes `Command::ReportedSelectionGesture`, which
+    bounces off the backend as the matching Action; a click that stayed
+    in its cell stays silent, because "publish on any release" is how a
+    stale tmux buffer overwrites a clipboard nobody selected into. Click
+    kinds ride a separate `last_report_click` so report clicks can't
+    chain a widget double-click across a pane switch. The action carries
+    no text on purpose — only the embedder can reach where the app keeps
+    its selections (the newest tmux paste buffer, over ssh, behind age
+    and hash gates). Companion fix: `BindingAction::Copy` no longer
+    writes an EMPTY `selectable_content()` to the clipboard — on a
+    remote pane the selection the user is looking at is tmux's, so the
+    unconditional write clobbered the clipboard with "" on every
+    Ctrl+Shift+C there (patch 15's empty-paste lesson, in the other
+    direction). Copy still never captures, so the chord falls through
+    and the embedder routes it to the tmux buffer when the widget had
+    nothing.

@@ -209,8 +209,9 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
             matches!(event, AlacrittyEvent::Wakeup | AlacrittyEvent::Exit)
         },
         // SelectRelease reads the finished selection; it changes nothing
-        // on screen.
+        // on screen. ReportedSelectionGesture is pure notification.
         backend::Command::SelectRelease
+        | backend::Command::ReportedSelectionGesture
         | backend::Command::ProcessLink(..)
         | backend::Command::MouseReport(..) => false,
     }

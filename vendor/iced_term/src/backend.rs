@@ -58,6 +58,13 @@ pub enum Command {
     /// A selection gesture ended (button release). Extracts the selected
     /// text so the embedder can publish it to PRIMARY.
     SelectRelease,
+    /// A gesture that could have selected ended while the APPLICATION owns
+    /// the mouse: a report-mode drag that crossed a cell boundary, or a
+    /// double/triple report click. The widget selected nothing — every
+    /// event went to the app as reports — so there is no text to carry;
+    /// the embedder is told because only it can reach wherever the app
+    /// keeps its selections (tmux: the newest paste buffer, over ssh).
+    ReportedSelectionGesture,
     /// Find the next scrollback match for a regex (VTE `search_set_regex`
     /// + `search_find_next/previous` parity). A changed pattern restarts
     ///   from the visible edge; a repeated one advances, wrapping around.
@@ -383,6 +390,9 @@ impl Backend {
                 self.process_mouse_report(button, modifiers, point, pressed);
                 return Action::Ignore;
             },
+            Command::ReportedSelectionGesture => {
+                return Action::ReportedSelectionGesture;
+            },
             _ => {},
         }
 
@@ -425,7 +435,9 @@ impl Backend {
             Command::ProcessLink(link_action, point) => {
                 action = self.process_link_action(&term, link_action, point);
             },
-            Command::ProcessAlacrittyEvent(..) | Command::MouseReport(..) => {
+            Command::ProcessAlacrittyEvent(..)
+            | Command::MouseReport(..)
+            | Command::ReportedSelectionGesture => {
                 unreachable!()
             },
         };

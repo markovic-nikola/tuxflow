@@ -153,6 +153,13 @@ memory, rendering under your real workload.
 - **Cleared icon cache**: `rm -rf ~/.cache/tuxflow/icons`, relaunch — a
   remote project's avatar re-fetches instead of staying an initials
   square forever.
+- **Recent-first order** (Settings → Sidebar): with it on, the sidebar
+  is two tiers, live — starting a project moves it to the BOTTOM of the
+  running tier at the top (already-running cards don't shuffle),
+  stopping it slots it in at the top of the stopped tier, and projects
+  you've never started stay at the bottom in manual order. Toggling the
+  setting off goes back to the manual order immediately. Before, the
+  order was computed once at launch and never moved again.
 
 ## Not there yet (deliberate, GTK still covers these)
 

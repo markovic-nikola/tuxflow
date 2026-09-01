@@ -373,6 +373,7 @@ pub fn wrap_remote_command(
 }
 
 /// The newest tmux paste buffer on a host, and how long ago tmux made it.
+#[derive(Debug, Clone)]
 pub struct TmuxBuffer {
     pub text: String,
     /// Age at the moment the host answered. Measured entirely on the host,
@@ -433,6 +434,54 @@ fn parse_tmux_buffer(reply: &str) -> Option<TmuxBuffer> {
         // on the negative.
         age: std::time::Duration::from_secs(now.saturating_sub(created).max(0) as u64),
     })
+}
+
+/// Why the clipboard bridge is fetching a tmux buffer — which decides what
+/// it may do with the answer (see [`tmux_buffer_publishable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipRoute {
+    /// A selection gesture just finished in a remote pane. Publishes only a
+    /// buffer tmux made for that gesture, to CLIPBOARD and PRIMARY both.
+    Selection,
+    /// The user pressed copy. Takes the newest buffer at any age — a
+    /// copy-mode `y`, or an OSC 52 the agent in the pane sent.
+    ExplicitCopy,
+}
+
+/// How recently tmux must have made a buffer for a selection gesture to
+/// claim it. Generous next to the ~0.5 s the gesture's own delay and ssh
+/// round trip cost, but far below the minutes-old buffers this exists to
+/// reject — a false negative silently drops the user's copy, while the race
+/// it guards needs a gesture that selected nothing within this window of a
+/// program's copy.
+pub const SELECTION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Gate a fetched buffer before it touches the local clipboard: `Some` is
+/// "publish, and record this hash as seen". Shared by both shells so the
+/// three staleness gates (gesture, age, hash) can't drift apart — each one
+/// dropped brings back "Ctrl+C sometimes doesn't work" in a different
+/// disguise.
+///
+/// A gesture only gets to publish a buffer tmux made *for that gesture*
+/// (the age gate), and never the same text twice (the hash gate — a second
+/// gesture that selected nothing must not republish the last buffer over a
+/// Ctrl+C the user made elsewhere in between). An explicit copy skips both:
+/// being deliberate, it takes the newest buffer whatever its age, which is
+/// also the only way a copy-mode `y` or an agent's OSC 52 copy is ever
+/// collected. Callers pass `seen: None` on that route.
+pub fn tmux_buffer_publishable(
+    buf: &TmuxBuffer,
+    route: ClipRoute,
+    seen: Option<u64>,
+) -> Option<u64> {
+    if route == ClipRoute::Selection && buf.age > SELECTION_MAX_AGE {
+        return None;
+    }
+    let hash = fnv64(&buf.text);
+    if seen == Some(hash) {
+        return None;
+    }
+    Some(hash)
 }
 
 /// Scrollback of a tmux pane on `host` (joined wrapped lines, last ~2000
@@ -932,6 +981,60 @@ mod tests {
     fn a_backwards_clock_reads_as_brand_new() {
         let buf = parse_tmux_buffer("100 140\nselected").expect("parses");
         assert_eq!(buf.age.as_secs(), 0);
+    }
+
+    fn buffer(text: &str, age_secs: u64) -> TmuxBuffer {
+        TmuxBuffer {
+            text: text.to_string(),
+            age: std::time::Duration::from_secs(age_secs),
+        }
+    }
+
+    /// The age gate: a gesture may only publish a buffer tmux made for it.
+    /// The newest buffer being minutes old means the gesture selected
+    /// nothing — publishing anyway is the "clipboard reverted to text
+    /// nobody selected" bug.
+    #[test]
+    fn selection_route_rejects_old_buffers_explicit_takes_any() {
+        let stale = buffer("an agent copied this", 1200);
+        assert_eq!(
+            tmux_buffer_publishable(&stale, ClipRoute::Selection, None),
+            None
+        );
+        // Explicit copy is deliberate: any age, including the agent's
+        // OSC 52 from an hour ago — that route is how it's collected.
+        assert!(tmux_buffer_publishable(&stale, ClipRoute::ExplicitCopy, None).is_some());
+
+        // At the boundary the selection still wins: the window is loose on
+        // purpose, since a false negative silently drops the user's copy.
+        let boundary = buffer("just selected", SELECTION_MAX_AGE.as_secs());
+        assert!(tmux_buffer_publishable(&boundary, ClipRoute::Selection, None).is_some());
+        assert_eq!(
+            tmux_buffer_publishable(
+                &buffer("just missed", SELECTION_MAX_AGE.as_secs() + 1),
+                ClipRoute::Selection,
+                None
+            ),
+            None
+        );
+    }
+
+    /// The hash gate: a second gesture that selected nothing must not
+    /// republish the previous buffer over a Ctrl+C the user made elsewhere
+    /// in between — that reads as "Ctrl+C sometimes doesn't work".
+    #[test]
+    fn a_seen_buffer_is_not_republished() {
+        let buf = buffer("same drag twice", 1);
+        let hash = tmux_buffer_publishable(&buf, ClipRoute::Selection, None)
+            .expect("fresh buffer publishes");
+        assert_eq!(
+            tmux_buffer_publishable(&buf, ClipRoute::Selection, Some(hash)),
+            None,
+            "recorded hash must suppress the republish"
+        );
+        // New text displaces the record.
+        let other = buffer("a new selection", 1);
+        assert!(tmux_buffer_publishable(&other, ClipRoute::Selection, Some(hash)).is_some());
     }
 
     /// Replayed scrollback is parsed exactly like live output, so an OSC 52

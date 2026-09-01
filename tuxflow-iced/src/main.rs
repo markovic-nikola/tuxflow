@@ -340,6 +340,11 @@ struct ProjectState {
     /// stamping at load would re-date every project and wipe the saved
     /// recency order.
     was_running: bool,
+    /// Hash of the last tmux buffer the clipboard bridge published for
+    /// this project (primed at open with whatever a previous session left
+    /// on the host). The bridge's hash gate — see
+    /// [`remote::tmux_buffer_publishable`].
+    clip_seen: u64,
 }
 
 impl ProjectState {
@@ -668,6 +673,21 @@ enum Event {
         project: u64,
         session_ports: HashMap<String, Vec<u16>>,
     },
+    /// The tmux clipboard bridge answered: the newest paste buffer on the
+    /// project's host, fetched after a selection gesture or an explicit
+    /// copy. The staleness gates run when this lands, not at fetch time.
+    TmuxClipFetched {
+        project: u64,
+        route: remote::ClipRoute,
+        buf: Option<remote::TmuxBuffer>,
+    },
+    /// Startup prime for the bridge's hash gate — whatever buffer a
+    /// previous session left on the host must not be publishable as a
+    /// fresh selection by the first gesture.
+    TmuxClipPrimed {
+        project: u64,
+        hash: Option<u64>,
+    },
     AutoOpenDue {
         project: u64,
         index: usize,
@@ -881,6 +901,7 @@ impl App {
             detected_configs: Vec::new(),
             sweeping: false,
             was_running: false,
+            clip_seen: 0,
             location,
         };
 
@@ -909,9 +930,92 @@ impl App {
             }
             ProjectLocation::Ssh { .. } => {
                 self.projects.push(project);
-                self.probe_task(self.projects.len() - 1)
+                let pidx = self.projects.len() - 1;
+                // The clipboard bridge primes alongside the probe: hash the
+                // buffer a previous session left on the host, so the first
+                // gesture can't publish it as a fresh selection.
+                Task::batch([self.prime_clip_bridge(pidx), self.probe_task(pidx)])
             }
         }
+    }
+
+    /// Prime [`ProjectState::clip_seen`] at open — GTK does the same at
+    /// project load, for the same reason: `fetch_tmux_buffer` always
+    /// answers with the newest buffer on the host, however old, and only
+    /// this hash keeps a leftover one from riding the first gesture.
+    fn prime_clip_bridge(&self, pidx: usize) -> Task<Event> {
+        let Some(host) = self.projects[pidx].location.host().map(String::from) else {
+            return Task::none();
+        };
+        let id = self.projects[pidx].id;
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                let _permit = remote::ssh_permit();
+                remote::fetch_tmux_buffer(&host).map(|b| remote::fnv64(&b.text))
+            }),
+            move |hash| Event::TmuxClipPrimed {
+                project: id,
+                hash: hash.ok().flatten(),
+            },
+        )
+    }
+
+    /// The remote half of copy-on-select: ask the project's host for the
+    /// newest tmux paste buffer. What may be done with the answer is decided
+    /// when [`Event::TmuxClipFetched`] lands — the gates live there (and in
+    /// core), not here.
+    fn fetch_tmux_clip(&self, pidx: usize, route: remote::ClipRoute) -> Task<Event> {
+        let Some(host) = self.projects[pidx].location.host().map(String::from) else {
+            return Task::none();
+        };
+        let id = self.projects[pidx].id;
+        Task::perform(
+            async move {
+                if route == remote::ClipRoute::Selection {
+                    // Give tmux a beat to store the buffer — the gesture's
+                    // release beats `copy-selection` by milliseconds. GTK
+                    // waits the same 150 ms.
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+                tokio::task::spawn_blocking(move || {
+                    let _permit = remote::ssh_permit();
+                    remote::fetch_tmux_buffer(&host)
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            move |buf| Event::TmuxClipFetched {
+                project: id,
+                route,
+                buf,
+            },
+        )
+    }
+
+    /// Ctrl+Shift+C fell through the widget (the fork's Copy never
+    /// captures): GTK's Copy arbitration, ported. The widget answered
+    /// already if it had a selection — with nothing selected in the widget
+    /// on a remote pane, the selection the user is LOOKING at is tmux's,
+    /// and the explicit route takes the newest buffer at any age. That is
+    /// also the only way a copy-mode `y` or an agent's OSC 52 copy is ever
+    /// collected on demand.
+    fn explicit_remote_copy(&self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        if project.location.host().is_none() {
+            return Task::none();
+        }
+        let widget_has_selection = project
+            .entries
+            .get(project.selected)
+            .and_then(|e| e.terminal.as_ref())
+            .is_some_and(|t| !t.backend().selectable_content().is_empty());
+        if widget_has_selection {
+            return Task::none();
+        }
+        self.fetch_tmux_clip(self.active, remote::ClipRoute::ExplicitCopy)
     }
 
     fn project_index(&self, id: u64) -> Option<usize> {
@@ -3548,6 +3652,57 @@ impl App {
                 };
                 self.schedule_poll(pidx)
             }
+            Event::TmuxClipPrimed { project, hash } => {
+                if let Some(pidx) = self.project_index(project)
+                    && let Some(hash) = hash
+                {
+                    self.projects[pidx].clip_seen = hash;
+                }
+                Task::none()
+            }
+            Event::TmuxClipFetched {
+                project,
+                route,
+                buf,
+            } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let Some(buf) = buf else {
+                    log::debug!("clipboard bridge: no tmux buffer");
+                    return Task::none();
+                };
+                // The age and hash gates, shared with GTK through core: a
+                // gesture publishes only a buffer tmux made FOR it, never
+                // the same text twice; the explicit route takes any age
+                // and skips the record, exactly as GTK passes seen: None.
+                let seen = match route {
+                    remote::ClipRoute::Selection => Some(self.projects[pidx].clip_seen),
+                    remote::ClipRoute::ExplicitCopy => None,
+                };
+                let Some(hash) = remote::tmux_buffer_publishable(&buf, route, seen) else {
+                    log::debug!(
+                        "clipboard bridge: not publishing ({}s old, {route:?})",
+                        buf.age.as_secs()
+                    );
+                    return Task::none();
+                };
+                if route == remote::ClipRoute::Selection {
+                    self.projects[pidx].clip_seen = hash;
+                }
+                log::debug!(
+                    "clipboard bridge: copied {} bytes ({route:?})",
+                    buf.text.len()
+                );
+                // A selection belongs in PRIMARY too — that's where a
+                // local drag puts it, so middle-click paste behaves the
+                // same on a remote pane as on a local one.
+                let mut tasks = vec![iced::clipboard::write(buf.text.clone())];
+                if route == remote::ClipRoute::Selection {
+                    tasks.push(iced::clipboard::write_primary(buf.text));
+                }
+                Task::batch(tasks)
+            }
             Event::AutoOpenDue {
                 project,
                 index,
@@ -3684,6 +3839,18 @@ impl App {
                             && (modifiers.shift() || self.remote_agent_selected()) =>
                     {
                         self.paste_image()
+                    }
+                    // The fork's Copy binding never captures: it wrote the
+                    // widget's selection if there was one, and this arm
+                    // covers the pane where there wasn't — on a remote
+                    // project the selection the user SEES is tmux's
+                    // (`explicit_remote_copy` checks both).
+                    iced::keyboard::Key::Character(c)
+                        if c.eq_ignore_ascii_case("c")
+                            && modifiers.control()
+                            && modifiers.shift() =>
+                    {
+                        self.explicit_remote_copy()
                     }
                     _ => Task::none(),
                 }
@@ -4095,7 +4262,22 @@ impl App {
                     }
                     iced_term::actions::Action::Shutdown => self.finalize_exit(pidx, index),
                     iced_term::actions::Action::PublishSelection(text) => {
-                        iced::clipboard::write_primary(text)
+                        // Copy-on-select: a finished widget selection lands
+                        // on CLIPBOARD and PRIMARY both — what GTK's
+                        // selection-changed handler does for local panes,
+                        // and the tmux bridge for remote ones.
+                        Task::batch([
+                            iced::clipboard::write(text.clone()),
+                            iced::clipboard::write_primary(text),
+                        ])
+                    }
+                    iced_term::actions::Action::ReportedSelectionGesture => {
+                        // The pane's app owns the mouse, so the selection
+                        // this gesture made — if any — lives on the HOST
+                        // (tmux's paste buffer). A local pane reporting
+                        // (vim with mouse on) has no host and no bridge;
+                        // fetch_tmux_clip returns none for it.
+                        self.fetch_tmux_clip(pidx, remote::ClipRoute::Selection)
                     }
                     iced_term::actions::Action::OpenUrl(url) => {
                         // Ctrl+click: the terminal shows the HOST's port —

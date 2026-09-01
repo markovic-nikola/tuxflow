@@ -253,6 +253,17 @@ impl<'a> TerminalView<'a> {
         let is_mouse_report = terminal_mode.intersects(TermMode::MOUSE_MODE)
             && !state.keyboard_modifiers.contains(Modifiers::SHIFT);
         let cmd = if is_mouse_report {
+            // The app gets the events, but the release still wants to know
+            // whether this press began a gesture that could have SELECTED
+            // over there — where it landed, and whether it continued a
+            // double/triple click (tmux's word and line copies).
+            let current_click = Click::new(
+                cursor_position,
+                mouse::Button::Left,
+                state.last_report_click,
+            );
+            state.last_report_click = Some(current_click);
+            state.report_press_grid = Some(state.mouse_position_on_grid);
             Command::MouseReport(
                 MouseButton::LeftButton,
                 state.keyboard_modifiers,
@@ -342,6 +353,7 @@ impl<'a> TerminalView<'a> {
         let ended_selection_gesture =
             state.is_dragged && !state.drag_is_mouse_report;
         state.is_dragged = false;
+        let report_press_grid = state.report_press_grid.take();
 
         if state.drag_is_mouse_report
             && terminal_mode.intersects(TermMode::MOUSE_MODE)
@@ -352,6 +364,23 @@ impl<'a> TerminalView<'a> {
                 state.mouse_position_on_grid,
                 false,
             ));
+            // The widget selected nothing — the app got the events. If they
+            // could have made a selection over there (the drag crossed a
+            // cell boundary, or the press continued a double/triple click),
+            // tell the embedder; only it can reach where the app keeps its
+            // selections. A click that stayed in its cell — focusing a
+            // pane, dismissing a menu — moved nothing and stays silent:
+            // treating one as a selection is how a stale buffer gets
+            // republished over what the user actually has on the clipboard.
+            let crossed_cells = report_press_grid
+                .is_some_and(|press| press != state.mouse_position_on_grid);
+            let multi_click = matches!(
+                state.last_report_click.map(|click| click.kind()),
+                Some(mouse::click::Kind::Double | mouse::click::Kind::Triple)
+            );
+            if crossed_cells || multi_click {
+                commands.push(Command::ReportedSelectionGesture);
+            }
         }
         state.drag_is_mouse_report = false;
 
@@ -530,10 +559,17 @@ impl<'a> TerminalView<'a> {
                 }
             },
             BindingAction::Copy => {
-                clipboard.write(
-                    ClipboardKind::Standard,
-                    self.term.backend.selectable_content(),
-                );
+                // Empty means the widget has no selection — on a remote
+                // pane the one the user is LOOKING at lives in tmux, and
+                // writing "" here would clobber the clipboard with nothing
+                // (the Paste arm's lesson, in the other direction). The
+                // chord still falls through either way (Copy never returns
+                // a Command), so the embedder can route it to wherever the
+                // selection actually is.
+                let content = self.term.backend.selectable_content();
+                if !content.is_empty() {
+                    clipboard.write(ClipboardKind::Standard, content);
+                }
             },
             _ => {},
         };
@@ -981,6 +1017,14 @@ struct TerminalViewState {
     is_dragged: bool,
     drag_is_mouse_report: bool,
     last_click: Option<mouse::Click>,
+    /// Click tracking for the REPORT branch, kept apart from `last_click`
+    /// so report clicks can't chain a widget double-click (and vice versa)
+    /// when the slot switches between a reporting and a plain pane.
+    last_report_click: Option<mouse::Click>,
+    /// Grid cell of the last report press. A release on a different cell
+    /// means the drag crossed a cell boundary — the least movement under
+    /// which the app (fed per-cell reports) could have selected anything.
+    report_press_grid: Option<TerminalGridPoint>,
     scroll_pixels: f32,
     keyboard_modifiers: Modifiers,
     size: Size<f32>,
@@ -998,6 +1042,8 @@ impl TerminalViewState {
             is_dragged: false,
             drag_is_mouse_report: false,
             last_click: None,
+            last_report_click: None,
+            report_press_grid: None,
             scroll_pixels: 0.0,
             keyboard_modifiers: Modifiers::empty(),
             size: Size::from([0.0, 0.0]),
@@ -1619,6 +1665,113 @@ mod tests {
             assert!(!commands
                 .iter()
                 .any(|c| matches!(c, Command::SelectRelease)));
+        }
+
+        /// A report drag that crossed a cell boundary is the least gesture
+        /// the app (fed per-cell reports) could have selected under — the
+        /// embedder is told so it can collect the selection from the app's
+        /// side (tmux's paste buffer).
+        #[test]
+        fn report_drag_across_cells_reports_a_selection_gesture() {
+            let mut state = TerminalViewState::new();
+            state.is_dragged = true;
+            state.drag_is_mouse_report = true;
+            state.report_press_grid = Some(TerminalGridPoint {
+                line: Line(2),
+                column: Column(3),
+            });
+            state.mouse_position_on_grid = TerminalGridPoint {
+                line: Line(2),
+                column: Column(9),
+            };
+            let terminal_mode = TermMode::MOUSE_MODE;
+            let bindings = BindingsLayout::new();
+            let mut commands = Vec::new();
+
+            TerminalView::handle_button_released(
+                &mut state,
+                &terminal_mode,
+                &bindings,
+                &mut commands,
+            );
+
+            assert!(commands
+                .iter()
+                .any(|c| matches!(c, Command::ReportedSelectionGesture)));
+            assert!(
+                state.report_press_grid.is_none(),
+                "the press is consumed — one press reports at most once"
+            );
+        }
+
+        /// A plain click in a reporting pane — focusing it, dismissing a
+        /// menu — moved nothing and selected nothing. Reporting it as a
+        /// gesture is how a stale tmux buffer gets republished over the
+        /// user's actual clipboard.
+        #[test]
+        fn report_click_in_place_reports_no_selection_gesture() {
+            let mut state = TerminalViewState::new();
+            state.is_dragged = true;
+            state.drag_is_mouse_report = true;
+            let cell = TerminalGridPoint {
+                line: Line(5),
+                column: Column(7),
+            };
+            state.report_press_grid = Some(cell);
+            state.mouse_position_on_grid = cell;
+            state.last_report_click = Some(Click::new(
+                iced::Point::new(80.0, 40.0),
+                mouse::Button::Left,
+                None,
+            ));
+            let terminal_mode = TermMode::MOUSE_MODE;
+            let bindings = BindingsLayout::new();
+            let mut commands = Vec::new();
+
+            TerminalView::handle_button_released(
+                &mut state,
+                &terminal_mode,
+                &bindings,
+                &mut commands,
+            );
+
+            assert!(!commands
+                .iter()
+                .any(|c| matches!(c, Command::ReportedSelectionGesture)));
+        }
+
+        /// A double click stays in its cell but is a selection gesture all
+        /// the same — tmux's word copy (and triple's line copy) hang off it.
+        #[test]
+        fn report_double_click_in_place_reports_a_selection_gesture() {
+            let mut state = TerminalViewState::new();
+            state.is_dragged = true;
+            state.drag_is_mouse_report = true;
+            let cell = TerminalGridPoint {
+                line: Line(5),
+                column: Column(7),
+            };
+            state.report_press_grid = Some(cell);
+            state.mouse_position_on_grid = cell;
+            let spot = iced::Point::new(80.0, 40.0);
+            let first = Click::new(spot, mouse::Button::Left, None);
+            let second = Click::new(spot, mouse::Button::Left, Some(first));
+            assert!(matches!(second.kind(), mouse::click::Kind::Double));
+            state.last_report_click = Some(second);
+            let terminal_mode = TermMode::MOUSE_MODE;
+            let bindings = BindingsLayout::new();
+            let mut commands = Vec::new();
+
+            TerminalView::handle_button_released(
+                &mut state,
+                &terminal_mode,
+                &bindings,
+                &mut commands,
+            );
+
+            assert!(commands
+                .iter()
+                .any(|c| matches!(c, Command::ReportedSelectionGesture)));
         }
 
         #[test]

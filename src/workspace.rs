@@ -129,10 +129,12 @@ impl Workspace {
         self.saved.directories.clone()
     }
 
-    /// Whether a project (by key) already has a persisted icon — remote
-    /// probes skip the icon fetch when it does.
+    /// Whether a project (by key) already has a persisted icon whose file
+    /// still exists — remote probes skip the icon fetch when it does. The
+    /// existence half matters: fetched icons live in `~/.cache`, and after
+    /// a cleared cache the fetch is the only way the file comes back.
     pub fn has_saved_icon(&self, key: &str) -> bool {
-        self.saved.get_icon(key).is_some()
+        icon_detector::has_usable_saved_icon(&self.saved, key)
     }
 
     /// Prepare a project for loading: detect stacks but don't add detected processes yet.

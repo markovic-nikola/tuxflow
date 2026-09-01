@@ -60,12 +60,20 @@ fn list_remote_raw(
     limit: u32,
 ) -> Vec<String> {
     // Quote the typed prefix but leave the glob star outside the quotes so
-    // the remote shell expands it. -d: don't descend, -p: mark dirs with '/'.
+    // the remote shell expands it. -d: don't descend, -p: mark dirs with
+    // '/', -L: mark a symlink by its TARGET's type — without it `-d` lstats
+    // and a symlink to a directory loses its '/', so the grep drops it while
+    // the local twin (whose `is_dir()` follows links) offers it. The sort is
+    // explicit and C-collated because the ORDER here is the remote shell's
+    // glob expansion under the host's locale, which en_US-sorts case-
+    // insensitively; with more matches than `limit`, a collation mismatch
+    // against the local twin's byte-order sort keeps a different SET, not
+    // just a different order.
     let filter = remote_filter
         .map(|pat| format!(" | grep -iE {}", sh_quote(pat)))
         .unwrap_or_default();
     let cmd = format!(
-        "ls -1dp -- {}* 2>/dev/null{filter} | head -n {limit}",
+        "ls -1dpL -- {}* 2>/dev/null{filter} | LC_ALL=C sort | head -n {limit}",
         sh_quote(prefix)
     );
     let out = Command::new("ssh")
@@ -79,6 +87,11 @@ fn list_remote_raw(
         Ok(o) => String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter(|l| l.starts_with('/'))
+            // Typing a trailing dot globs `.*`, and the shell expands that
+            // to `.` and `..` as well — real completions locally never
+            // contain either (read_dir yields neither), so parity says
+            // drop them here too.
+            .filter(|l| !l.ends_with("/./") && !l.ends_with("/../"))
             .map(str::to_string)
             .collect(),
         Err(_) => Vec::new(),
@@ -127,8 +140,8 @@ pub fn list_local_dirs(prefix: &str) -> Vec<String> {
             if partial.is_empty() && name.starts_with('.') {
                 return false;
             }
-            // `ls -p` marks by the resolved type, so a symlink to a
-            // directory is a directory here too.
+            // `is_dir()` follows symlinks, matching the remote command's
+            // `-L`: a symlink to a directory is a directory on both halves.
             e.path().is_dir()
         })
         .map(|e| format!("{}{}/", parent, e.file_name().to_string_lossy()))

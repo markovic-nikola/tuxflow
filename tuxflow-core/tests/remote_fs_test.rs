@@ -455,4 +455,55 @@ mod list_local_dirs {
         assert!(list_local_dirs("alpha").is_empty());
         assert!(list_local_dirs("/nonexistent-zz/xx").is_empty());
     }
+
+    /// A symlink to a directory is offered as one — people symlink their
+    /// project roots. The remote command carries `-L` for the same reason;
+    /// without it `ls -d` lstats the link, prints no trailing '/', and the
+    /// two halves diverge on exactly the layout symlinks are used for.
+    #[test]
+    fn a_symlink_to_a_directory_is_offered() {
+        let tmp = fixture();
+        std::os::unix::fs::symlink(tmp.path().join("beta"), tmp.path().join("gamma-link")).unwrap();
+        // A symlink to a FILE stays excluded, like the file itself.
+        std::os::unix::fs::symlink(tmp.path().join("alpha.txt"), tmp.path().join("file-link"))
+            .unwrap();
+
+        let got = list_local_dirs(&format!("{}/", tmp.path().display()));
+        assert!(
+            got.iter().any(|p| p.ends_with("/gamma-link/")),
+            "symlinked dir missing: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|p| p.contains("file-link")),
+            "symlinked file offered: {got:?}"
+        );
+    }
+
+    /// The cap and the order decide together which entries survive a big
+    /// directory, so both are pinned: byte-order sort (the remote pipeline
+    /// C-collates for the same reason), then the first ten. A collation
+    /// mismatch with more matches than the cap keeps a different SET, not
+    /// just a different ordering.
+    #[test]
+    fn caps_at_ten_after_a_byte_order_sort() {
+        let tmp = TempDir::new().unwrap();
+        // "Zeta" sorts before "apple" in byte order (uppercase first) —
+        // an en_US collation would bury it under the lowercase run.
+        for dir in [
+            "Zeta", "apple", "banana", "cherry", "date", "elder", "fig", "grape", "kiwi", "lemon",
+            "mango", "olive",
+        ] {
+            std::fs::create_dir(tmp.path().join(dir)).unwrap();
+        }
+        let got = list_local_dirs(&format!("{}/", tmp.path().display()));
+        assert_eq!(got.len(), 10, "cap: {got:?}");
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(got, sorted, "not fully sorted: {got:?}");
+        assert!(got[0].ends_with("/Zeta/"), "byte order: {got:?}");
+        assert!(
+            !got.iter().any(|p| p.ends_with("/olive/")),
+            "cap kept the wrong tail: {got:?}"
+        );
+    }
 }

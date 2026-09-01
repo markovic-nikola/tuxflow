@@ -371,6 +371,11 @@ struct ProcessForm {
     /// Some((project id, entry index)) when editing an existing process.
     editing: Option<(u64, usize)>,
     original_category: ProcessCategory,
+    /// Why the last submit was refused (duplicate name, empty fields).
+    /// Cleared on the next edit of any text field — a refusal with no
+    /// message is a dead button, and taking the form down with everything
+    /// typed in it is worse.
+    error: Option<String>,
 }
 
 struct App {
@@ -390,13 +395,21 @@ struct App {
     /// wants the whole window, and GTK's dialog opens at the parent's
     /// full size for the same reason.
     git_ui: Option<git_view::State>,
-    /// A one-click status-bar sync (fetch + ff-pull + push) is in flight.
-    /// The chip's counters hide while it runs: showing the pre-sync
-    /// numbers next to a spinner reads as "the sync did nothing".
-    git_syncing: bool,
+    /// Projects with a one-click status-bar sync (fetch + ff-pull + push)
+    /// in flight, by project id. The chip's counters hide while its own
+    /// project syncs: showing the pre-sync numbers next to a spinner reads
+    /// as "the sync did nothing". Keyed rather than a bare bool because a
+    /// remote sync takes seconds and the user can switch projects under
+    /// it — an unkeyed flag put "syncing…" on project B's chip and hung
+    /// B's repo name on A's failure notice.
+    git_syncing: std::collections::HashSet<u64>,
     /// Identifies the open Git Changes view's poll chain, so a rapid
     /// close-and-reopen doesn't leave two of them polling one view.
     git_tick_stamp: u64,
+    /// Seed for each add-project form's generation stamps, strided so no
+    /// two form instances ever share a stamp value — an in-flight listing
+    /// or probe outlives its form, and must not be accepted by the next one.
+    add_form_epoch: u64,
     /// A (heading, body) message awaiting an OK — GTK's AlertDialog for
     /// things that failed but need no decision.
     notice: Option<(String, String)>,
@@ -609,7 +622,10 @@ enum Event {
     },
     /// Status-bar sync chip: fetch, ff-pull if behind, push if ahead.
     GitSync,
-    GitSynced(Result<(), String>),
+    GitSynced {
+        project: u64,
+        result: Result<(), String>,
+    },
     /// Status-bar changes chip → the Git Changes view.
     OpenGitChanges,
     GitMsg(git_view::Msg),
@@ -702,8 +718,9 @@ impl App {
             app_keys: AppKeys::from_settings(&settings.keybindings),
             settings_ui: None,
             git_ui: None,
-            git_syncing: false,
+            git_syncing: std::collections::HashSet::new(),
             git_tick_stamp: 0,
+            add_form_epoch: 0,
             notice: None,
             composer: String::new(),
             sidebar_visible: true,
@@ -886,9 +903,13 @@ impl App {
         ) else {
             return Task::none();
         };
-        // A project that already has an icon skips the fetch entirely — it is
-        // a second ssh round trip, and the saved path wins over it anyway.
-        let fetch_icon = self.saved.get_icon(&self.projects[pidx].key()).is_none();
+        // A project whose saved icon still exists skips the fetch entirely —
+        // it is a second ssh round trip, and the saved path wins over it
+        // anyway. Existence-aware on purpose: fetched icons live in
+        // ~/.cache, and after a cleared cache the fetch is the only way the
+        // file comes back.
+        let fetch_icon =
+            !icon_detector::has_usable_saved_icon(&self.saved, &self.projects[pidx].key());
         Task::perform(
             tokio::task::spawn_blocking(move || {
                 remote::probe::probe_remote(&host, &dir, true)
@@ -1153,7 +1174,12 @@ impl App {
             open_in_browser: entry.config.open_in_browser,
             editing: Some((project.id, index)),
             original_category: entry.config.category.clone(),
+            error: None,
         });
+        // The two add forms are mutually exclusive, as GTK's modal dialogs
+        // are — the main pane can only show one, and a form left standing
+        // underneath swallows the first Esc invisibly.
+        self.add_project = None;
     }
 
     /// Stop and remove a process: drop its custom-command copy AND record
@@ -1254,7 +1280,7 @@ impl App {
             }
             Status::Reconnecting(_) if !entry.outage_notified => {
                 entry.outage_notified = true;
-                notify::disconnect(&project_name, &name);
+                notify::disconnect(&self.settings.notifications, &project_name, &name);
             }
             Status::Stopped if !stopping_was => {
                 notify::finish(&self.settings.notifications, &project_name, &name)
@@ -1312,28 +1338,33 @@ impl App {
     /// One click, and every failure mode lands in a notice rather than
     /// silently leaving the counters wrong.
     fn start_git_sync(&mut self) -> Task<Event> {
-        let Some(location) = self.active_project().map(|p| p.location.clone()) else {
+        let Some((id, location)) = self.active_project().map(|p| (p.id, p.location.clone())) else {
             return Task::none();
         };
-        if self.git_syncing {
+        if !self.git_syncing.insert(id) {
             return Task::none();
         }
-        self.git_syncing = true;
         Task::perform(
             tokio::task::spawn_blocking(move || {
                 tuxflow_core::remote::git::sync_with_remote(&location)
             }),
-            |joined| Event::GitSynced(joined.unwrap_or_else(|e| Err(e.to_string()))),
+            move |joined| Event::GitSynced {
+                project: id,
+                result: joined.unwrap_or_else(|e| Err(e.to_string())),
+            },
         )
     }
 
     /// GTK opens an AlertDialog here; the notice card is this shell's
-    /// equivalent — one message, one OK.
-    fn notify_git_failure(&mut self, heading: &str, detail: &str) {
+    /// equivalent — one message, one OK. Returns the modal grab (see
+    /// `ConfirmRequest`) — run it, or keys keep reaching the terminal
+    /// under the card.
+    fn notify_git_failure(&mut self, heading: &str, detail: &str) -> Task<Event> {
         self.notice = Some((
             heading.to_string(),
             format!("{detail}\n\nOpen Git Changes to resolve it manually."),
         ));
+        TerminalView::unfocus()
     }
 
     /// Open the Git Changes view on the active project, seeded from what
@@ -1399,6 +1430,7 @@ impl App {
         let generation = state.generation;
         state.diff_loading = true;
         let location = state.location.clone();
+        let path = file.path.clone();
         Task::perform(
             tokio::task::spawn_blocking(move || {
                 tuxflow_core::remote::git::load_diff(&location, &file)
@@ -1406,6 +1438,7 @@ impl App {
             move |joined| {
                 Event::GitMsg(git_view::Msg::Diff {
                     generation,
+                    path: path.clone(),
                     diff: Box::new(joined.unwrap_or_default()),
                 })
             },
@@ -1462,7 +1495,6 @@ impl App {
         }
         state.busy = Some(action);
         state.error = None;
-        let generation = state.generation;
         let location = state.location.clone();
         Task::perform(
             tokio::task::spawn_blocking(move || {
@@ -1475,7 +1507,6 @@ impl App {
             }),
             move |joined| {
                 Event::GitMsg(git_view::Msg::Done {
-                    generation,
                     action,
                     result: joined.unwrap_or_else(|e| Err(e.to_string())),
                 })
@@ -1527,9 +1558,11 @@ impl App {
                         state.busy = None;
                     }
                 }
-                // Whichever way we went, a probe requested from the stage we
-                // just left must not land on the one we are now on.
+                // Whichever way we went, a probe or a listing requested from
+                // the stage we just left must not land on the one we are now
+                // on.
                 state.probe_stamp += 1;
+                state.stamp += 1;
                 Task::none()
             }
             Msg::Pick(kind) => {
@@ -1877,9 +1910,19 @@ impl App {
                     });
                 self.git_load_diff()
             }
-            Msg::Diff { generation, diff } => {
+            Msg::Diff {
+                generation,
+                path,
+                diff,
+            } => {
+                // Generation gates cross-reload staleness (same file, older
+                // content); the path gates same-generation staleness (two
+                // quick clicks — SelectFile shares the list's generation).
+                // A dropped arrival leaves diff_loading alone: whichever
+                // newer load superseded this one is still on its way.
                 if let Some(state) = &mut self.git_ui
                     && state.generation == generation
+                    && state.selected_file().map(|f| f.path.as_str()) == Some(path.as_str())
                 {
                     state.diff_loading = false;
                     state.diff = Some(*diff);
@@ -1917,15 +1960,18 @@ impl App {
                     Task::none()
                 }
             }
-            Msg::Done {
-                generation,
-                action,
-                result,
-            } => {
+            Msg::Done { action, result } => {
                 let Some(state) = &mut self.git_ui else {
                     return Task::none();
                 };
-                if state.generation != generation {
+                // Gate on the busy flag, not the generation: only one write
+                // action is ever in flight, so "the action I'm waiting for"
+                // is the exact question — while a generation gate let ANY
+                // list reload (Refresh, or a mid-commit hash change on the
+                // 2 s tick) orphan `busy` and wedge the view in "Pushing…"
+                // with every button disabled. A Done surviving from a
+                // closed-and-reopened view finds busy == None and drops.
+                if state.busy != Some(action) {
                     return Task::none();
                 }
                 state.busy = None;
@@ -2457,7 +2503,14 @@ impl App {
                 );
                 if let (Some(sx), Some(sy), Some(actual), false) = (w.x, w.y, actual, w.maximized) {
                     let (dx, dy) = (actual.x - sx as f32, actual.y - sy as f32);
-                    if dx != 0.0 || dy != 0.0 {
+                    // Only correct frame-sized deltas. A large one means the
+                    // WM CLAMPED the restore (saved position from a monitor
+                    // that is gone, or a settings file that traveled between
+                    // machines) or the user is already dragging — mirroring
+                    // that delta would shove the window off-screen in the
+                    // opposite direction, and WMs honor explicit moves.
+                    let frame_sized = dx.abs() <= 100.0 && dy.abs() <= 100.0;
+                    if (dx != 0.0 || dy != 0.0) && frame_sized {
                         log::info!("restore correction: delta ({dx},{dy})");
                         return iced::window::move_to(
                             id,
@@ -2469,6 +2522,11 @@ impl App {
             }
             Event::OpenSettings => {
                 self.settings_ui = Some(settings_ui::State::new(&self.settings));
+                // Symmetric with `open_git_changes` clearing settings_ui:
+                // "what is the main area showing?" stays a single answer,
+                // and a hidden Git view would keep its 2 s (possibly ssh)
+                // poll chain running blind underneath.
+                self.git_ui = None;
                 Task::none()
             }
             Event::ToggleSidebar => self.set_sidebar(!self.sidebar_visible),
@@ -2661,15 +2719,29 @@ impl App {
                     index,
                     at: self.cursor,
                 });
-                Task::none()
+                // A modal grab, done the only way a Stack layer can: layers
+                // don't capture keyboard events, so a focused terminal
+                // underneath would keep eating them — Esc meant for the
+                // menu reaches a running agent as "interrupt". Dismissal
+                // refocuses.
+                TerminalView::unfocus()
             }
             Event::CloseContextMenu => {
                 self.context_menu = None;
-                Task::none()
+                self.focus_selected_terminal()
             }
             Event::MenuAction(inner) => {
                 self.context_menu = None;
-                self.update(*inner)
+                let task = self.update(*inner);
+                // Hand focus back unless the action raised the next modal
+                // layer itself (Remove Project / Delete Command open the
+                // confirm card) — refocusing under THAT would re-open the
+                // key leak the unfocus exists to stop.
+                if self.confirm.is_none() && self.notice.is_none() {
+                    Task::batch([task, self.focus_selected_terminal()])
+                } else {
+                    task
+                }
             }
             Event::CopyText(text) => iced::clipboard::write(text),
             Event::OpenInEditor(project) => {
@@ -2726,11 +2798,13 @@ impl App {
             }
             Event::ConfirmRequest(action) => {
                 self.confirm = Some(action);
-                Task::none()
+                // Same modal grab as the context menu: keys must answer the
+                // card, not the shell at the prompt underneath it.
+                TerminalView::unfocus()
             }
             Event::ConfirmCancel => {
                 self.confirm = None;
-                Task::none()
+                self.focus_selected_terminal()
             }
             Event::ConfirmProceed => {
                 match self.confirm.take() {
@@ -2746,7 +2820,7 @@ impl App {
                     }
                     None => {}
                 }
-                Task::none()
+                self.focus_selected_terminal()
             }
             Event::HoverTick(generation) => {
                 if self.hovered_row.is_none() || !self.hover_anim.tick(generation, HOVER_SLIDE_MS) {
@@ -2867,19 +2941,36 @@ impl App {
                 Task::none()
             }
             Event::GitSync => self.start_git_sync(),
-            Event::GitSynced(result) => {
-                self.git_syncing = false;
+            Event::GitSynced { project, result } => {
+                self.git_syncing.remove(&project);
+                let active = self.active_project().map(|p| p.id) == Some(project);
+                let mut tasks = Vec::new();
                 if let Err(detail) = result {
-                    self.notify_git_failure("Sync Failed", &detail);
+                    // A failure surfaces even if the user has moved on, but
+                    // then it must say WHOSE sync failed — an unattributed
+                    // notice reads as the active project's, and its "resolve
+                    // it manually" hint would open the wrong repo.
+                    let heading = match (active, self.project_index(project)) {
+                        (false, Some(pidx)) => {
+                            format!("Sync Failed \u{2014} {}", self.projects[pidx].name)
+                        }
+                        _ => String::from("Sync Failed"),
+                    };
+                    tasks.push(self.notify_git_failure(&heading, &detail));
                 }
                 // Repaint the counters from what the sync actually left
-                // behind, not from what we assumed it would.
-                self.poll_git()
+                // behind, not from what we assumed it would. poll_git reads
+                // the ACTIVE project, so only fire it while that is still
+                // the synced one — otherwise the on-switch poll covers it.
+                if active {
+                    tasks.push(self.poll_git());
+                }
+                Task::batch(tasks)
             }
             Event::OpenGitChanges => self.open_git_changes(),
             Event::NoticeDismiss => {
                 self.notice = None;
-                Task::none()
+                self.focus_selected_terminal()
             }
             Event::GitMsg(msg) => self.update_git_view(msg),
             Event::ClearTerminal => {
@@ -3002,15 +3093,15 @@ impl App {
                 ) {
                     if self.notice.is_some() {
                         self.notice = None;
-                        return Task::none();
+                        return self.focus_selected_terminal();
                     }
                     if self.confirm.is_some() {
                         self.confirm = None;
-                        return Task::none();
+                        return self.focus_selected_terminal();
                     }
                     if self.context_menu.is_some() {
                         self.context_menu = None;
-                        return Task::none();
+                        return self.focus_selected_terminal();
                     }
                     if self.settings_ui.is_some() {
                         self.settings_ui = None;
@@ -3035,6 +3126,15 @@ impl App {
                         self.add_command = None;
                         return self.focus_selected_terminal();
                     }
+                }
+                // While a modal layer is up, the remaining chords stay
+                // dead: they act on the SELECTION, and reordering or
+                // closing processes under a "Delete 'dev'?" card silently
+                // retargets what Proceed is about to delete. GTK's popover
+                // and AlertDialog are grabs; this is that grab's keyboard
+                // half (the unfocus on raise is the terminal half).
+                if self.notice.is_some() || self.confirm.is_some() || self.context_menu.is_some() {
+                    return Task::none();
                 }
                 // Palette navigation first (its input consumes typing but
                 // not Esc/arrows).
@@ -3214,7 +3314,19 @@ impl App {
             Event::OpenAddProject => {
                 // The host list is read once per raise, not per frame — it is
                 // a file read, and the picker is rebuilt on every keystroke.
-                self.add_project = Some(add_project::State::new(ssh::parse_ssh_config()));
+                //
+                // The epoch stride keeps this instance's stamps disjoint from
+                // every earlier one's: in-flight listings and probes outlive
+                // a closed form, and with counters restarting at 0 a reopened
+                // form would accept the abandoned instance's replies as its
+                // own — up to and including a Configure stage for the
+                // previously typed project.
+                self.add_form_epoch += 1 << 32;
+                self.add_project = Some(add_project::State::new(
+                    ssh::parse_ssh_config(),
+                    self.add_form_epoch,
+                ));
+                self.add_command = None;
                 Task::none()
             }
             Event::AddProjectMsg(msg) => self.update_add_project(msg),
@@ -3242,7 +3354,11 @@ impl App {
                     } else {
                         ProcessCategory::Command
                     },
+                    error: None,
                 });
+                // Mutually exclusive with the add-project pane (see
+                // `open_edit_form`).
+                self.add_project = None;
                 if switched {
                     self.poll_git()
                 } else {
@@ -3299,6 +3415,7 @@ impl App {
                     // fill, so clearing it and picking another agent works.
                     form.name_touched = !value.trim().is_empty();
                     form.name = value;
+                    form.error = None;
                 }
                 Task::none()
             }
@@ -3320,6 +3437,7 @@ impl App {
             Event::AddCommandCommand(value) => {
                 if let Some(form) = &mut self.add_command {
                     form.command = value;
+                    form.error = None;
                 }
                 Task::none()
             }
@@ -3342,6 +3460,8 @@ impl App {
                     };
                     let command = form.command.trim();
                     if command.is_empty() {
+                        let mut form = form;
+                        form.error = Some(String::from("A command is required."));
                         self.add_command = Some(form);
                         return Task::none();
                     }
@@ -3363,16 +3483,24 @@ impl App {
                 }
                 let (name, command) = (form.name.trim().to_string(), form.command.trim());
                 if name.is_empty() || command.is_empty() {
+                    let mut form = form;
+                    form.error = Some(String::from("A name and a command are both required."));
                     self.add_command = Some(form);
                     return Task::none();
                 }
                 let pidx = self.active;
-                if self.projects.get(pidx).is_none()
-                    || self.projects[pidx]
-                        .entries
-                        .iter()
-                        .any(|e| e.config.name == name)
-                {
+                let Some(project) = self.projects.get(pidx) else {
+                    // No project to add to — nothing the form can do.
+                    return Task::none();
+                };
+                if project.entries.iter().any(|e| e.config.name == name) {
+                    // Refuse, but KEEP the form: taking it down here threw
+                    // away everything typed, with no hint why.
+                    let mut form = form;
+                    form.error = Some(format!(
+                        "A process named \u{201c}{name}\u{201d} already exists in this project."
+                    ));
+                    self.add_command = Some(form);
                     return Task::none();
                 }
                 let wd = form.working_dir.trim();
@@ -3412,7 +3540,19 @@ impl App {
 
                 let mut side_task = Task::none();
                 let mut rescan = false;
-                if let BackendCommand::ProcessAlacrittyEvent(ev) = &cmd {
+                if let BackendCommand::ProcessAlacrittyEvent(run, ev) = &cmd {
+                    // A terminal spans runs, so the queue can still hold a
+                    // PREVIOUS run's events — most damagingly its ChildExit/
+                    // Exit, parked there when a child died right as the user
+                    // hit restart. Unstamped, that flipped the fresh run to
+                    // Crashed and fed a crash banner into its running grid.
+                    let current = self.projects[pidx].entries[index]
+                        .terminal
+                        .as_ref()
+                        .map(|t| t.backend().run_generation());
+                    if current != Some(*run) {
+                        return Task::none();
+                    }
                     match ev {
                         AEvent::Wakeup => {
                             rescan = true;
@@ -4875,6 +5015,9 @@ impl App {
                     .text_size(12.5),
             );
         }
+        if let Some(error) = &form.error {
+            col = col.push(text(error).size(12).color(CRASHED));
+        }
 
         let mut buttons = row![
             button(
@@ -5065,17 +5208,21 @@ impl App {
     /// branch as well as a repo — a detached HEAD has nothing to pull to
     /// or push from, so the whole chip goes away.
     fn view_git_sync_chip(&'_ self) -> Option<Element<'_, Event>> {
-        let git = self.active_project()?.git.as_ref()?;
+        let project = self.active_project()?;
+        let git = project.git.as_ref()?;
         if git.branch.is_empty() || git.branch == "(detached)" {
             return None;
         }
+        // THIS project's sync, not anyone's: a sync started on another card
+        // must not dress this chip in a spinner it didn't ask for.
+        let syncing = self.git_syncing.contains(&project.id);
 
         let mut content = row![text(format!("\u{2387} {}", git.branch)).size(10.5)]
             .spacing(5)
             .align_y(iced::Alignment::Center);
         // While a sync runs the counters stand down: the pre-sync numbers
         // sitting next to "syncing…" read as "the sync did nothing".
-        if self.git_syncing {
+        if syncing {
             content = content.push(text("syncing\u{2026}").size(10.5).color(DIM));
         } else {
             if git.behind > 0 {
@@ -5095,7 +5242,7 @@ impl App {
         }
 
         let hint = match (git.ahead, git.behind) {
-            _ if self.git_syncing => String::from("Syncing\u{2026}"),
+            _ if syncing => String::from("Syncing\u{2026}"),
             (0, 0) => String::from("Pull & Push (in sync \u{2014} click to fetch)"),
             (a, 0) => format!("Pull & Push ({a} to push)"),
             (0, b) => format!("Pull & Push ({b} to pull)"),
@@ -5105,7 +5252,7 @@ impl App {
         let mut chip = button(content)
             .padding([3, 9])
             .style(theme::pill_button(TEXT_SECONDARY));
-        if !self.git_syncing {
+        if !syncing {
             chip = chip.on_press(Event::GitSync);
         }
         Some(tip(chip.into(), hint, iced::widget::tooltip::Position::Top))
@@ -5466,7 +5613,7 @@ impl App {
     /// saved while we ran — don't clobber its edits), then write only the
     /// window geometry. A maximized close keeps the last normal size and
     /// position on disk, so unmaximizing after relaunch restores them.
-    fn save_window_state(&self, maximized: bool, position: Option<iced::Point>) {
+    fn save_window_state(&mut self, maximized: bool, position: Option<iced::Point>) {
         let mut settings = tuxflow_core::config::settings::AppSettings::load();
         settings.window.maximized = maximized;
         if !maximized {
@@ -5478,6 +5625,13 @@ impl App {
                 settings.window.y = Some(pos.y as i32);
             }
         }
+        // Mirror into the LIVE settings too. Every settings toggle and font
+        // change saves the whole struct, and `self.settings.window` was
+        // populated once at launch — without the mirror, the first toggle
+        // after a move/resize wrote the launch-time geometry back over what
+        // the debounced saves had recorded, exactly the loss the debounce
+        // exists to prevent (cargo watch kills without a close).
+        self.settings.window = settings.window.clone();
         settings.save();
     }
 

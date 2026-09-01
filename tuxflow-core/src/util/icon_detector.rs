@@ -119,6 +119,16 @@ pub fn detect_icon(project_dir: &Path) -> Option<String> {
 /// scans its own disk while a remote one takes `hint` — the file its probe
 /// already fetched into `~/.cache/tuxflow/icons/`.
 ///
+/// A saved path only wins while its file still EXISTS. Every saved icon is
+/// a local path — remote picks are downloaded by `cache_remote_icon` before
+/// being saved — and the fetched ones all live under `~/.cache`, which the
+/// user may clear at any time. Honoring a dead entry would pin the initials
+/// square forever: it also suppresses the probe's re-fetch (see
+/// [`has_usable_saved_icon`]), so nothing ever writes the file back. Falling
+/// through re-detects instead, and the dead entry stands until something
+/// better overwrites it — deliberately not cleared, so one unlucky launch
+/// can't discard a hand-picked path that might reappear.
+///
 /// A fresh detection is remembered, so the scan runs once per project rather
 /// than every launch. `set_icon` persists on its own — as every setter on
 /// [`SavedProjects`] does — so there is no `save()` here; adding one would
@@ -131,7 +141,9 @@ pub fn resolve_icon(
     local_dir: Option<&Path>,
     hint: Option<String>,
 ) -> Option<String> {
-    if let Some(path) = saved.get_icon(key) {
+    if let Some(path) = saved.get_icon(key)
+        && is_usable_icon(Path::new(path))
+    {
         return Some(path.clone());
     }
     // A local project scans its own disk; a remote one has no local dir and
@@ -144,6 +156,17 @@ pub fn resolve_icon(
         saved.set_icon(key, Some(path.clone()));
     }
     detected
+}
+
+/// Whether `key` has a saved icon whose file is still there. The remote
+/// probes decide "skip the icon fetch" by asking THIS, not bare `get_icon`:
+/// every fetched icon lives in `~/.cache/tuxflow/icons/`, and after a
+/// cleared cache a presence-only check would suppress the one code path
+/// that could restore the file its entry points at.
+pub fn has_usable_saved_icon(saved: &SavedProjects, key: &str) -> bool {
+    saved
+        .get_icon(key)
+        .is_some_and(|path| is_usable_icon(Path::new(path)))
 }
 
 #[cfg(test)]
@@ -215,12 +238,54 @@ mod tests {
         let project = tmp.path().join("proj");
         std::fs::create_dir_all(&project).expect("project dir");
         std::fs::write(project.join("logo.svg"), b"<svg/>").expect("write icon");
+        let chosen = tmp.path().join("by-hand.png");
+        std::fs::write(&chosen, b"png").expect("write chosen icon");
+        let chosen = chosen.to_string_lossy().into_owned();
 
         let mut saved = scratch_saved(tmp.path());
-        saved.set_icon("k", Some("/chosen/by-hand.png".into()));
+        saved.set_icon("k", Some(chosen.clone()));
 
         let resolved = resolve_icon(&mut saved, "k", Some(&project), None);
-        assert_eq!(resolved.as_deref(), Some("/chosen/by-hand.png"));
+        assert_eq!(resolved.as_deref(), Some(chosen.as_str()));
+    }
+
+    /// A saved entry whose file is GONE — a cleared ~/.cache is the everyday
+    /// case, since that is where every fetched remote icon lives — must heal
+    /// by re-detection instead of pinning the initials square forever. The
+    /// fresh detection also overwrites the dead entry.
+    #[test]
+    fn a_dead_saved_icon_heals_by_redetection() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::write(project.join("logo.svg"), b"<svg/>").expect("write icon");
+        let expected = project.join("logo.svg").to_string_lossy().into_owned();
+
+        let mut saved = scratch_saved(tmp.path());
+        saved.set_icon("k", Some("/gone/cleared-cache.png".into()));
+
+        let resolved = resolve_icon(&mut saved, "k", Some(&project), None);
+        assert_eq!(resolved.as_deref(), Some(expected.as_str()));
+        assert_eq!(saved.get_icon("k").map(String::as_str), Some(&*expected));
+    }
+
+    /// The probe-side twin of the heal: "skip the icon fetch" must ask
+    /// whether the saved icon's file still exists, not whether an entry
+    /// does — a dead entry would otherwise suppress its own repair.
+    #[test]
+    fn a_dead_saved_icon_does_not_suppress_the_fetch() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let mut saved = scratch_saved(tmp.path());
+
+        assert!(!has_usable_saved_icon(&saved, "k"), "no entry at all");
+
+        saved.set_icon("k", Some("/gone/cleared-cache.png".into()));
+        assert!(!has_usable_saved_icon(&saved, "k"), "entry, file gone");
+
+        let live = tmp.path().join("live.png");
+        std::fs::write(&live, b"png").expect("write icon");
+        saved.set_icon("k", Some(live.to_string_lossy().into_owned()));
+        assert!(has_usable_saved_icon(&saved, "k"), "entry with a real file");
     }
 
     /// A remote project has no local dir to scan, so it falls through to the

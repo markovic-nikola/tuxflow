@@ -279,10 +279,16 @@ impl AppSettings {
         }
         match toml::to_string_pretty(self) {
             Ok(content) => {
-                if let Err(e) = fs::write(&path, content) {
-                    log::error!("Failed to write settings: {e}");
-                } else {
-                    log::info!("Saved settings to {}", path.display());
+                // Write-then-rename, like SavedProjects: two apps share this
+                // file (the .deb ships both shells) and the iced shell saves
+                // geometry in the background — a reader catching a plain
+                // truncate-write mid-flight parses a torn file as defaults
+                // and, on its next save, writes those defaults back.
+                let tmp = path.with_extension("toml.tmp");
+                let result = fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, &path));
+                match result {
+                    Ok(()) => log::info!("Saved settings to {}", path.display()),
+                    Err(e) => log::error!("Failed to write settings: {e}"),
                 }
             }
             Err(e) => log::error!("Failed to serialize settings: {e}"),

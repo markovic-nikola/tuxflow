@@ -36,7 +36,7 @@ pub struct Terminal {
     pub(crate) cache: Cache,
     pub(crate) bindings: BindingsLayout,
     pub(crate) backend: backend::Backend,
-    backend_event_rx: Arc<Mutex<UnboundedReceiver<AlacrittyEvent>>>,
+    backend_event_rx: Arc<Mutex<UnboundedReceiver<(u64, AlacrittyEvent)>>>,
 }
 
 impl Terminal {
@@ -205,7 +205,7 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
         // Search scrolls to the match and moves the highlight.
         | backend::Command::SearchNext(..)
         | backend::Command::SearchClear => true,
-        backend::Command::ProcessAlacrittyEvent(event) => {
+        backend::Command::ProcessAlacrittyEvent(_, event) => {
             matches!(event, AlacrittyEvent::Wakeup | AlacrittyEvent::Exit)
         },
         // SelectRelease reads the finished selection; it changes nothing
@@ -219,7 +219,7 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
 #[derive(Clone)]
 struct TerminalSubscriptionData {
     id: u64,
-    event_receiver: Arc<Mutex<UnboundedReceiver<AlacrittyEvent>>>,
+    event_receiver: Arc<Mutex<UnboundedReceiver<(u64, AlacrittyEvent)>>>,
 }
 
 impl Hash for TerminalSubscriptionData {
@@ -247,16 +247,22 @@ fn terminal_subscription_stream(
                     let mut wakeup = false;
                     let mut mouse_dirty = false;
                     let mut blink_changed = false;
+                    // The run stamp for the coalesced repaint events: the
+                    // NEWEST drained one. Repaints are idempotent, so a
+                    // burst spanning a respawn labels its single Wakeup
+                    // with the run that will actually be repainted.
+                    let mut latest_run = event.0;
                     let mut events = Vec::new();
                     let mut next = Some(event);
                     loop {
-                        let ev = match next.take() {
+                        let (run, ev) = match next.take() {
                             Some(ev) => ev,
                             None => match event_receiver.try_recv() {
                                 Ok(ev) => ev,
                                 Err(_) => break,
                             },
                         };
+                        latest_run = run;
                         if matches!(ev, AlacrittyEvent::Wakeup) {
                             wakeup = true;
                         } else if matches!(ev, AlacrittyEvent::MouseCursorDirty)
@@ -270,27 +276,35 @@ fn terminal_subscription_stream(
                         ) {
                             blink_changed = true;
                         } else {
-                            events.push(ev);
+                            events.push((run, ev));
                         }
                         if events.len() >= 512 {
                             break;
                         }
                     }
                     if mouse_dirty {
-                        events.push(AlacrittyEvent::MouseCursorDirty);
+                        events.push((
+                            latest_run,
+                            AlacrittyEvent::MouseCursorDirty,
+                        ));
                     }
                     if blink_changed {
-                        events.push(AlacrittyEvent::CursorBlinkingChange);
+                        events.push((
+                            latest_run,
+                            AlacrittyEvent::CursorBlinkingChange,
+                        ));
                     }
                     if wakeup {
-                        events.push(AlacrittyEvent::Wakeup);
+                        events.push((latest_run, AlacrittyEvent::Wakeup));
                     }
 
-                    for ev in events {
+                    for (run, ev) in events {
                         let sent = output
                             .send(Event::BackendCall(
                                 id,
-                                backend::Command::ProcessAlacrittyEvent(ev),
+                                backend::Command::ProcessAlacrittyEvent(
+                                    run, ev,
+                                ),
                             ))
                             .await;
                         if sent.is_err() {

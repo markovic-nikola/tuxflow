@@ -133,7 +133,10 @@ fn key_to_friendly_name(key: &gdk::Key) -> &'static str {
         gdk::Key::period => ".",
         gdk::Key::equal => "=",
         gdk::Key::minus => "-",
-        gdk::Key::plus => "+",
+        // Named, never "+": the chord separator IS '+', so a literal one
+        // writes "Ctrl++", which splits into an empty part and can never
+        // re-parse. The iced shell writes/reads the same name.
+        gdk::Key::plus => "Plus",
         gdk::Key::slash => "/",
         gdk::Key::backslash => "\\",
         gdk::Key::bracketleft => "[",
@@ -193,7 +196,7 @@ fn friendly_name_to_key(name: &str) -> Option<gdk::Key> {
         "." => gdk::Key::period,
         "=" => gdk::Key::equal,
         "-" => gdk::Key::minus,
-        "+" => gdk::Key::plus,
+        "Plus" => gdk::Key::plus,
         "/" => gdk::Key::slash,
         "\\" => gdk::Key::backslash,
         "[" => gdk::Key::bracketleft,

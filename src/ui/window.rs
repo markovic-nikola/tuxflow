@@ -3112,12 +3112,16 @@ impl TuxFlowWindow {
                                     .next()
                                     .unwrap_or("0")
                             );
-                            let command = match agent_type.as_str() {
-                                "claude" => "claude".to_string(),
-                                "codex" => "codex".to_string(),
-                                "gemini" => "gemini".to_string(),
-                                _ => agent_type.to_string(),
-                            };
+                            // The palette items are generated from
+                            // AGENT_PRESETS, so the command comes from the
+                            // same row — a preset whose command ever
+                            // diverges from its slug must not silently run
+                            // the slug here.
+                            let command = tuxflow_core::util::agents::AGENT_PRESETS
+                                .iter()
+                                .find(|p| p.slug == agent_type)
+                                .map(|p| p.command.to_string())
+                                .unwrap_or_else(|| agent_type.to_string());
                             let mut config = crate::config::schema::ProcessConfig {
                                 name: agent_name.clone(),
                                 command,

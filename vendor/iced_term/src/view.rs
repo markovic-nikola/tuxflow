@@ -42,6 +42,21 @@ impl<'a> TerminalView<'a> {
         iced::widget::operation::focus(id)
     }
 
+    /// Drop keyboard focus from every focusable — terminals included. For
+    /// an embedder raising a MODAL layer (context menu, confirmation card):
+    /// stack layers above the base don't capture keyboard events, so a
+    /// still-focused terminal underneath keeps eating the keys the layer is
+    /// being asked to answer — Esc meant for the menu reaches a running
+    /// agent as "interrupt", Enter meant for the dialog hits the shell.
+    ///
+    /// Implemented as a focus of an id that exists nowhere: the runtime
+    /// module wraps `focusable::focus` into a Task but not `unfocus`, and
+    /// `focus(target)`'s own contract (focusable.rs) is "focus the match,
+    /// unfocus everything else" — with no match it IS unfocus-all.
+    pub fn unfocus<Message: 'static>() -> iced::Task<Message> {
+        iced::widget::operation::focus(iced::widget::Id::unique())
+    }
+
     fn is_cursor_in_layout(
         &self,
         cursor: Cursor,

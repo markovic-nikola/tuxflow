@@ -160,6 +160,12 @@ memory, rendering under your real workload.
   you've never started stay at the bottom in manual order. Toggling the
   setting off goes back to the manual order immediately. Before, the
   order was computed once at launch and never moved again.
+- **Fast prose typing**: type a few capitalized sentences into an agent
+  ("I am. Fix This. Then That.") at full speed — every space must land.
+  Space is a named key and used to be swallowed whenever Shift was
+  still held from the capital before it (vendor patch 20). Shift+Space,
+  Ctrl+Space (NUL — check with `showkey -a` or emacs) and Alt+Space
+  (ESC-prefixed) all do the xterm thing now.
 
 ## Not there yet (deliberate, GTK still covers these)
 

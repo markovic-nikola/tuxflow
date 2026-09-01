@@ -320,3 +320,18 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     own contract is "focus the match, unfocus everything else", so focusing
     an `Id::unique()` that exists nowhere is unfocus-all through the public
     API.
+
+20. **Named keys get the no-binding text fallback** (found live: spaces
+    swallowed while typing prose to an agent). Binding lookup is an EXACT
+    modifier match and Space is a NAMED key with one bare row — so a space
+    struck while Shift was still held (a capital, then the spacebar; fast
+    typists release Shift late) matched nothing, and the named-key arm,
+    unlike the Character arm, wrote nothing at all. Shell sessions hid it
+    for months because commands are lowercase; agent chat is prose. Both
+    arms now share `text_fallback` (the key's own text, ESC-prefixed
+    single-byte under Alt — the same metaSendsEscape rule patch 14 gave
+    characters), so any modified-but-unbound key types what it produced,
+    while keys with no text (F-keys, arrows) still write nothing. Bindings
+    keep priority, and Ctrl+Space / Ctrl+Shift+Space gained their xterm
+    NUL rows so the fallback can't type a plain space where a control code
+    belongs.

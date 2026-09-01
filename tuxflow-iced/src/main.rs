@@ -44,7 +44,7 @@ use tuxflow_core::util::port_detector::{self, PortDetector, remap_url_port, rewr
 
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
-use status_dot::status_dot;
+use status_dot::{spinner, status_dot};
 use theme::{
     CRASHED, DIM, GIT_ADDED, GIT_BEHIND, GIT_REMOVED, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT,
     TEXT_SECONDARY, accent_for,
@@ -203,7 +203,8 @@ impl Anim {
 /// ([`theme::project_card`]). Same tick-chain idiom as [`Anim`] and
 /// generation-stamped for the same reason, but it LOOPS rather than
 /// settling — and it is linear, since an ease would make a repeating pass
-/// lurch at the seam.
+/// lurch at the seam. Also instanced as `sync_spin`, the phase behind
+/// the status bar's sync spinner — same mechanics, different audience.
 #[derive(Default)]
 struct Sweep {
     phase: f32,
@@ -415,14 +416,24 @@ struct App {
     /// wants the whole window, and GTK's dialog opens at the parent's
     /// full size for the same reason.
     git_ui: Option<git_view::State>,
-    /// Projects with a one-click status-bar sync (fetch + ff-pull + push)
-    /// in flight, by project id. The chip's counters hide while its own
-    /// project syncs: showing the pre-sync numbers next to a spinner reads
-    /// as "the sync did nothing". Keyed rather than a bare bool because a
-    /// remote sync takes seconds and the user can switch projects under
-    /// it — an unkeyed flag put "syncing…" on project B's chip and hung
-    /// B's repo name on A's failure notice.
+    /// Projects whose one-click status-bar sync (fetch + ff-pull + push)
+    /// is still owed something, by project id: the sync command itself,
+    /// and then the settle window until the follow-up poll the sync
+    /// launched repaints the counters (`GitSyncSettled`). The chip wears
+    /// the spinner — counters hidden, click dead — through BOTH: showing
+    /// the pre-sync numbers next to a spinner reads as "the sync did
+    /// nothing", and releasing at sync-done redisplays exactly those
+    /// numbers for the second or two the refresh takes, a stale flash
+    /// (GTK's `set_git_syncing(false)` rides its refresh callback for the
+    /// same reason). Keyed rather than a bare bool because a remote sync
+    /// takes seconds and the user can switch projects under it — an
+    /// unkeyed flag put the spinner on project B's chip and hung B's repo
+    /// name on A's failure notice.
     git_syncing: std::collections::HashSet<u64>,
+    /// The sync spinner's phase: a second [`Sweep`] chain at the same
+    /// 20 fps cadence, alive only while `git_syncing` is non-empty. One
+    /// chain serves however many syncs overlap.
+    sync_spin: Sweep,
     /// Projects with a status-chip `git fetch` in flight, by id. Without
     /// the fetch the chip's ↓ can never light up on its own — `branch.ab`
     /// counts against the last-FETCHED upstream ref. Guarded because a
@@ -610,6 +621,8 @@ enum Event {
     ActivityTick,
     /// One frame of the working-agent sweep.
     SweepTick(u64),
+    /// One frame of the sync chip's spinner.
+    SyncSpinTick(u64),
     CursorMoved(iced::Point),
     /// Ctrl went down or up — reveals/hides the sidebar's keycaps.
     CtrlHeld(bool),
@@ -661,6 +674,16 @@ enum Event {
     GitSynced {
         project: u64,
         result: Result<(), String>,
+    },
+    /// The follow-up poll a finished sync launched has landed: repaint
+    /// the counters and let the spinner yield to them. Distinct from
+    /// [`Event::GitPolled`] so a poll already in flight at click time —
+    /// the 20 s tick, a switch — can't end the settle early still
+    /// carrying pre-sync numbers.
+    GitSyncSettled {
+        project: u64,
+        status: Option<tuxflow_core::remote::git::GitStatus>,
+        diffstat: tuxflow_core::remote::git::DiffStat,
     },
     /// Status-bar changes chip → the Git Changes view.
     OpenGitChanges,
@@ -775,6 +798,7 @@ impl App {
             settings_ui: None,
             git_ui: None,
             git_syncing: std::collections::HashSet::new(),
+            sync_spin: Sweep::default(),
             git_fetching: std::collections::HashSet::new(),
             git_ticks: 0,
             git_tick_stamp: 0,
@@ -1447,6 +1471,40 @@ impl App {
         task
     }
 
+    /// One status + diffstat query against `location` on a worker,
+    /// reported through `wrap` — the shared tail of every chip refresh.
+    /// The plain poll, the fetch arm and the sync's settle poll differ
+    /// only in what runs first and which event carries the answer.
+    fn query_git_task(
+        location: ProjectLocation,
+        fetch_first: bool,
+        wrap: impl Fn(
+            Option<tuxflow_core::remote::git::GitStatus>,
+            tuxflow_core::remote::git::DiffStat,
+        ) -> Event
+        + Send
+        + 'static,
+    ) -> Task<Event> {
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                if fetch_first {
+                    tuxflow_core::remote::git::fetch(&location);
+                }
+                let status = tuxflow_core::remote::git::query_status(&location)?;
+                // Only worth the extra round trips once we know it IS a
+                // repo — the diffstat on a non-repo is two failed calls.
+                Some((status, tuxflow_core::remote::git::query_diffstat(&location)))
+            }),
+            move |joined| {
+                let answer = joined.ok().flatten();
+                wrap(
+                    answer.as_ref().map(|(s, _)| s.clone()),
+                    answer.map(|(_, d)| d).unwrap_or_default(),
+                )
+            },
+        )
+    }
+
     /// Poll git for the ACTIVE project on a worker — on switch and on
     /// the 20 s tick. One project at a time; 24 parallel ssh polls would
     /// be rude to the mux.
@@ -1458,24 +1516,14 @@ impl App {
             return Task::none();
         }
         let id = project.id;
-        let location = project.location.clone();
-        Task::perform(
-            tokio::task::spawn_blocking(move || {
-                let status = tuxflow_core::remote::git::query_status(&location)?;
-                // Only worth the extra round trips once we know it IS a
-                // repo — the diffstat on a non-repo is two failed calls.
-                Some((status, tuxflow_core::remote::git::query_diffstat(&location)))
-            }),
-            move |joined| {
-                let answer = joined.ok().flatten();
-                Event::GitPolled {
-                    project: id,
-                    status: answer.as_ref().map(|(s, _)| s.clone()),
-                    diffstat: answer.map(|(_, d)| d).unwrap_or_default(),
-                    fetched: false,
-                }
-            },
-        )
+        Self::query_git_task(project.location.clone(), false, move |status, diffstat| {
+            Event::GitPolled {
+                project: id,
+                status,
+                diffstat,
+                fetched: false,
+            }
+        })
     }
 
     /// The chip refresh that can DISCOVER commits to pull: `poll_git`
@@ -1499,22 +1547,13 @@ impl App {
         if !self.git_fetching.insert(id) {
             return plain;
         }
-        let fetch = Task::perform(
-            tokio::task::spawn_blocking(move || {
-                tuxflow_core::remote::git::fetch(&location);
-                let status = tuxflow_core::remote::git::query_status(&location)?;
-                Some((status, tuxflow_core::remote::git::query_diffstat(&location)))
-            }),
-            move |joined| {
-                let answer = joined.ok().flatten();
-                Event::GitPolled {
-                    project: id,
-                    status: answer.as_ref().map(|(s, _)| s.clone()),
-                    diffstat: answer.map(|(_, d)| d).unwrap_or_default(),
-                    fetched: true,
-                }
-            },
-        );
+        let fetch =
+            Self::query_git_task(location, true, move |status, diffstat| Event::GitPolled {
+                project: id,
+                status,
+                diffstat,
+                fetched: true,
+            });
         Task::batch([plain, fetch])
     }
 
@@ -1528,7 +1567,7 @@ impl App {
         if !self.git_syncing.insert(id) {
             return Task::none();
         }
-        Task::perform(
+        let sync = Task::perform(
             tokio::task::spawn_blocking(move || {
                 tuxflow_core::remote::git::sync_with_remote(&location)
             }),
@@ -1536,7 +1575,15 @@ impl App {
                 project: id,
                 result: joined.unwrap_or_else(|e| Err(e.to_string())),
             },
-        )
+        );
+        // The spinner's frame chain. One serves however many syncs
+        // overlap, and if the previous chain is still winding down from a
+        // settle an instant ago, `start` refuses and that chain simply
+        // picks this sync up on its next frame.
+        match self.sync_spin.start() {
+            Some(generation) => Task::batch([sync, Task::done(Event::SyncSpinTick(generation))]),
+            None => sync,
+        }
     }
 
     /// GTK opens an AlertDialog here; the notice card is this shell's
@@ -3461,6 +3508,22 @@ impl App {
                     Event::SweepTick(generation)
                 })
             }
+            Event::SyncSpinTick(generation) => {
+                if self.sync_spin.tick(generation).is_none() {
+                    return Task::none();
+                }
+                // Unlike the card sweep there is nothing to fade out at a
+                // pass boundary: when the last sync settles the chip stops
+                // drawing the spinner that same frame, so the chain just
+                // stops with it.
+                if self.git_syncing.is_empty() {
+                    self.sync_spin.running = false;
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(SWEEP_FRAME), move |_| {
+                    Event::SyncSpinTick(generation)
+                })
+            }
             Event::AddTerminal(project) => match self.project_index(project) {
                 Some(pidx) => self.add_terminal(pidx),
                 None => Task::none(),
@@ -3539,7 +3602,6 @@ impl App {
             }
             Event::GitSync => self.start_git_sync(),
             Event::GitSynced { project, result } => {
-                self.git_syncing.remove(&project);
                 let active = self.active_project().map(|p| p.id) == Some(project);
                 let mut tasks = Vec::new();
                 if let Err(detail) = result {
@@ -3556,13 +3618,50 @@ impl App {
                     tasks.push(self.notify_git_failure(&heading, &detail));
                 }
                 // Repaint the counters from what the sync actually left
-                // behind, not from what we assumed it would. poll_git reads
-                // the ACTIVE project, so only fire it while that is still
-                // the synced one — otherwise the on-switch poll covers it.
-                if active {
-                    tasks.push(self.poll_git());
+                // behind, not from what we assumed it would — even a failed
+                // sync may have fetched. The id STAYS in `git_syncing` until
+                // this poll lands: released here, the chip redisplays the
+                // pre-sync ↓↑ for the second or two the refresh takes — "the
+                // sync did nothing", then a blink as they vanish. Aimed at
+                // the synced project's own location rather than through
+                // `poll_git`'s active-project read, so a sync finished in
+                // the background settles its own card too.
+                match self.project_index(project) {
+                    Some(pidx) => {
+                        let location = self.projects[pidx].location.clone();
+                        tasks.push(Self::query_git_task(
+                            location,
+                            false,
+                            move |status, diffstat| Event::GitSyncSettled {
+                                project,
+                                status,
+                                diffstat,
+                            },
+                        ));
+                    }
+                    // Closed mid-sync: nothing to settle, and a leftover id
+                    // would keep the spinner chain ticking for nobody.
+                    None => {
+                        self.git_syncing.remove(&project);
+                    }
                 }
                 Task::batch(tasks)
+            }
+            Event::GitSyncSettled {
+                project,
+                status,
+                diffstat,
+            } => {
+                // Only the settle poll releases the spinner — it hands over
+                // to the numbers landing in this same event, never to stale
+                // ones. A `GitPolled` arriving mid-sync keeps updating the
+                // (hidden) counters without ending the wait.
+                self.git_syncing.remove(&project);
+                if let Some(pidx) = self.project_index(project) {
+                    self.projects[pidx].git = status;
+                    self.projects[pidx].diffstat = diffstat;
+                }
+                Task::none()
             }
             Event::OpenGitChanges => self.open_git_changes(),
             Event::NoticeDismiss => {
@@ -5842,9 +5941,11 @@ impl App {
             .spacing(5)
             .align_y(iced::Alignment::Center);
         // While a sync runs the counters stand down: the pre-sync numbers
-        // sitting next to "syncing…" read as "the sync did nothing".
+        // sitting next to a spinner read as "the sync did nothing". The
+        // spinner holds through the settle window too (`GitSyncSettled`),
+        // so it hands over to fresh numbers, never a stale flash.
         if syncing {
-            content = content.push(text("Syncing\u{2026}").size(10.5).color(DIM));
+            content = content.push(spinner(TEXT_SECONDARY, self.sync_spin.phase));
         } else {
             if git.behind > 0 {
                 content = content.push(

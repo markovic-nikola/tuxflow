@@ -2051,11 +2051,7 @@ impl TuxFlowWindow {
                         return;
                     };
                     (
-                        matches!(
-                            proc.config.category,
-                            crate::config::schema::ProcessCategory::Agent
-                                | crate::config::schema::ProcessCategory::SSH
-                        ),
+                        !crate::util::port_detector::scans_ports(&proc.config.category),
                         matches!(
                             proc.config.category,
                             crate::config::schema::ProcessCategory::Agent

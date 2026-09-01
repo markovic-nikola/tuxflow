@@ -24,11 +24,17 @@ Status bar:
 - `send-to-symbolic.svg` — git changes chip
 - `focus-windows-symbolic.svg` — focus mode (hide the sidebar)
 - `edit-clear-symbolic.svg` — clear the terminal
+- `external-link-symbolic.svg` — open the detected URL
 
-`tuxflow-remote-symbolic.svg` is the exception: it is TuxFlow's own
-(app-namespaced so a user's icon theme can't override the glyph), copied
-from `data/icons/` and MIT like the rest of the app. It marks a project
-that lives on an ssh host.
+Two are TuxFlow's own, MIT like the rest of the app, not Adwaita copies:
+
+- `tuxflow-remote-symbolic.svg` (app-namespaced so a user's icon theme
+  can't override the glyph, copied from `data/icons/`) marks a project
+  that lives on an ssh host.
+- `external-link-symbolic.svg` is drawn from scratch because the name is
+  a hole in adwaita-icon-theme: GTK resolves it from libadwaita's
+  private resources or the desktop theme (Yaru's copy is GPL-3.0+,
+  which an MIT binary must not embed).
 
 adwaita-icon-theme licenses the rest under **LGPL-3.0 or CC-BY-SA-3.0**
 (dual); they are redistributed here under CC-BY-SA-3.0 with this notice

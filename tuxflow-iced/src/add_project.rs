@@ -394,30 +394,10 @@ fn view_locate<'a>(state: &'a State, accent: iced::Color) -> Element<'a, Msg> {
     // Completions. Absent entirely when there is nothing to show, so an
     // empty box never sits under the field.
     if !state.suggestions.is_empty() {
-        let mut rows = column![].spacing(0);
-        for dir in &state.suggestions {
-            rows = rows.push(
-                button(text(shorten_path(dir)).size(12).color(TEXT))
-                    .width(Length::Fill)
-                    .padding([6, 12])
-                    .style(theme::menu_item(false))
-                    .on_press(Msg::UseSuggestion(dir.clone())),
-            );
-        }
-        content = content.push(
-            container(
-                scrollable(rows)
-                    .height(Length::Shrink)
-                    .direction(scrollable::Direction::Vertical(
-                        scrollable::Scrollbar::new().width(4).scroller_width(4),
-                    ))
-                    .style(theme::overlay_scrollbar),
-            )
-            .max_height(190)
-            .padding([4, 0])
-            .style(theme::settings_card)
-            .width(Length::Fill),
-        );
+        content = content.push(crate::widgets::suggestion_list(
+            &state.suggestions,
+            Msg::UseSuggestion,
+        ));
     }
 
     if let Some(line) = status_line(state) {
@@ -569,19 +549,6 @@ fn commit_button_owned<'a>(
     b.into()
 }
 
-/// Suggestions are absolute paths and the tail is the part being completed,
-/// so a long one drops its middle rather than its end (GTK ellipsizes at the
-/// START for the same reason).
-fn shorten_path(path: &str) -> String {
-    const MAX: usize = 58;
-    let chars: Vec<char> = path.chars().collect();
-    if chars.len() <= MAX {
-        return path.to_string();
-    }
-    let tail: String = chars[chars.len() - (MAX - 1)..].iter().collect();
-    format!("\u{2026}{tail}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,15 +671,5 @@ mod tests {
             config_loaded: true,
         });
         assert!(!s.configure.as_ref().unwrap().select);
-    }
-
-    #[test]
-    fn long_paths_keep_their_tail() {
-        let long = format!("/home/nikola/{}/target", "deep".repeat(30));
-        let short = shorten_path(&long);
-        assert!(short.starts_with('\u{2026}'));
-        assert!(short.ends_with("/target"), "{short}");
-        assert!(short.chars().count() <= 58);
-        assert_eq!(shorten_path("/srv/app"), "/srv/app");
     }
 }

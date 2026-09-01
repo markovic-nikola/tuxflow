@@ -8,6 +8,7 @@
 //! run as inline forms; closing a project detaches its remote sessions.
 
 mod add_project;
+mod edit_project;
 mod git_view;
 mod keys;
 mod notify;
@@ -39,7 +40,7 @@ use tuxflow_core::util::activity;
 use tuxflow_core::util::agents::{self, resume_command_for};
 use tuxflow_core::util::banner;
 use tuxflow_core::util::icon_detector;
-use tuxflow_core::util::port_detector::{PortDetector, remap_url_port, rewrite_clicked_url};
+use tuxflow_core::util::port_detector::{self, PortDetector, remap_url_port, rewrite_clicked_url};
 
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
@@ -321,6 +322,12 @@ struct ProjectState {
     /// initials square. Already checked to exist — `view` runs every frame
     /// and must never stat the disk.
     icon: Option<PathBuf>,
+    /// The pre-merge config list the load produced (tuxflow.toml's authored
+    /// processes, or detection). Edit Project resolves its Hidden and
+    /// Detected groups from this — GTK keeps its load-time stacks for the
+    /// same job, because re-detecting a REMOTE project live would be an ssh
+    /// round trip mid-dialog (local projects re-detect live on top of it).
+    detected_configs: Vec<ProcessConfig>,
     /// The card is riding the working-agent sweep. Set when an agent here
     /// starts producing output, cleared only at a pass boundary — see
     /// [`Sweep::tick`].
@@ -460,6 +467,9 @@ struct App {
     palette_input: iced::widget::Id,
     add_project: Option<add_project::State>,
     add_command: Option<ProcessForm>,
+    /// Edit Project form; `Some` = the main pane shows it. Mutually
+    /// exclusive with the two add forms, like the GTK dialogs they port.
+    edit_project: Option<edit_project::State>,
     /// Live inner size (resize events); the sidebar takes a fraction of
     /// the width (GTK parity). The *position* is never tracked from Moved
     /// events — those carry the client-area point while restore sets the
@@ -674,9 +684,10 @@ enum Event {
         run: u64,
         result: Result<Vec<u8>, String>,
     },
-    /// Click on the status-bar port pill: open the (tunnel-mapped) URL.
+    /// The status bar's open-in-browser button: the (tunnel-mapped) URL.
     OpenBadge,
-    /// The sidebar row's ↗ button — any process, not just the selected.
+    /// The row context menu's "Open in Browser" — any process, not just
+    /// the selected.
     OpenBadgeFor {
         project: u64,
         index: usize,
@@ -701,6 +712,10 @@ enum Event {
     DeleteProcess,
     AddCommandSubmit,
     AddCommandCancel,
+    /// The project context menu's Edit Project — GTK's dialog as a
+    /// full-pane view.
+    OpenEditProject(u64),
+    EditProjectMsg(edit_project::Msg),
 }
 
 impl App {
@@ -755,6 +770,7 @@ impl App {
             palette_input: iced::widget::Id::unique(),
             add_project: None,
             add_command: None,
+            edit_project: None,
             window_size: Size {
                 width: settings.window.width.max(1) as f32,
                 height: settings.window.height.max(1) as f32,
@@ -847,6 +863,7 @@ impl App {
             git: None,
             diffstat: tuxflow_core::remote::git::DiffStat::default(),
             icon: None,
+            detected_configs: Vec::new(),
             sweeping: false,
             was_running: false,
             location,
@@ -867,6 +884,7 @@ impl App {
                     Some(&dir),
                     None,
                 ));
+                project.detected_configs = configs.clone();
                 let merged = processes::merge_saved(configs, &self.saved, key);
                 project.entries = processes::entries_from(merged);
                 project.phase = Phase::Ready;
@@ -1160,9 +1178,6 @@ impl App {
         self.start(pidx, index)
     }
 
-    /// Close a project: local processes die with their PTYs, remote
-    /// sessions DETACH (kill only happens on explicit per-process stop) —
-    /// the same contract as quitting the app.
     fn open_edit_form(&mut self, pidx: usize, index: usize) {
         let project = &self.projects[pidx];
         let Some(entry) = project.entries.get(index) else {
@@ -1181,10 +1196,11 @@ impl App {
             original_category: entry.config.category.clone(),
             error: None,
         });
-        // The two add forms are mutually exclusive, as GTK's modal dialogs
+        // The form panes are mutually exclusive, as GTK's modal dialogs
         // are — the main pane can only show one, and a form left standing
         // underneath swallows the first Esc invisibly.
         self.add_project = None;
+        self.edit_project = None;
     }
 
     /// Stop and remove a process: drop its custom-command copy AND record
@@ -1211,6 +1227,9 @@ impl App {
         self.projects[pidx].selected = if n == 0 { 0 } else { index.min(n - 1) };
     }
 
+    /// Close a project: local processes die with their PTYs, remote
+    /// sessions DETACH (kill only happens on explicit per-process stop) —
+    /// the same contract as quitting the app.
     fn close_project(&mut self, pidx: usize) {
         let key = self.projects[pidx].key();
         if let Some(tunnels) = &mut self.projects[pidx].tunnels {
@@ -1846,6 +1865,375 @@ impl App {
         Task::batch([task, self.poll_git()])
     }
 
+    /// Raise the Edit Project view for a card — GTK's dialog. Ready
+    /// projects only: the union below needs the entries and the detection
+    /// list the load produced.
+    fn open_edit_project(&mut self, project: u64) -> Task<Event> {
+        let Some(pidx) = self.project_index(project) else {
+            return Task::none();
+        };
+        if !matches!(self.projects[pidx].phase, Phase::Ready) {
+            return Task::none();
+        }
+        // The form writes into the project it names; raising it from
+        // another card switches there first, as OpenAddCommand does.
+        let switched = self.active != pidx;
+        self.active = pidx;
+        let p = &self.projects[pidx];
+        let key = p.key();
+
+        // The pool the Hidden/Detected groups resolve from: the load-time
+        // config list, plus — locally — a LIVE full detection, so commands
+        // added to the project since load appear (GTK's dialog behavior;
+        // its remote fallback to load-time stacks is this same trade).
+        let mut pool = p.detected_configs.clone();
+        if let ProjectLocation::Local(dir) = &p.location {
+            for config in detector::detect_stacks(dir)
+                .into_iter()
+                .flat_map(|s| s.suggested_processes)
+            {
+                if !pool.iter().any(|c| c.name == config.name) {
+                    pool.push(config);
+                }
+            }
+        }
+        let active: Vec<ProcessConfig> = p.entries.iter().map(|e| e.config.clone()).collect();
+        let deleted = self
+            .saved
+            .deleted_processes
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let custom = self
+            .saved
+            .get_custom_commands(&key)
+            .cloned()
+            .unwrap_or_default();
+        let commands = edit_project::toggle_entries(&active, &deleted, &custom, &pool);
+
+        // Same epoch stride as the add forms: an icon fetch or listing in
+        // flight when this form closes must not land in the next one.
+        self.add_form_epoch += 1 << 32;
+        self.edit_project = Some(edit_project::State {
+            project,
+            name: p.name.clone(),
+            key,
+            remote: p.location.is_remote(),
+            icon: p
+                .icon
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            icon_path: String::new(),
+            suggestions: Vec::new(),
+            stamp: self.add_form_epoch,
+            fetch_stamp: self.add_form_epoch,
+            commands,
+            busy: None,
+            error: None,
+        });
+        self.add_command = None;
+        self.add_project = None;
+        // Symmetric with OpenSettings: a hidden Git view would keep its
+        // 2 s (possibly ssh) poll running blind underneath.
+        self.git_ui = None;
+        if switched {
+            self.poll_git()
+        } else {
+            Task::none()
+        }
+    }
+
+    fn update_edit_project(&mut self, msg: edit_project::Msg) -> Task<Event> {
+        use edit_project::Msg;
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        match msg {
+            Msg::Close => {
+                self.edit_project = None;
+                self.focus_selected_terminal()
+            }
+            Msg::NameInput(value) => {
+                state.name = value;
+                state.error = None;
+                Task::none()
+            }
+            Msg::Toggle(index, on) => {
+                if let Some(entry) = state.commands.get_mut(index) {
+                    entry.on = on;
+                }
+                Task::none()
+            }
+            Msg::IconPathInput(value) => {
+                state.icon_path = value;
+                state.error = None;
+                self.complete_icon_path()
+            }
+            Msg::IconSuggestions { stamp, paths } => {
+                // Drop a listing whose keystroke has been superseded.
+                if stamp == state.stamp {
+                    state.suggestions = paths;
+                }
+                Task::none()
+            }
+            Msg::UseIconSuggestion(path) => {
+                let descend = path.ends_with('/');
+                state.icon_path = path;
+                state.error = None;
+                if descend {
+                    // A directory lists one level deeper — the browser
+                    // behavior, as in the add-project path field.
+                    self.complete_icon_path()
+                } else {
+                    self.commit_icon_path()
+                }
+            }
+            Msg::CommitIconPath => self.commit_icon_path(),
+            Msg::IconAutoDetect => self.icon_auto_detect(),
+            Msg::IconFetched { stamp, path } => {
+                if stamp != state.fetch_stamp {
+                    return Task::none();
+                }
+                state.busy = None;
+                match path {
+                    Some(local) => {
+                        state.icon = Some(local);
+                        state.error = None;
+                    }
+                    None => state.error = Some(String::from("No usable image found.")),
+                }
+                Task::none()
+            }
+            Msg::IconClear => {
+                state.icon = None;
+                Task::none()
+            }
+            Msg::CopyPath => {
+                let id = state.project;
+                match self.project_index(id) {
+                    Some(pidx) => {
+                        iced::clipboard::write(copyable_path(&self.projects[pidx].location))
+                    }
+                    None => Task::none(),
+                }
+            }
+            Msg::OpenEditor => {
+                let id = state.project;
+                self.update(Event::OpenInEditor(id))
+            }
+            Msg::Save => self.save_edit_project(),
+            Msg::RemoveProject => {
+                let id = state.project;
+                self.update(Event::ConfirmRequest(ConfirmAction::RemoveProject(id)))
+            }
+        }
+    }
+
+    /// Ask for icon completions (directories to descend + image files) for
+    /// what is in the Edit Project path field now — the add-project
+    /// completion idiom over `list_icon_paths`, stamped and debounced the
+    /// same way.
+    fn complete_icon_path(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        state.stamp += 1;
+        let stamp = state.stamp;
+        let prefix = state.icon_path.trim().to_string();
+        let id = state.project;
+        if !prefix.starts_with('/') {
+            state.suggestions.clear();
+            return Task::none();
+        }
+        let host = self
+            .project_index(id)
+            .and_then(|pidx| self.projects[pidx].location.host().map(String::from));
+        let debounce = host.is_some();
+        Task::perform(
+            async move {
+                if debounce {
+                    tokio::time::sleep(SUGGEST_DEBOUNCE).await;
+                }
+                tokio::task::spawn_blocking(move || {
+                    remote::fs::list_icon_paths(host.as_deref(), &prefix)
+                })
+                .await
+                .unwrap_or_default()
+            },
+            move |paths| Event::EditProjectMsg(edit_project::Msg::IconSuggestions { stamp, paths }),
+        )
+    }
+
+    /// Commit the icon field: a local path is checked and adopted as-is; a
+    /// remote one is pulled into the icon cache on a worker first — every
+    /// saved icon is a local file, which is what keeps Save synchronous
+    /// (GTK's picker runs the same `cache_remote_icon` at pick time).
+    fn commit_icon_path(&mut self) -> Task<Event> {
+        let (id, key) = match &self.edit_project {
+            Some(state) => (state.project, state.key.clone()),
+            None => return Task::none(),
+        };
+        let host = self
+            .project_index(id)
+            .and_then(|pidx| self.projects[pidx].location.host().map(String::from));
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        let path = state.icon_path.trim().to_string();
+        if !path.starts_with('/') || path.ends_with('/') {
+            state.error = Some(String::from("Enter the absolute path of an image file."));
+            return Task::none();
+        }
+        state.suggestions.clear();
+        match host {
+            None => {
+                if std::path::Path::new(&path).is_file() {
+                    state.icon = Some(path);
+                    state.error = None;
+                } else {
+                    state.error = Some(format!("No such file: {path}"));
+                }
+                Task::none()
+            }
+            Some(host) => {
+                state.fetch_stamp += 1;
+                let stamp = state.fetch_stamp;
+                state.busy = Some(format!("Fetching from {host}\u{2026}"));
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        // Own ssh permit, as the probe's fetch takes one.
+                        let _permit = remote::ssh_permit();
+                        remote::icon::cache_remote_icon(&host, &path, &key)
+                    }),
+                    move |joined| {
+                        Event::EditProjectMsg(edit_project::Msg::IconFetched {
+                            stamp,
+                            path: joined.ok().flatten(),
+                        })
+                    },
+                )
+            }
+        }
+    }
+
+    /// The icon row's Auto-detect: a local project scans its own disk
+    /// inline; a remote one reruns the probe's icon fetch on a worker —
+    /// which GTK's dialog never offered remotely (its scan is local-only),
+    /// the add-agent kind of deliberate improvement rather than a port.
+    fn icon_auto_detect(&mut self) -> Task<Event> {
+        let Some(id) = self.edit_project.as_ref().map(|s| s.project) else {
+            return Task::none();
+        };
+        let Some(pidx) = self.project_index(id) else {
+            return Task::none();
+        };
+        let location = self.projects[pidx].location.clone();
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        match location {
+            ProjectLocation::Local(dir) => {
+                match icon_detector::detect_icon(&dir) {
+                    Some(found) => {
+                        state.icon = Some(found);
+                        state.error = None;
+                    }
+                    None => state.error = Some(String::from("No icon found in the project.")),
+                }
+                Task::none()
+            }
+            ProjectLocation::Ssh { host, dir } => {
+                state.fetch_stamp += 1;
+                let stamp = state.fetch_stamp;
+                state.busy = Some(format!("Looking for an icon on {host}\u{2026}"));
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = remote::ssh_permit();
+                        remote::icon::fetch_remote_icon(&host, &dir)
+                    }),
+                    move |joined| {
+                        Event::EditProjectMsg(edit_project::Msg::IconFetched {
+                            stamp,
+                            path: joined.ok().flatten(),
+                        })
+                    },
+                )
+            }
+        }
+    }
+
+    /// Apply the Edit Project form — GTK's `EditProjectResult` handler in
+    /// `project_list.rs`, in iced terms: rename, icon, then the command
+    /// toggles.
+    fn save_edit_project(&mut self) -> Task<Event> {
+        let Some(state) = self.edit_project.take() else {
+            return Task::none();
+        };
+        let Some(pidx) = self.project_index(state.project) else {
+            return Task::none();
+        };
+        let name = state.name.trim().to_string();
+        if name.is_empty() {
+            // Refuse but KEEP the form, the add-command idiom: taking it
+            // down with everything set is worse than a red line.
+            let mut state = state;
+            state.error = Some(String::from("A name is required."));
+            self.edit_project = Some(state);
+            return Task::none();
+        }
+        let key = self.projects[pidx].key();
+
+        // Rename only when it happened — writing an unchanged name would
+        // pin a detected name as an override, and a later tuxflow.toml
+        // edit would then never show (the add flow's detected_name rule).
+        if name != self.projects[pidx].name {
+            self.projects[pidx].name = name.clone();
+            self.saved.set_name(&key, &name);
+        }
+
+        // The icon pick, mirrored into the card the way the load resolves
+        // it. `set_icon(None)` clears the entry — Reset to Initials.
+        self.saved.set_icon(&key, state.icon.clone());
+        self.projects[pidx].icon = usable_icon(state.icon.clone());
+
+        // Disables first, GTK's order — each is the full deletion the
+        // context menu's Delete Command performs (stop, drop the custom
+        // copy, record the deletion, remove the entry), found by NAME:
+        // every removal shifts the indices under the rest.
+        let (enabled, disabled) = edit_project::diff(&state.commands);
+        for gone in &disabled {
+            if let Some(index) = self.projects[pidx]
+                .entries
+                .iter()
+                .position(|e| &e.config.name == gone)
+            {
+                self.delete_process(pidx, index);
+            }
+        }
+
+        // Enables: unmark the deletion, persist as the custom command that
+        // overrides same-named detection on every future load (GTK saves
+        // every enable), and join the sidebar STOPPED — enabling is not
+        // starting.
+        let default_dir = self.projects[pidx].location.dir_str();
+        for mut config in enabled {
+            if self.projects[pidx]
+                .entries
+                .iter()
+                .any(|e| e.config.name == config.name)
+            {
+                continue;
+            }
+            if config.working_dir.is_none() {
+                config.working_dir = Some(default_dir.clone());
+            }
+            self.saved.unmark_process_deleted(&key, &config.name);
+            self.saved.add_custom_command(&key, config.clone());
+            self.projects[pidx].entries.push(ProcessEntry::new(config));
+        }
+        self.focus_selected_terminal()
+    }
+
     fn update_git_view(&mut self, msg: git_view::Msg) -> Task<Event> {
         use git_view::Msg;
         match msg {
@@ -2046,6 +2434,12 @@ impl App {
     /// auto-open react to the new badge.
     fn rescan_ports(&mut self, pidx: usize, index: usize) -> Task<Event> {
         let project = &mut self.projects[pidx];
+        // GTK's skip_port_detection: agent and ssh terminals are prose
+        // surfaces, never scanned — a URL the model *mentions* is not an
+        // address this process serves.
+        if !port_detector::scans_ports(&project.entries[index].config.category) {
+            return Task::none();
+        }
         let Some(term) = project.entries[index].terminal.as_ref() else {
             return Task::none();
         };
@@ -2462,6 +2856,14 @@ impl App {
         {
             self.git_ui = None;
         }
+        // Same contract for the Edit Project form: it edits ONE project,
+        // and a removal or a sidebar switch underneath it would leave a
+        // form whose Save writes into the wrong card.
+        if let Some(state) = &self.edit_project
+            && self.active_project().map(|p| p.id) != Some(state.project)
+        {
+            self.edit_project = None;
+        }
         // Running-tier flips stamp last_used and re-sort the sidebar —
         // checked here for the same reason as the git view above: the
         // statuses move from many places (clicks, async exits, reattach).
@@ -2589,6 +2991,7 @@ impl App {
                             None,
                             icon,
                         ));
+                        self.projects[pidx].detected_configs = configs.clone();
                         let merged = processes::merge_saved(configs, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
@@ -3135,6 +3538,10 @@ impl App {
                         self.add_command = None;
                         return self.focus_selected_terminal();
                     }
+                    if self.edit_project.is_some() {
+                        self.edit_project = None;
+                        return self.focus_selected_terminal();
+                    }
                 }
                 // While a modal layer is up, the remaining chords stay
                 // dead: they act on the SELECTION, and reordering or
@@ -3336,6 +3743,7 @@ impl App {
                     self.add_form_epoch,
                 ));
                 self.add_command = None;
+                self.edit_project = None;
                 Task::none()
             }
             Event::AddProjectMsg(msg) => self.update_add_project(msg),
@@ -3365,9 +3773,10 @@ impl App {
                     },
                     error: None,
                 });
-                // Mutually exclusive with the add-project pane (see
+                // Mutually exclusive with the other form panes (see
                 // `open_edit_form`).
                 self.add_project = None;
+                self.edit_project = None;
                 if switched {
                     self.poll_git()
                 } else {
@@ -3454,6 +3863,8 @@ impl App {
                 self.add_command = None;
                 Task::none()
             }
+            Event::OpenEditProject(project) => self.open_edit_project(project),
+            Event::EditProjectMsg(msg) => self.update_edit_project(msg),
             Event::AddCommandSubmit => {
                 let Some(form) = self.add_command.take() else {
                     return Task::none();
@@ -3700,8 +4111,7 @@ impl App {
         if let Some(pidx) = self.projects.iter().position(|p| p.id == target.project) {
             let project = &self.projects[pidx];
             match target.index {
-                // Project header — mirrors GTK's project_row menu
-                // (minus Edit Project: that dialog isn't ported yet).
+                // Project header — mirrors GTK's project_row menu.
                 None => {
                     items.push(Some(("Start All", Event::StartAll(project.id), false)));
                     items.push(Some(("Stop All", Event::StopAll(project.id), false)));
@@ -3736,12 +4146,21 @@ impl App {
                         Event::OpenInEditor(project.id),
                         false,
                     )));
-                    let path = match &project.location {
-                        // Remote projects copy the scp-style host:path form.
-                        ProjectLocation::Local(p) => p.to_string_lossy().into_owned(),
-                        ProjectLocation::Ssh { host, dir } => format!("{host}:{dir}"),
-                    };
-                    items.push(Some(("Copy Path", Event::CopyText(path), false)));
+                    // GTK's slot, between the editor and Copy Path. Only
+                    // once the probe delivered — the form's command union
+                    // needs the entries and the detection list.
+                    if matches!(project.phase, Phase::Ready) {
+                        items.push(Some((
+                            "Edit Project",
+                            Event::OpenEditProject(project.id),
+                            false,
+                        )));
+                    }
+                    items.push(Some((
+                        "Copy Path",
+                        Event::CopyText(copyable_path(&project.location)),
+                        false,
+                    )));
                     items.push(None);
                     items.push(Some((
                         "Remove Project",
@@ -4266,51 +4685,10 @@ impl App {
         let accent = accent_for(remote);
         let active = pidx == self.active;
 
-        // 26px avatar: the project's own artwork, or an initials square.
-        let icon: Element<'a, Event> = match &project.icon {
-            Some(path) => {
-                // Drawn bare, as GTK does: `.project-icon-area` carries only
-                // the rounded clip and the accent wash belongs to
-                // `.project-icon`, the initials label. A logo sitting on an
-                // accent tint reads as a *tinted logo*.
-                let art: Element<'a, Event> = if is_svg(path) {
-                    // No `svg::Style` here — that is the symbolic recolor and
-                    // these are full-colour art. No radius either: `svg` has
-                    // no `border_radius`, and vector logos bring their own
-                    // transparent corners, so GTK's clip is a no-op on them.
-                    iced::widget::svg(iced::widget::svg::Handle::from_path(path))
-                        .width(26)
-                        .height(26)
-                        .into()
-                } else {
-                    // The radius is GTK's `overflow: hidden`, and it earns its
-                    // place: a favicon with opaque corners is a hard square in
-                    // a column of rounded ones. iced applies it to the FITTED
-                    // art bounds rather than the layout box, so a non-square
-                    // logo gets its own corners rounded, not a crop.
-                    iced::widget::image(iced::widget::image::Handle::from_path(path))
-                        .width(26)
-                        .height(26)
-                        .border_radius(8)
-                        .into()
-                };
-                container(art).center_x(26).center_y(26).into()
-            }
-            None => {
-                let initials: String = project
-                    .name
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .take(2)
-                    .collect::<String>()
-                    .to_uppercase();
-                container(text(initials).size(9).font(bold()))
-                    .center_x(26)
-                    .center_y(26)
-                    .style(theme::icon_square(accent, remote))
-                    .into()
-            }
-        };
+        // 26px avatar: the project's own artwork, or an initials square —
+        // the shared drawing, so the Edit Project preview can't disagree.
+        let icon: Element<'a, Event> =
+            widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0);
 
         // GTK's hover controls on the project row: start the marked set,
         // restart the running, stop everything. They take the counter
@@ -4491,7 +4869,7 @@ impl App {
         // sidebar/process_row.rs); here it rides the NAME instead, because
         // iced opens a parent's card *and* a child's at once where GTK
         // lets the innermost win — over the row it would collide with the
-        // ↗ and the lifecycle glyphs, whose tooltips sit at the same edge.
+        // lifecycle glyphs, whose tooltips sit at the same edge.
         // The name is the row's Fill element, so that is everything but
         // the dot and the trailing pills anyway.
         let label = match entry.config.command.trim() {
@@ -4548,33 +4926,6 @@ impl App {
             );
         }
 
-        if let Some(port) = project.ports.get_port(&entry.config.name) {
-            let local = project.port_map.get(&port).copied().unwrap_or(port);
-            content = content.push(
-                container(text(local.to_string()).size(10))
-                    .padding([1, 7])
-                    .style(theme::pill),
-            );
-        }
-        // GTK's browser button: always there while a URL is live.
-        if let Some(url) = browser_url(project, &entry.config.name) {
-            content = content.push(
-                iced::widget::tooltip(
-                    button(text("\u{2197}").size(10))
-                        .padding([1, 5])
-                        .style(theme::ghost(accent))
-                        .on_press(Event::OpenBadgeFor {
-                            project: project.id,
-                            index,
-                        }),
-                    text(format!("Open {url}")).size(11),
-                    iced::widget::tooltip::Position::Bottom,
-                )
-                .gap(4)
-                .padding(7)
-                .style(theme::tooltip),
-            );
-        }
         match entry.status {
             Status::Restarting(attempt) => {
                 content = content.push(
@@ -4708,6 +5059,9 @@ impl App {
         }
         if let Some(state) = &self.add_project {
             return add_project::view(state).map(Event::AddProjectMsg);
+        }
+        if let Some(state) = &self.edit_project {
+            return edit_project::view(state).map(Event::EditProjectMsg);
         }
 
         let Some(project) = self.active_project() else {
@@ -5060,7 +5414,6 @@ impl App {
     /// left, the git chips and the action buttons on the right.
     fn view_status_bar(&'_ self) -> Element<'_, Event> {
         let project = self.active_project();
-        let accent = project.map_or(LOCAL_ACCENT, |p| accent_for(p.location.is_remote()));
 
         let mut bar = row![].spacing(8).align_y(iced::Alignment::Center);
 
@@ -5110,6 +5463,29 @@ impl App {
             bar = bar.push(chip);
         }
 
+        // GTK's browser button: icon-only, the URL on hover (its `Open
+        // {url}` tooltip verbatim). A text chip sat here first — a real
+        // URL is wide enough to crowd out the actions beside it. Ahead of
+        // Focus (GTK puts it after) on Nikola's ask: it comes and goes
+        // with the badge, and appearing between two standing buttons made
+        // the whole right end jump.
+        let url = project.and_then(|p| {
+            p.entries
+                .get(p.selected)
+                .and_then(|e| browser_url(p, &e.config.name))
+        });
+        if let Some(url) = url {
+            bar = bar.push(tip(
+                button(symbolic(ICON_EXTERNAL, 13.0, TEXT_SECONDARY))
+                    .padding([3, 7])
+                    .style(theme::toolbar_icon(false))
+                    .on_press(Event::OpenBadge)
+                    .into(),
+                format!("Open {url}"),
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
+
         bar = bar.push(tip(
             button(symbolic(ICON_FOCUS, 13.0, TEXT_SECONDARY))
                 .padding([3, 7])
@@ -5119,32 +5495,6 @@ impl App {
             String::from("Focus"),
             iced::widget::tooltip::Position::Top,
         ));
-
-        // The badge keeps its URL text — it is the one chip whose VALUE
-        // matters, not just its action.
-        let badge = project
-            .and_then(|p| {
-                p.entries
-                    .get(p.selected)
-                    .and_then(|e| display_badge(p, &e.config.name))
-            })
-            .unwrap_or_default();
-        if !badge.is_empty() {
-            bar = bar.push(
-                button(
-                    row![
-                        text("\u{25cf}").size(9).color(accent),
-                        text(badge).size(11),
-                        text("\u{2197}").size(10).color(DIM),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Alignment::Center),
-                )
-                .padding([3, 10])
-                .style(theme::pill_button(accent))
-                .on_press(Event::OpenBadge),
-            );
-        }
 
         // Clear / Stop / Restart act on the SELECTED process, so they are
         // dead without one. Stop is hidden rather than disabled when it
@@ -5872,18 +6222,6 @@ fn clipped_label(label: iced::widget::Text<'_>) -> Element<'_, Event> {
         .into()
 }
 
-/// The port/URL to show for a process: on remote projects, mapped through
-/// the tunnels (the terminal shows the host's port; locally that port is
-/// the forward's — possibly remapped).
-fn display_badge(project: &ProjectState, name: &str) -> Option<String> {
-    let port = project.ports.get_port(name)?;
-    let local = project.port_map.get(&port).copied().unwrap_or(port);
-    match project.ports.get_url(name) {
-        Some(url) => Some(remap_url_port(url, port, local)),
-        None => Some(format!("Port {local}")),
-    }
-}
-
 /// One small icon button inside a sidebar hover cluster.
 fn row_action(
     icon: &'static [u8],
@@ -5979,11 +6317,13 @@ fn usable_icon(path: Option<String>) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Vector art goes to the `svg` widget, raster to `image` — iced has one
-/// decoder each and no sniffing between them.
-fn is_svg(path: &std::path::Path) -> bool {
-    path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+/// What Copy Path puts on the clipboard: the local path, or the scp-style
+/// `host:dir` a remote project pastes straight into scp/rsync.
+fn copyable_path(location: &ProjectLocation) -> String {
+    match location {
+        ProjectLocation::Local(p) => p.to_string_lossy().into_owned(),
+        ProjectLocation::Ssh { host, dir } => format!("{host}:{dir}"),
+    }
 }
 
 /// 1px hairline (style.css alpha(@borders, .3)) — horizontal.
@@ -6022,6 +6362,7 @@ const ICON_RESTART: &[u8] = include_bytes!("../assets/icons/view-refresh-symboli
 const ICON_CHANGES: &[u8] = include_bytes!("../assets/icons/send-to-symbolic.svg");
 const ICON_FOCUS: &[u8] = include_bytes!("../assets/icons/focus-windows-symbolic.svg");
 const ICON_CLEAR: &[u8] = include_bytes!("../assets/icons/edit-clear-symbolic.svg");
+const ICON_EXTERNAL: &[u8] = include_bytes!("../assets/icons/external-link-symbolic.svg");
 const ICON_REMOTE: &[u8] = include_bytes!("../assets/icons/tuxflow-remote-symbolic.svg");
 
 /// A symbolic icon: the baked-in fill is overridden by the tint, which

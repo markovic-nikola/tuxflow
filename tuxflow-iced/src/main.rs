@@ -4048,7 +4048,7 @@ impl App {
 
         let card = container(
             column![
-                text_input("jump to a process\u{2026}", &self.palette_query)
+                text_input("Jump to a process\u{2026}", &self.palette_query)
                     .id(self.palette_input.clone())
                     .on_input(Event::PaletteInput)
                     .on_submit(Event::PaletteSubmit)
@@ -4213,7 +4213,7 @@ impl App {
         if self.filter_open {
             inner = inner.push(
                 container(
-                    text_input("filter projects & processes\u{2026}", &self.filter_query)
+                    text_input("Filter projects & processes\u{2026}", &self.filter_query)
                         .id(self.filter_input.clone())
                         .on_input(Event::FilterInput)
                         .style(theme::input(LOCAL_ACCENT))
@@ -4405,14 +4405,14 @@ impl App {
             match &project.phase {
                 Phase::Loading => {
                     block = block.push(
-                        container(text("connecting\u{2026}").size(11).color(DIM)).padding([3, 10]),
+                        container(text("Connecting\u{2026}").size(11).color(DIM)).padding([3, 10]),
                     );
                 }
                 Phase::Failed(_, retryable) => {
-                    let mut r = row![text("unreachable").size(11).color(CRASHED)].spacing(8);
+                    let mut r = row![text("Unreachable").size(11).color(CRASHED)].spacing(8);
                     if *retryable {
                         r = r.push(
-                            button(text("retry").size(10))
+                            button(text("Retry").size(10))
                                 .padding([1, 8])
                                 .style(theme::pill_button(accent))
                                 .on_press(Event::RetryProbe(project.id)),
@@ -4579,7 +4579,7 @@ impl App {
             Status::Restarting(attempt) => {
                 content = content.push(
                     text(format!(
-                        "retry {attempt}/{}",
+                        "Retry {attempt}/{}",
                         processes::MAX_RESTART_ATTEMPTS
                     ))
                     .size(9)
@@ -4588,7 +4588,7 @@ impl App {
             }
             Status::Reconnecting(attempt) => {
                 content = content.push(
-                    text(format!("reconnect {attempt}"))
+                    text(format!("Reconnect {attempt}"))
                         .size(9)
                         .color(RESTARTING),
                 );
@@ -4713,8 +4713,8 @@ impl App {
         let Some(project) = self.active_project() else {
             return container(
                 column![
-                    text("no projects yet").size(14).color(DIM),
-                    button(text("+ add project").size(13))
+                    text("No projects yet").size(14).color(DIM),
+                    button(text("+ Add Project").size(13))
                         .padding([7, 16])
                         .style(theme::primary(LOCAL_ACCENT))
                         .on_press(Event::OpenAddProject),
@@ -4733,7 +4733,7 @@ impl App {
         match &project.phase {
             Phase::Loading => {
                 return container(
-                    text(format!("connecting to {}\u{2026}", project.key()))
+                    text(format!("Connecting to {}\u{2026}", project.key()))
                         .size(14)
                         .color(DIM),
                 )
@@ -4748,7 +4748,7 @@ impl App {
                     .align_x(iced::Alignment::Center);
                 if *retryable {
                     col = col.push(
-                        button(text("\u{27f3} retry").size(12))
+                        button(text("\u{27f3} Retry").size(12))
                             .padding([6, 14])
                             .style(theme::primary(accent))
                             .on_press(Event::RetryProbe(project.id)),
@@ -4766,16 +4766,16 @@ impl App {
         let Some(entry) = project.entries.get(project.selected) else {
             return container(
                 column![
-                    text("no processes").size(14).color(DIM),
+                    text("No processes").size(14).color(DIM),
                     row![
-                        button(text("+ command").size(12))
+                        button(text("+ Command").size(12))
                             .padding([6, 14])
                             .style(theme::primary(accent))
                             .on_press(Event::OpenAddCommand {
                                 project: project.id,
                                 agent: false,
                             }),
-                        button(text("+ agent").size(12))
+                        button(text("+ Agent").size(12))
                             .padding([6, 14])
                             .style(theme::primary(accent))
                             .on_press(Event::OpenAddCommand {
@@ -4809,9 +4809,9 @@ impl App {
             None => {
                 let label = match entry.status {
                     Status::Crashed(_) => {
-                        String::from("could not start \u{2014} check the command")
+                        String::from("Could not start \u{2014} check the command")
                     }
-                    _ => String::from("not running"),
+                    _ => String::from("Not running"),
                 };
                 container(text(label).size(13).color(DIM))
                     .center_x(Length::Fill)
@@ -4829,14 +4829,14 @@ impl App {
 
         if self.search_open {
             let hint: Element<'_, Event> = match self.search_hit {
-                Some(false) => text("no match").size(11).color(CRASHED).into(),
+                Some(false) => text("No matches").size(11).color(CRASHED).into(),
                 _ => text("").size(11).into(),
             };
             col = col
                 .push(
                     container(
                         row![
-                            text_input("search scrollback (regex)\u{2026}", &self.search_query)
+                            text_input("Search scrollback (regex)\u{2026}", &self.search_query)
                                 .id(self.search_input.clone())
                                 .on_input(Event::SearchQueryChanged)
                                 .on_submit(Event::SearchStep(SearchDirection::Left))
@@ -4872,7 +4872,7 @@ impl App {
             && entry.is_running()
             && self.settings.tools.agent_composer
         {
-            let placeholder = format!("message to {}\u{2026}", entry.config.name);
+            let placeholder = format!("Message to {}\u{2026}", entry.config.name);
             col = col.push(hline()).push(
                 container(
                     row![
@@ -4882,7 +4882,7 @@ impl App {
                             .style(theme::input(accent))
                             .padding([7, 14])
                             .size(13),
-                        button(text("send").size(12).font(bold()))
+                        button(text("Send").size(12).font(bold()))
                             .padding([7, 16])
                             .style(theme::primary(accent))
                             .on_press(Event::ComposerSend),
@@ -4905,19 +4905,19 @@ impl App {
             .unwrap_or(LOCAL_ACCENT);
         let editing = form.editing.is_some();
         let title = match (editing, form.agent) {
-            (true, _) => "edit process",
-            (false, true) => "add agent",
-            (false, false) => "add command",
+            (true, _) => "Edit Process",
+            (false, true) => "Add Agent",
+            (false, false) => "Add Command",
         };
 
         let name_row: Element<'_, Event> = if editing {
             row![
                 text(&form.name).size(15).font(bold()),
                 text(match form.original_category {
-                    ProcessCategory::Agent => "agent",
-                    ProcessCategory::Command => "command",
-                    ProcessCategory::Terminal => "terminal",
-                    ProcessCategory::SSH => "ssh",
+                    ProcessCategory::Agent => "Agent",
+                    ProcessCategory::Command => "Command",
+                    ProcessCategory::Terminal => "Terminal",
+                    ProcessCategory::SSH => "SSH",
                 })
                 .size(11)
                 .color(DIM),
@@ -4926,7 +4926,7 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into()
         } else {
-            text_input("name \u{2014} e.g. web", &form.name)
+            text_input("Name \u{2014} e.g. web", &form.name)
                 .on_input(Event::AddCommandName)
                 .style(theme::input(accent))
                 .padding([8, 14])
@@ -4962,7 +4962,7 @@ impl App {
             }
             col = col.push(
                 column![
-                    text("agent").size(11.5).font(bold()).color(TEXT_SECONDARY),
+                    text("Agent").size(11.5).font(bold()).color(TEXT_SECONDARY),
                     container(list)
                         .padding([4, 0])
                         .style(theme::settings_card)
@@ -4975,8 +4975,8 @@ impl App {
         col = col.push(name_row).push(
             text_input(
                 match form.agent {
-                    true => "command \u{2014} e.g. claude --model opus",
-                    false => "command \u{2014} e.g. npm run dev",
+                    true => "Command \u{2014} e.g. claude --model opus",
+                    false => "Command \u{2014} e.g. npm run dev",
                 },
                 &form.command,
             )
@@ -4988,7 +4988,7 @@ impl App {
         );
         col = col.push(
             text_input(
-                "working directory \u{2014} optional, defaults to the project",
+                "Working directory \u{2014} optional, defaults to the project",
                 &form.working_dir,
             )
             .on_input(Event::FormWorkingDir)
@@ -4999,14 +4999,14 @@ impl App {
         col = col
             .push(
                 iced::widget::checkbox(form.start_with_project)
-                    .label("start with project")
+                    .label("Start with project")
                     .on_toggle(Event::FormToggleStartWith)
                     .size(16)
                     .text_size(12.5),
             )
             .push(
                 iced::widget::checkbox(form.auto_restart)
-                    .label("restart on crash")
+                    .label("Restart on crash")
                     .on_toggle(Event::FormToggleAutoRestart)
                     .size(16)
                     .text_size(12.5),
@@ -5017,7 +5017,7 @@ impl App {
         if !form.agent {
             col = col.push(
                 iced::widget::checkbox(form.open_in_browser)
-                    .label("open in browser when a port appears")
+                    .label("Open in browser when a port appears")
                     .on_toggle(Event::FormToggleOpenBrowser)
                     .size(16)
                     .text_size(12.5),
@@ -5029,14 +5029,14 @@ impl App {
 
         let mut buttons = row![
             button(
-                text(if editing { "save" } else { "add & start" })
+                text(if editing { "Save" } else { "Add & Start" })
                     .size(12)
                     .font(bold()),
             )
             .padding([7, 16])
             .style(theme::primary(accent))
             .on_press(Event::AddCommandSubmit),
-            button(text("cancel").size(12))
+            button(text("Cancel").size(12))
                 .padding([7, 16])
                 .style(theme::pill_button(accent))
                 .on_press(Event::AddCommandCancel),
@@ -5044,7 +5044,7 @@ impl App {
         .spacing(8);
         if editing {
             buttons = buttons.push(iced::widget::space::horizontal()).push(
-                button(text("delete process").size(12))
+                button(text("Delete Process").size(12))
                     .padding([7, 16])
                     .style(theme::pill_intent(accent, CRASHED))
                     .on_press(Event::DeleteProcess),
@@ -5231,7 +5231,7 @@ impl App {
         // While a sync runs the counters stand down: the pre-sync numbers
         // sitting next to "syncing…" read as "the sync did nothing".
         if syncing {
-            content = content.push(text("syncing\u{2026}").size(10.5).color(DIM));
+            content = content.push(text("Syncing\u{2026}").size(10.5).color(DIM));
         } else {
             if git.behind > 0 {
                 content = content.push(
@@ -5880,7 +5880,7 @@ fn display_badge(project: &ProjectState, name: &str) -> Option<String> {
     let local = project.port_map.get(&port).copied().unwrap_or(port);
     match project.ports.get_url(name) {
         Some(url) => Some(remap_url_port(url, port, local)),
-        None => Some(format!("port {local}")),
+        None => Some(format!("Port {local}")),
     }
 }
 

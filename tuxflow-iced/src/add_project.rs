@@ -261,7 +261,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
     let header = row![
         text(title_for(state)).size(16).font(bold()),
         iced::widget::space::horizontal(),
-        button(text("\u{00d7} close").size(12))
+        button(text("\u{00d7} Close").size(12))
             .padding([5, 12])
             .style(theme::pill_button(TEXT_SECONDARY))
             .on_press(Msg::Close),
@@ -290,12 +290,12 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
 
 fn title_for(state: &State) -> &'static str {
     match (state.stage, state.kind) {
-        (Stage::Choose, _) => "add project",
-        (Stage::Locate, Kind::Local) => "open project directory",
-        (Stage::Locate, Kind::Remote) => "add remote project",
+        (Stage::Choose, _) => "Add Project",
+        (Stage::Locate, Kind::Local) => "Open Project Directory",
+        (Stage::Locate, Kind::Remote) => "Add Remote Project",
         (Stage::Configure, _) => match state.configure.as_ref().is_some_and(|c| c.select) {
-            true => "select commands",
-            false => "add project",
+            true => "Select Commands",
+            false => "Add Project",
         },
     }
 }
@@ -360,7 +360,7 @@ fn view_locate<'a>(state: &'a State, accent: iced::Color) -> Element<'a, Msg> {
                 .padding([4, 10])
                 .into(),
         ));
-        let mut host_field = text_input("hostname", &state.host)
+        let mut host_field = text_input("Hostname", &state.host)
             .style(theme::input(accent))
             .padding([6, 10])
             .size(12.5)
@@ -451,7 +451,7 @@ fn view_configure<'a>(state: &'a State, c: &'a Configure, accent: iced::Color) -
     let mut content = column![crate::widgets::row_owned(
         "Project Name".to_string(),
         c.location.key(),
-        text_input("name", &c.name)
+        text_input("Name", &c.name)
             .on_input(Msg::NameInput)
             .on_submit(Msg::Confirm)
             .style(theme::input(accent))

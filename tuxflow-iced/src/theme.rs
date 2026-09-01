@@ -26,8 +26,12 @@ pub const BG_GROUND: Color = Color::from_rgb(0.071, 0.071, 0.090);
 pub const BG_CARD: Color = Color::from_rgb(0.090, 0.090, 0.114);
 /// Window chrome: toolbar, status bar, composer bar.
 pub const BG_CHROME: Color = Color::from_rgb(0.090, 0.090, 0.110);
-/// Terminal surface — Catppuccin Mocha base, fixed.
-pub const BG_TERMINAL: Color = Color::from_rgb(0.118, 0.118, 0.180);
+/// Main-pane ground: full-pane views (settings, git, add forms) and the
+/// placeholder states. A design surface of the dark shell — NOT the
+/// terminal's background, which follows the user's terminal scheme via
+/// `terminal_pane` (GTK's dialogs sit on the window background, never the
+/// VTE palette).
+pub const BG_PANE: Color = Color::from_rgb(0.118, 0.118, 0.180);
 /// Input field fill.
 pub const BG_FIELD: Color = Color::from_rgb(0.114, 0.114, 0.141);
 pub const HAIRLINE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.05);
@@ -180,9 +184,26 @@ pub fn hairline(_: &Theme) -> container::Style {
     }
 }
 
-pub fn terminal_pane(_: &Theme) -> container::Style {
+pub fn pane(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_TERMINAL)),
+        background: Some(Background::Color(BG_PANE)),
+        ..Default::default()
+    }
+}
+
+/// The pane behind the terminal, in the ACTIVE terminal scheme's own
+/// background — looked up from core's shared table, never a constant.
+/// The fork paints no default-background cells (view.rs batches only cells
+/// whose background differs, "container already paints it"), so this
+/// container IS the terminal's background: a hardcoded twin drifts the
+/// moment the user picks another scheme, and any full-screen program that
+/// paints its own background (BCE fills the grid, never the container)
+/// gets framed in the stale color.
+pub fn terminal_pane(scheme: &str) -> impl Fn(&Theme) -> container::Style {
+    let (r, g, b) = palette::hex_rgb(palette::terminal_theme(scheme).background);
+    let bg = Color::from_rgb(r, g, b);
+    move |_: &Theme| container::Style {
+        background: Some(Background::Color(bg)),
         ..Default::default()
     }
 }

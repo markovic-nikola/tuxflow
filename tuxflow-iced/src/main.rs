@@ -4724,7 +4724,7 @@ impl App {
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .style(theme::terminal_pane)
+            .style(theme::pane)
             .into();
         };
         let remote = project.location.is_remote();
@@ -4739,7 +4739,7 @@ impl App {
                 )
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
-                .style(theme::terminal_pane)
+                .style(theme::pane)
                 .into();
             }
             Phase::Failed(message, retryable) => {
@@ -4757,7 +4757,7 @@ impl App {
                 return container(col)
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
-                    .style(theme::terminal_pane)
+                    .style(theme::pane)
                     .into();
             }
             Phase::Ready => {}
@@ -4790,19 +4790,18 @@ impl App {
             )
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .style(theme::terminal_pane)
+            .style(theme::pane)
             .into();
         };
 
         let body: Element<'_, Event> = match &entry.terminal {
+            // Flush, like VTE in the GTK shell — padding here frames any
+            // program that repaints its own background (the grid carries
+            // the color, the padding keeps the pane's) in a visible band.
             Some(term) => container(TerminalView::show(term).map(Event::Terminal))
-                .padding(iced::Padding {
-                    top: 6.0,
-                    right: 2.0,
-                    bottom: 4.0,
-                    left: 8.0,
-                })
-                .style(theme::terminal_pane)
+                .style(theme::terminal_pane(
+                    &self.settings.appearance.terminal_theme,
+                ))
                 .into(),
             // Only before a process's FIRST run: from then on its terminal
             // stays for good, showing what the last run printed — and its
@@ -4817,7 +4816,7 @@ impl App {
                 container(text(label).size(13).color(DIM))
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
-                    .style(theme::terminal_pane)
+                    .style(theme::pane)
                     .into()
             }
         };
@@ -5787,7 +5786,7 @@ fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// Centered elevated card on the terminal surface.
+/// Centered elevated card on the main-pane surface.
 fn form_card(content: iced::widget::Column<'_, Event>) -> Element<'_, Event> {
     container(
         container(content.width(420))
@@ -5796,7 +5795,7 @@ fn form_card(content: iced::widget::Column<'_, Event>) -> Element<'_, Event> {
     )
     .center_x(Length::Fill)
     .center_y(Length::Fill)
-    .style(theme::terminal_pane)
+    .style(theme::pane)
     .into()
 }
 

@@ -418,6 +418,16 @@ struct App {
     /// it — an unkeyed flag put "syncing…" on project B's chip and hung
     /// B's repo name on A's failure notice.
     git_syncing: std::collections::HashSet<u64>,
+    /// Projects with a status-chip `git fetch` in flight, by id. Without
+    /// the fetch the chip's ↓ can never light up on its own — `branch.ab`
+    /// counts against the last-FETCHED upstream ref. Guarded because a
+    /// down remote host blocks each git call ~10 s (GTK's poller keeps
+    /// one in-flight flag for the same reason): skipping a tick is free,
+    /// stacking another blocked worker is not.
+    git_fetching: std::collections::HashSet<u64>,
+    /// GitTick firings so far — every third one fetches (the 20 s local
+    /// tick at GTK's 60 s "poll git pull indicator" cadence).
+    git_ticks: u64,
     /// Identifies the open Git Changes view's poll chain, so a rapid
     /// close-and-reopen doesn't leave two of them polling one view.
     git_tick_stamp: u64,
@@ -637,6 +647,9 @@ enum Event {
         project: u64,
         status: Option<tuxflow_core::remote::git::GitStatus>,
         diffstat: tuxflow_core::remote::git::DiffStat,
+        /// This poll ran `git fetch` first — its arrival releases the
+        /// project's `git_fetching` guard.
+        fetched: bool,
     },
     /// Status-bar sync chip: fetch, ff-pull if behind, push if ahead.
     GitSync,
@@ -742,6 +755,8 @@ impl App {
             settings_ui: None,
             git_ui: None,
             git_syncing: std::collections::HashSet::new(),
+            git_fetching: std::collections::HashSet::new(),
+            git_ticks: 0,
             git_tick_stamp: 0,
             add_form_epoch: 0,
             notice: None,
@@ -1353,9 +1368,50 @@ impl App {
                     project: id,
                     status: answer.as_ref().map(|(s, _)| s.clone()),
                     diffstat: answer.map(|(_, d)| d).unwrap_or_default(),
+                    fetched: false,
                 }
             },
         )
+    }
+
+    /// The chip refresh that can DISCOVER commits to pull: `poll_git`
+    /// alone reads `branch.ab` against the last-fetched upstream ref, so
+    /// without this the ↓ counter never appears on its own. Reports twice,
+    /// as GTK's refresh does — the plain poll lands local numbers
+    /// immediately, the fetch arm corrects them seconds later; reporting
+    /// only after the fetch would leave the chip claiming "1 to push" for
+    /// the seconds after a push already cleared it. Runs where GTK passes
+    /// `do_fetch: true`: on switch, on Ready, and on the 60 s cadence.
+    fn poll_git_fetch(&mut self) -> Task<Event> {
+        let plain = self.poll_git();
+        let Some(project) = self.active_project() else {
+            return plain;
+        };
+        if !matches!(project.phase, Phase::Ready) {
+            return plain;
+        }
+        let id = project.id;
+        let location = project.location.clone();
+        if !self.git_fetching.insert(id) {
+            return plain;
+        }
+        let fetch = Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::fetch(&location);
+                let status = tuxflow_core::remote::git::query_status(&location)?;
+                Some((status, tuxflow_core::remote::git::query_diffstat(&location)))
+            }),
+            move |joined| {
+                let answer = joined.ok().flatten();
+                Event::GitPolled {
+                    project: id,
+                    status: answer.as_ref().map(|(s, _)| s.clone()),
+                    diffstat: answer.map(|(_, d)| d).unwrap_or_default(),
+                    fetched: true,
+                }
+            },
+        );
+        Task::batch([plain, fetch])
     }
 
     /// The status-bar sync chip: fetch, ff-pull if behind, push if ahead.
@@ -1862,7 +1918,8 @@ impl App {
         self.add_project = None;
         let task = self.open_project(&key);
         self.active = self.projects.len() - 1;
-        Task::batch([task, self.poll_git()])
+        let git = self.poll_git_fetch();
+        Task::batch([task, git])
     }
 
     /// Raise the Edit Project view for a card — GTK's dialog. Ready
@@ -1937,7 +1994,7 @@ impl App {
         // 2 s (possibly ssh) poll running blind underneath.
         self.git_ui = None;
         if switched {
-            self.poll_git()
+            self.poll_git_fetch()
         } else {
             Task::none()
         }
@@ -2538,7 +2595,8 @@ impl App {
                 let idx = n as usize - 1;
                 if idx < self.projects.len() && idx != self.active {
                     self.active = idx;
-                    return Task::batch([self.focus_selected_terminal(), self.poll_git()]);
+                    let git = self.poll_git_fetch();
+                    return Task::batch([self.focus_selected_terminal(), git]);
                 }
                 Task::none()
             }
@@ -2603,7 +2661,8 @@ impl App {
             return Task::none();
         }
         self.active = ((self.active as i32 + delta).rem_euclid(n as i32)) as usize;
-        Task::batch([self.focus_selected_terminal(), self.poll_git()])
+        let git = self.poll_git_fetch();
+        Task::batch([self.focus_selected_terminal(), git])
     }
 
     /// Close = GTK's "Close Agent/Terminal": ad-hoc terminals disappear,
@@ -2996,9 +3055,12 @@ impl App {
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
                         let boot = self.boot_processes(pidx, &live_sessions);
-                        // The chip shouldn't wait for the next 20 s tick.
+                        // The chip shouldn't wait for the next 20 s tick —
+                        // and this is the first poll that can fetch, so ↓
+                        // is truthful from Ready on (GTK fetches from its
+                        // .git probe's answer the same way).
                         let git = if pidx == self.active {
-                            self.poll_git()
+                            self.poll_git_fetch()
                         } else {
                             Task::none()
                         };
@@ -3030,7 +3092,8 @@ impl App {
                     None => Task::none(),
                 };
                 if switched {
-                    Task::batch([focus, self.poll_git()])
+                    let git = self.poll_git_fetch();
+                    Task::batch([focus, git])
                 } else {
                     focus
                 }
@@ -3335,7 +3398,18 @@ impl App {
                 }
             }
             Event::GitTick => {
-                let poll = self.poll_git();
+                // Every third tick fetches first — GTK's 60 s "poll git
+                // pull indicator" riding the existing 20 s local tick.
+                // Tick ONE fetches (GTK fetches the visible project at
+                // startup): a local project is Ready inline, so nothing
+                // else fetches for it until the first switch — the
+                // on-Ready fetch only covers probed (remote) projects.
+                self.git_ticks += 1;
+                let poll = if self.git_ticks % 3 == 1 {
+                    self.poll_git_fetch()
+                } else {
+                    self.poll_git()
+                };
                 let next = Task::perform(tokio::time::sleep(Duration::from_secs(20)), |_| {
                     Event::GitTick
                 });
@@ -3345,7 +3419,14 @@ impl App {
                 project,
                 status,
                 diffstat,
+                fetched,
             } => {
+                if fetched {
+                    // Even when the project is gone — a leaked id would
+                    // block nothing (ids are never reused), but keep the
+                    // set honest.
+                    self.git_fetching.remove(&project);
+                }
                 if let Some(pidx) = self.project_index(project) {
                     self.projects[pidx].git = status;
                     self.projects[pidx].diffstat = diffstat;
@@ -3778,7 +3859,7 @@ impl App {
                 self.add_project = None;
                 self.edit_project = None;
                 if switched {
-                    self.poll_git()
+                    self.poll_git_fetch()
                 } else {
                     Task::none()
                 }

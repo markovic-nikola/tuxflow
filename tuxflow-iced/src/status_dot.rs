@@ -1,12 +1,16 @@
-//! The process row's status light.
+//! The app's small canvas lights: the process row's status dot, and the
+//! sync chip's spinner.
 //!
-//! A filled dot in the status colour, which shrinks to a core and grows an
-//! orbiting arc while an agent is producing output — "Arc sweep", picked
-//! from the twenty-candidate round (2026-08-27). It is a canvas rather
-//! than the `text("●")` it replaces because nothing below iced's canvas
-//! tier can rotate: container styles animate colour, radius, size and
-//! shadow, and that is the whole list. The `canvas` feature is a flag
-//! rather than a dependency — iced_graphics is already in the tree.
+//! The dot is a filled disc in the status colour, which shrinks to a core
+//! and grows an orbiting arc while an agent is producing output — "Arc
+//! sweep", picked from the twenty-candidate round (2026-08-27). It is a
+//! canvas rather than the `text("●")` it replaces because nothing below
+//! iced's canvas tier can rotate: container styles animate colour, radius,
+//! size and shadow, and that is the whole list. The `canvas` feature is a
+//! flag rather than a dependency — iced_graphics is already in the tree.
+//! The spinner is the same arc without the core, speaking the same visual
+//! language at the same cadence — GTK's `gtk4::Spinner` in this shell's
+//! terms.
 
 use std::f32::consts::TAU;
 
@@ -96,6 +100,69 @@ impl<Message> Program<Message> for StatusDot {
             }
         }
 
+        vec![frame.into_geometry()]
+    }
+}
+
+/// Footprint of the sync chip's spinner. Sized under the 10.5 pt labels
+/// beside it, so swapping the counters for the spinner never changes the
+/// chip's height.
+const SPINNER_SIZE: f32 = 11.0;
+/// A touch more radius and ink than the dot's orbit: there is no core to
+/// clear, and alone on the chip the arc carries the whole signal.
+const SPINNER_R: f32 = 4.2;
+const SPINNER_W: f32 = 1.4;
+/// Same span and turn rate as the working arc above — one visual language
+/// for "busy", whichever surface is saying it.
+const SPINNER_SPAN: f32 = TAU * 0.3;
+/// MUST stay whole, exactly as [`TURNS_PER_PASS`] must: the spinner rides
+/// a looping phase that wraps 1 → 0, and a fractional multiplier would
+/// teleport the arc at every seam.
+const SPINNER_TURNS: f32 = 2.0;
+
+struct Spinner {
+    color: Color,
+    phase: f32,
+}
+
+/// A bare orbiting arc — the sync chip's stand-in for its ↓↑ counters
+/// while a sync runs. `phase` is a 0..1 loop (the app's `sync_spin`
+/// chain).
+pub fn spinner<'a, Message: 'a>(color: Color, phase: f32) -> Element<'a, Message> {
+    Canvas::new(Spinner { color, phase })
+        .width(SPINNER_SIZE)
+        .height(SPINNER_SIZE)
+        .into()
+}
+
+impl<Message> Program<Message> for Spinner {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let start = self.phase * TAU * SPINNER_TURNS;
+        let arc = Path::new(|builder| {
+            builder.arc(Arc {
+                center: frame.center(),
+                radius: SPINNER_R,
+                start_angle: Radians(start),
+                end_angle: Radians(start + SPINNER_SPAN),
+            });
+        });
+        frame.stroke(
+            &arc,
+            Stroke::default()
+                .with_color(self.color)
+                .with_width(SPINNER_W)
+                .with_line_cap(LineCap::Round),
+        );
         vec![frame.into_geometry()]
     }
 }

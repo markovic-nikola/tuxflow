@@ -729,3 +729,18 @@ fn late_scan_still_collects_secondary_ports_after_badge_lock() {
     // Badge stays locked
     assert_eq!(pd.get_port("dev"), Some(9292));
 }
+
+#[test]
+fn prose_categories_are_never_scanned() {
+    // Which categories get port detection at all — GTK's skip_port_detection
+    // and iced's rescan_ports gate both consult this one rule. Agents and
+    // SSH shells are prose surfaces: the first URL the model mentions would
+    // latch as the badge, and a quoted localhost port would even tunnel.
+    use tuxflow_core::config::schema::ProcessCategory;
+    use tuxflow_core::util::port_detector::scans_ports;
+
+    assert!(scans_ports(&ProcessCategory::Command));
+    assert!(scans_ports(&ProcessCategory::Terminal));
+    assert!(!scans_ports(&ProcessCategory::Agent));
+    assert!(!scans_ports(&ProcessCategory::SSH));
+}

@@ -1,5 +1,17 @@
 use std::collections::HashMap;
 
+use crate::config::schema::ProcessCategory;
+
+/// Whether a process of this category gets port detection at all. Agents and
+/// SSH shells are prose surfaces: the first URL the model happens to *mention*
+/// would latch as the badge, and a quoted `localhost:3000` would go further —
+/// the local tier locks, and on a remote project a tunnel opens to a port some
+/// other process owns. A dev server an agent starts belongs in a Command row,
+/// where its output is scanned. Both shells consult this one rule.
+pub fn scans_ports(category: &ProcessCategory) -> bool {
+    !matches!(category, ProcessCategory::Agent | ProcessCategory::SSH)
+}
+
 /// Bracket-prefix tags (concurrently-style `[name]`) that identify a build-tool line.
 const TOOL_PREFIXES: &[&str] = &[
     "vite",

@@ -118,6 +118,17 @@ const DIR_SUGGESTION_LIMIT: u32 = 10;
 /// includes glob's dotfile rule — a bare `*` does not match `.config`, so
 /// hidden directories surface only once the user types the leading dot.
 pub fn list_local_dirs(prefix: &str) -> Vec<String> {
+    list_local_raw(prefix, None, DIR_SUGGESTION_LIMIT)
+}
+
+/// The shared local walk behind [`list_local_dirs`] and
+/// [`list_local_icon_paths`]: directories always survive (marked with the
+/// trailing '/'); plain files only when `keep_file` accepts their name.
+fn list_local_raw(
+    prefix: &str,
+    keep_file: Option<&dyn Fn(&str) -> bool>,
+    limit: u32,
+) -> Vec<String> {
     // Split at the last '/': everything through it is the directory to read,
     // the tail is the partial name being completed.
     let split = match prefix.rfind('/') {
@@ -131,23 +142,28 @@ pub fn list_local_dirs(prefix: &str) -> Vec<String> {
     };
     let mut out: Vec<String> = entries
         .flatten()
-        .filter(|e| {
+        .filter_map(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
             if !name.starts_with(partial) {
-                return false;
+                return None;
             }
             if partial.is_empty() && name.starts_with('.') {
-                return false;
+                return None;
             }
             // `is_dir()` follows symlinks, matching the remote command's
             // `-L`: a symlink to a directory is a directory on both halves.
-            e.path().is_dir()
+            if e.path().is_dir() {
+                return Some(format!("{parent}{name}/"));
+            }
+            match keep_file {
+                Some(keep) if keep(&name) => Some(format!("{parent}{name}")),
+                _ => None,
+            }
         })
-        .map(|e| format!("{}{}/", parent, e.file_name().to_string_lossy()))
         .collect();
     out.sort();
-    out.truncate(DIR_SUGGESTION_LIMIT as usize);
+    out.truncate(limit as usize);
     out
 }
 
@@ -162,11 +178,49 @@ pub fn list_dirs(host: Option<&str>, prefix: &str) -> Vec<String> {
 }
 
 /// Directories (for descending) plus image files — the completion set for
-/// the remote icon picker. The cap is generous because that picker is a
-/// scrolling dialog rather than a dropdown: a cap tuned to what fits on
-/// screen would hide entries in any directory bigger than the viewport.
+/// the icon pickers. The cap is generous because those pickers scroll
+/// rather than dropping down: a cap tuned to what fits on screen would
+/// hide entries in any directory bigger than the viewport.
+const ICON_SUGGESTION_LIMIT: u32 = 100;
+
+/// The extensions the icon pickers offer, case-insensitively — must stay in
+/// step with the remote grep in [`list_remote_icon_paths`].
+fn is_image_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["svg", "png", "webp", "ico", "jpg", "jpeg"]
+        .iter()
+        .any(|ext| {
+            lower
+                .strip_suffix(ext)
+                .is_some_and(|stem| stem.ends_with('.'))
+        })
+}
+
+/// See [`ICON_SUGGESTION_LIMIT`] for the cap's rationale.
 pub fn list_remote_icon_paths(host: &str, prefix: &str) -> Vec<String> {
-    list_remote_raw(host, prefix, Some(r"(/|\.(svg|png|webp|ico|jpe?g))$"), 100)
+    list_remote_raw(
+        host,
+        prefix,
+        Some(r"(/|\.(svg|png|webp|ico|jpe?g))$"),
+        ICON_SUGGESTION_LIMIT,
+    )
+}
+
+/// Local twin of [`list_remote_icon_paths`], with the same deliberately
+/// identical contract the dirs pair keeps: absolute paths, trailing '/' on
+/// directories, mid-name prefix match, glob's dotfile rule, byte-order
+/// sort, one shared cap — so one completion widget drives both halves.
+pub fn list_local_icon_paths(prefix: &str) -> Vec<String> {
+    list_local_raw(prefix, Some(&is_image_name), ICON_SUGGESTION_LIMIT)
+}
+
+/// Icon-picker completions for either half, like [`list_dirs`]: directories
+/// to descend into plus image files to pick. Blocking — worker threads only.
+pub fn list_icon_paths(host: Option<&str>, prefix: &str) -> Vec<String> {
+    match host {
+        Some(host) => list_remote_icon_paths(host, prefix),
+        None => list_local_icon_paths(prefix),
+    }
 }
 
 /// Fetch a remote file's bytes (capped at `max_bytes`) over the shared

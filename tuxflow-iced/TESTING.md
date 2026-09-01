@@ -50,10 +50,13 @@ memory, rendering under your real workload.
 - **Remote projects**: probe on open, tmux reattach of live sessions,
   start/stop/restart, detach on quit (sessions survive), pulled-cable
   reconnect ("connection lost", endless retry, no crash).
-- **Ports**: badge on the sidebar row, auto-tunnel (remap on collision),
-  Ctrl+click a printed URL opens through the rewritten forward, ↗ open
-  glyph on the row and chip in the status bar, one-shot auto-open if
-  enabled.
+- **Ports**: auto-tunnel every detected port (remap on collision),
+  Ctrl+click a printed URL opens through the rewritten forward, open-in-
+  browser button in the status bar (icon-only, URL on hover; per-row it
+  lives in the right-click menu), one-shot auto-open if enabled. No port
+  chip on the sidebar row — the status-bar button is the one badge. Agent and SSH terminals never badge —
+  their output is prose, and a URL the model mentions is not an address
+  the process serves.
 - **Clipboard**: drag-select publishes to PRIMARY, middle-click pastes,
   Ctrl+Shift+C fetches the newest tmux buffer (incl. agent OSC 52),
   image paste uploads and types the remote path.
@@ -82,9 +85,9 @@ memory, rendering under your real workload.
   (stopped/crashed), restart + stop (running), or cancel
   (restarting/reconnecting); hover a project header for start-all-marked
   / restart-all-running / stop-all — the ⌃N hint and the counter pill
-  step aside while the glyphs are in. A row with a detected URL grows a
-  standing ↗ that opens it through the tunnel map — any row, not just
-  the selected one.
+  step aside while the glyphs are in. A row with a detected URL opens it
+  through the tunnel map via its right-click menu's Open in Browser —
+  any row, not just the selected one.
 - **Bare terminal pane**: no strip above the terminal. The window title
   bar names what you are looking at — `TuxFlow - {project}: {process}`,
   where the process half is its OSC title while a program sets one (an

@@ -507,3 +507,72 @@ mod list_local_dirs {
         );
     }
 }
+
+/// `list_local_icon_paths` is the icon pickers' twin of the pair above:
+/// directories to descend plus image files to pick, one contract for both
+/// halves. The remote side filters with `grep -iE '(/|\.(svg|png|webp|ico|
+/// jpe?g))$'`, so the local side must accept the same set — including the
+/// case-insensitivity, which real logo files (`Logo.PNG` exports) exercise.
+mod list_local_icon_paths {
+    use tempfile::TempDir;
+    use tuxflow_core::remote::fs::list_local_icon_paths;
+
+    fn fixture() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("assets")).unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        for file in ["logo.svg", "icon.PNG", "photo.jpeg", "readme.md", "svg"] {
+            std::fs::write(tmp.path().join(file), b"x").unwrap();
+        }
+        tmp
+    }
+
+    /// Directories keep their trailing '/', images come bare, everything
+    /// else is dropped — matching what the remote grep lets through.
+    #[test]
+    fn offers_dirs_and_images_only() {
+        let tmp = fixture();
+        let got = list_local_icon_paths(&format!("{}/", tmp.path().display()));
+        let names: Vec<&str> = got
+            .iter()
+            .map(|p| {
+                p.rsplit_once('/')
+                    .map_or(p.as_str(), |(_, isolated)| isolated)
+            })
+            .collect();
+        assert!(got.iter().any(|p| p.ends_with("/assets/")), "{got:?}");
+        assert!(names.contains(&"logo.svg"), "{got:?}");
+        assert!(names.contains(&"icon.PNG"), "case-insensitive: {got:?}");
+        assert!(names.contains(&"photo.jpeg"), "{got:?}");
+        assert!(!names.contains(&"readme.md"), "non-image kept: {got:?}");
+        // A file NAMED `svg` has no extension — the remote `\.` demands the
+        // dot, so the local half must too.
+        assert!(!names.contains(&"svg"), "extensionless file kept: {got:?}");
+        // The trailing-slash marking stays exclusive to directories.
+        assert!(
+            got.iter()
+                .all(|p| p.ends_with('/') == p.ends_with("assets/")),
+            "{got:?}"
+        );
+    }
+
+    /// The dotfile rule carries over unchanged: `.git/` hides until the dot
+    /// is typed, exactly as the dirs listing behaves.
+    #[test]
+    fn dotfile_rule_matches_the_dirs_listing() {
+        let tmp = fixture();
+        let bare = list_local_icon_paths(&format!("{}/", tmp.path().display()));
+        assert!(!bare.iter().any(|p| p.contains(".git")), "{bare:?}");
+        let dotted = list_local_icon_paths(&format!("{}/.", tmp.path().display()));
+        assert!(dotted.iter().any(|p| p.ends_with("/.git/")), "{dotted:?}");
+    }
+
+    /// Mid-name prefixes filter files and directories alike.
+    #[test]
+    fn filters_on_a_partial_name() {
+        let tmp = fixture();
+        let got = list_local_icon_paths(&format!("{}/lo", tmp.path().display()));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].ends_with("/logo.svg"), "{got:?}");
+    }
+}

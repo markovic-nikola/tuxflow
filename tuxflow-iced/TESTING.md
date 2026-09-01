@@ -136,6 +136,24 @@ memory, rendering under your real workload.
   (capped at 5000 lines / 256 KB), and switching project while it's open
   (it should close rather than show the wrong repo).
 
+- **Modal layers really are modal** (review batch 2026-09-01): click into
+  a running agent so the terminal has focus, then right-click a sidebar
+  row. Esc must close the MENU — not reach the agent as an interrupt —
+  and typing while a "Delete …?" card is up must go nowhere (before, it
+  went to the shell under the card, Enter included). Reorder chords
+  (Alt+Shift+arrows) are dead while a menu/card is open. Dismissing any
+  of them hands focus back to the terminal.
+- **Restart under fire**: restart a process that is mid-crash or crashes
+  instantly (a bad command). The fresh run must come up Running with no
+  crash banner bleeding into it — exits are stamped per run now, so a
+  dead run's exit can't be pinned on its replacement.
+- **Duplicate names**: add a command named like an existing one. The form
+  stays up with the reason on it (it used to vanish with everything
+  typed).
+- **Cleared icon cache**: `rm -rf ~/.cache/tuxflow/icons`, relaunch — a
+  remote project's avatar re-fetches instead of staying an initials
+  square forever.
+
 ## Not there yet (deliberate, GTK still covers these)
 
 - Drag-and-drop reorder (use Alt+Shift+Up/Down).

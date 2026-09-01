@@ -216,7 +216,9 @@ impl App {
                 // Everything VTE exposes as signals arrives here as data —
                 // peek before proxying to the widget.
                 let mut side_task = Task::none();
-                if let BackendCommand::ProcessAlacrittyEvent(ev) = &cmd {
+                // (The run stamp is vendor patch 18's; the spike never
+                // respawns, so every event is run 1 and it can ignore it.)
+                if let BackendCommand::ProcessAlacrittyEvent(_, ev) = &cmd {
                     side_task = self.observe_alacritty_event(id, ev);
                 }
 

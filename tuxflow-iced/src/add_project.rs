@@ -160,7 +160,13 @@ pub struct Detected {
 }
 
 impl State {
-    pub fn new(hosts: Vec<SshHost>) -> Self {
+    /// `epoch` seeds both generation counters. It must be disjoint from
+    /// every previous form instance's range (the app strides it per open):
+    /// listings and probes in flight when a form closes still arrive, get
+    /// routed to whatever form exists then, and with counters restarting
+    /// at 0 a reopened form would adopt the abandoned instance's replies —
+    /// up to a Configure stage for the previously typed project.
+    pub fn new(hosts: Vec<SshHost>, epoch: u64) -> Self {
         Self {
             stage: Stage::Choose,
             kind: Kind::Local,
@@ -169,8 +175,8 @@ impl State {
             hosts,
             host_choice: CUSTOM_HOST.to_string(),
             suggestions: Vec::new(),
-            stamp: 0,
-            probe_stamp: 0,
+            stamp: epoch,
+            probe_stamp: epoch,
             busy: None,
             error: None,
             configure: None,
@@ -205,6 +211,10 @@ impl State {
         self.kind = kind;
         self.stage = Stage::Locate;
         self.probe_stamp += 1;
+        // The suggestion stamp too: a listing still in flight for the OTHER
+        // kind (a slow remote ls, say) must not paint the VPS's directories
+        // under a local path field the moment it lands.
+        self.stamp += 1;
         self.suggestions.clear();
         self.error = None;
         self.busy = None;
@@ -577,7 +587,7 @@ mod tests {
     use super::*;
 
     fn state_with(kind: Kind, host: &str, path: &str) -> State {
-        let mut s = State::new(Vec::new());
+        let mut s = State::new(Vec::new(), 0);
         s.kind = kind;
         s.host = host.to_string();
         s.path = path.to_string();
@@ -630,7 +640,7 @@ mod tests {
             auto_named: false,
             display_name: None,
         };
-        let mut s = State::new(Vec::new());
+        let mut s = State::new(Vec::new(), 0);
         s.configured(Detected {
             stamp: s.probe_stamp,
             key: "/srv/app".into(),
@@ -660,7 +670,7 @@ mod tests {
     /// pressing Back drops them into Configure for an abandoned project.
     #[test]
     fn a_probe_that_lands_after_back_is_dropped() {
-        let mut s = State::new(Vec::new());
+        let mut s = State::new(Vec::new(), 0);
         s.enter(Kind::Remote);
         let stale = s.probe_stamp;
         // The user backs out while the probe is in flight.
@@ -684,7 +694,7 @@ mod tests {
     /// between, so it gets the plain rename step however many it defines.
     #[test]
     fn config_projects_skip_selection() {
-        let mut s = State::new(Vec::new());
+        let mut s = State::new(Vec::new(), 0);
         s.configured(Detected {
             stamp: s.probe_stamp,
             key: "/srv/app".into(),

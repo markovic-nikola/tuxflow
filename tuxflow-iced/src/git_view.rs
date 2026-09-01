@@ -143,6 +143,11 @@ pub enum Msg {
     },
     Diff {
         generation: u64,
+        /// Which file this diff is OF. The generation alone can't tell two
+        /// diffs apart when both were requested under it — two quick file
+        /// clicks race, and on a remote project the first (slow) reply
+        /// would paint over the second file's diff.
+        path: String,
         diff: Box<DiffResult>,
     },
     Sync {
@@ -153,7 +158,11 @@ pub enum Msg {
         hash: u64,
     },
     Done {
-        generation: u64,
+        /// Deliberately NOT generation-stamped: only one write action can
+        /// be in flight (`git_run` refuses while busy), and `busy` must be
+        /// cleared by exactly the action that set it — a generation gate
+        /// here let any list reload orphan the flag, wedging the view in
+        /// "Pushing…" with every button disabled.
         action: Busy,
         result: Result<(), String>,
     },

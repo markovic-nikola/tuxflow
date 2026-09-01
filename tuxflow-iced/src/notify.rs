@@ -59,9 +59,12 @@ pub fn auto_restart(ns: &NotificationSettings, project: &str, process: &str, att
 }
 
 /// Unconditional like the GTK app, but the caller fires it once per
-/// outage — a long outage must not ping every backoff tick.
-pub fn disconnect(project: &str, process: &str) {
-    send(
+/// outage — a long outage must not ping every backoff tick. Carries the
+/// sound like every other notification does (GTK routes ALL of them
+/// through the same sound gate, disconnect included).
+pub fn disconnect(ns: &NotificationSettings, project: &str, process: &str) {
+    send_with_sound(
+        ns,
         project,
         &format!("{process}: connection lost — reconnecting (it keeps running on the host)"),
     );

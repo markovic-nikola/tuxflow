@@ -213,6 +213,15 @@ marks something VTE gives TuxFlow that stock iced_term does not.
    unmangled. Also fixed Ctrl+U (both the CTRL and SHIFT+CTRL tables)
    sending 0x51 ('Q') instead of 0x15 (NAK, vt100) — an upstream
    transposition that broke shell kill-line.
+
+   A later sweep of the same table (2026-09-01) caught three more upstream
+   misencodings of the same family: Ctrl+' sent 0x1c — the FS byte that
+   belongs to **Ctrl+\\**, so pressing quote-with-Ctrl typed the SIGQUIT
+   character and killed the foreground job (the binding moved onto `\`
+   where it belongs); Alt+Insert sent `\x1b[3;2~`, which is Shift+Delete
+   (Insert is `2~`, Alt is modifier 3 → `\x1b[2;3~`); and Ctrl+F1..F4 sent
+   the malformed `\x1bO;5P`… instead of xterm's `\x1b[1;5P`… — a form no
+   terminal app parses.
 15. **Empty clipboard read must not capture the paste chord** (found live:
    Ctrl+V pasted text but did nothing with an image on the clipboard).
    iced's X11 clipboard backend (clipboard_x11) maps the owner's
@@ -276,3 +285,38 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     - `clear_viewport` does not move the cursor, so `goto(0, 0)` follows, and
       the display is scrolled back to the bottom: someone who hits Clear while
       scrolled up is asking for the empty screen, not their old reading spot.
+
+18. **Run-generation stamps on the event stream** (the attribution hole
+    patch 16 opened: a terminal now spans runs, but its event queue doesn't
+    know that). A child that dies just as the user clicks restart parks its
+    `ChildExit`/`Exit` in the unbounded channel; the embedder's stop+respawn
+    runs first, and the stale pair then arrives against the NEW run — which
+    flips a healthy process to Crashed, feeds a crash banner into its
+    RUNNING grid (the two-parsers hazard `feed` documents), and under
+    auto-restart later kills and respawns it for a crash that never
+    happened.
+    - The channel carries `(run, Event)`; `Command::ProcessAlacrittyEvent`
+      exposes the stamp; `Backend::run_generation()` is the current run,
+      bumped by `respawn` just before the new PTY opens.
+    - The stamp is read at SEND time from an atomic shared by every proxy —
+      the loops' AND `Term`'s own, because `Term::exit()` emits the `Exit`
+      half through Term's proxy, which lives across runs (a per-instance
+      stamp would freeze at its birth value). Queued events therefore wear
+      the run that produced them, whatever is current when they're finally
+      processed; the embedder drops mismatches.
+    - Remaining window, accepted: an old-run send racing the bump itself
+      (microseconds, needs the child to die inside the respawn call) —
+      against the unbounded queue latency it replaces.
+    - The subscription's coalesced repaint events (Wakeup &c.) take the
+      newest drained stamp: repaints are idempotent and the one that runs
+      paints the current grid regardless.
+    Pinned by a live-PTY test (`exit_events_carry_their_runs_generation`).
+
+19. **`TerminalView::unfocus()`** — the modal-grab primitive. Stack layers
+    above the base never capture keyboard events, so an embedder raising a
+    menu/dialog over a FOCUSED terminal leaks every keystroke into the PTY
+    (Esc meant for the menu reaches an agent as "interrupt"). The runtime
+    exposes `focusable::focus` as a Task but not `unfocus`; `focus(target)`'s
+    own contract is "focus the match, unfocus everything else", so focusing
+    an `Id::unique()` that exists nowhere is unfocus-all through the public
+    API.

@@ -22,6 +22,7 @@ use std::borrow::Cow;
 use std::cmp::min;
 use std::io::Result;
 use std::ops::{Index, RangeInclusive};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -65,7 +66,13 @@ pub enum Command {
     SearchClear,
     ProcessLink(LinkAction, Point),
     MouseReport(MouseButton, Modifiers, Point, bool),
-    ProcessAlacrittyEvent(Event),
+    /// An event off the PTY/Term channel, tagged with the RUN GENERATION it
+    /// was sent under (see [`Backend::run_generation`]). A terminal spans
+    /// runs since `respawn`, so an embedder attributing exits to processes
+    /// must drop events whose generation is not the current one — a child
+    /// that died just as the user hit restart parks its `ChildExit`/`Exit`
+    /// in the queue, and unstamped they would read as the NEW run crashing.
+    ProcessAlacrittyEvent(u64, Event),
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +182,12 @@ pub struct Backend {
     /// The sender every PTY loop of this terminal reports through — a
     /// respawned loop must reach the SAME subscription as the first one.
     event_proxy: EventProxy,
+    /// Which run the terminal is on, bumped by `respawn` just before the
+    /// new PTY opens. Shared with every event sender (the loops' proxies
+    /// AND `Term`'s own, which emits `Exit` — a per-instance stamp would
+    /// freeze Term's at its birth value), read at send time so queued
+    /// events carry the run that actually produced them.
+    run_generation: Arc<AtomicU64>,
     /// Parser for bytes the embedder writes into the grid itself (run
     /// banners). Separate from the PTY loop's own parser, which is why
     /// feeding is only safe between runs — see `feed`.
@@ -195,7 +208,7 @@ struct SearchState {
 impl Backend {
     pub fn new(
         id: u64,
-        pty_event_proxy_sender: mpsc::UnboundedSender<Event>,
+        pty_event_proxy_sender: mpsc::UnboundedSender<(u64, Event)>,
         settings: BackendSettings,
     ) -> Result<Self> {
         // The terminal knobs ride in through BackendSettings; everything
@@ -211,7 +224,11 @@ impl Backend {
         let terminal_size = TerminalSize::default();
         let pty = spawn_pty(id, terminal_size, &settings)?;
 
-        let event_proxy = EventProxy(pty_event_proxy_sender);
+        let run_generation = Arc::new(AtomicU64::new(1));
+        let event_proxy = EventProxy {
+            sender: pty_event_proxy_sender,
+            run: run_generation.clone(),
+        };
 
         let mut term = Term::new(config, &terminal_size, event_proxy.clone());
 
@@ -250,11 +267,19 @@ impl Backend {
             size: terminal_size,
             notifier,
             event_proxy,
+            run_generation,
             parser: ansi::Processor::new(),
             last_content: initial_content,
             url_regex: RegexSearch::new(URL_REGEX).expect("invalid url regexp"),
             search: None,
         })
+    }
+
+    /// The generation of the CURRENT run — compare against the stamp on
+    /// [`Command::ProcessAlacrittyEvent`] to drop events a previous run
+    /// parked in the queue before `respawn` replaced it.
+    pub fn run_generation(&self) -> u64 {
+        self.run_generation.load(Ordering::Relaxed)
     }
 
     /// End the PTY session — the child gets the same SIGHUP `Drop` sends
@@ -321,6 +346,10 @@ impl Backend {
         self.shutdown();
         self.feed(RESET_BETWEEN_RUNS);
         self.feed(banner);
+        // New run, new generation — bumped just before the spawn so every
+        // event of the new child carries it, while anything the OLD run
+        // already sent still wears the stamp it was sent under.
+        self.run_generation.fetch_add(1, Ordering::Relaxed);
         let pty = spawn_pty(self.id, self.size, settings)?;
         let pty_event_loop = EventLoop::new(
             self.term.clone(),
@@ -339,7 +368,7 @@ impl Backend {
         // them without the terminal lock so the UI thread doesn't contend
         // with a flooding PTY thread.
         match cmd {
-            Command::ProcessAlacrittyEvent(event) => {
+            Command::ProcessAlacrittyEvent(_, event) => {
                 return match event {
                     Event::Exit => Action::Shutdown,
                     Event::Title(title) => Action::ChangeTitle(title),
@@ -867,13 +896,19 @@ impl Drop for Backend {
 }
 
 #[derive(Clone)]
-pub struct EventProxy(mpsc::UnboundedSender<Event>);
+pub struct EventProxy {
+    sender: mpsc::UnboundedSender<(u64, Event)>,
+    /// The backend's run counter, read at SEND time: an event queued before
+    /// a respawn carries the run that produced it, not the run that happens
+    /// to be current when the embedder finally processes it.
+    run: Arc<AtomicU64>,
+}
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         // Called from the PTY thread, sometimes while it holds the terminal
         // lock — must never block (see the channel comment in terminal.rs).
-        let _ = self.0.send(event);
+        let _ = self.sender.send((self.run.load(Ordering::Relaxed), event));
     }
 }
 
@@ -906,12 +941,13 @@ mod tests {
     }
 
     /// Run the PTY until the child exits, draining events as the embedder
-    /// does. Panics rather than hanging forever if the child never ends.
-    fn run_to_exit(rx: &mut mpsc::UnboundedReceiver<Event>) {
+    /// does; returns the run generation the Exit was stamped with. Panics
+    /// rather than hanging forever if the child never ends.
+    fn run_to_exit(rx: &mut mpsc::UnboundedReceiver<(u64, Event)>) -> u64 {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             match rx.try_recv() {
-                Ok(Event::Exit) => return,
+                Ok((run, Event::Exit)) => return run,
                 Ok(_) => continue,
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
@@ -966,6 +1002,30 @@ mod tests {
         let screen = screen(&mut backend);
         assert!(screen.contains("before-tui"), "alt screen kept: {screen}");
         assert!(screen.contains("after-tui"), "no second run: {screen}");
+    }
+
+    /// The attribution contract: each run's events wear ITS generation, so
+    /// an embedder can drop what a dead run parked in the queue instead of
+    /// blaming the run that replaced it (a crash landing exactly on the
+    /// restart click used to flip the fresh run to Crashed and feed a
+    /// banner into its running grid).
+    #[test]
+    fn exit_events_carry_their_runs_generation() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut backend =
+            Backend::new(4, tx, settings("echo one")).expect("spawn");
+        let first = backend.run_generation();
+        assert_eq!(run_to_exit(&mut rx), first, "first run's stamp");
+
+        backend
+            .respawn(&settings("echo two"), b"")
+            .expect("respawn");
+        assert_eq!(backend.run_generation(), first + 1);
+        assert_eq!(
+            run_to_exit(&mut rx),
+            first + 1,
+            "second run's Exit must wear the bumped stamp"
+        );
     }
 
     /// `shutdown` is the stop button: the child dies, the output stays.

@@ -203,10 +203,12 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         Delete,     Modifiers::CTRL; BindingAction::Esc("\x1b[3;5~".into());
         PageUp,     Modifiers::CTRL; BindingAction::Esc("\x1b[5;5~".into());
         PageDown,   Modifiers::CTRL; BindingAction::Esc("\x1b[6;5~".into());
-        F1,         Modifiers::CTRL; BindingAction::Esc("\x1bO;5P".into());
-        F2,         Modifiers::CTRL; BindingAction::Esc("\x1bO;5Q".into());
-        F3,         Modifiers::CTRL; BindingAction::Esc("\x1bO;5R".into());
-        F4,         Modifiers::CTRL; BindingAction::Esc("\x1bO;5S".into());
+        // CSI 1;5 P/Q/R/S — xterm's modified-F1..F4 form. Upstream wrote
+        // "\x1bO;5P", which is not a sequence any terminal app parses.
+        F1,         Modifiers::CTRL; BindingAction::Esc("\x1b[1;5P".into());
+        F2,         Modifiers::CTRL; BindingAction::Esc("\x1b[1;5Q".into());
+        F3,         Modifiers::CTRL; BindingAction::Esc("\x1b[1;5R".into());
+        F4,         Modifiers::CTRL; BindingAction::Esc("\x1b[1;5S".into());
         F5,         Modifiers::CTRL; BindingAction::Esc("\x1b[15;5~".into());
         F6,         Modifiers::CTRL; BindingAction::Esc("\x1b[17;5~".into());
         F7,         Modifiers::CTRL; BindingAction::Esc("\x1b[18;5~".into());
@@ -243,7 +245,10 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         "z",        Modifiers::CTRL; BindingAction::Char('\x1a');
         "[",        Modifiers::CTRL; BindingAction::Char('\x1b');
         "]",        Modifiers::CTRL; BindingAction::Char('\x1d');
-        "\'",       Modifiers::CTRL; BindingAction::Char('\x1c');
+        // 0x1c (FS) belongs to Ctrl+\ — upstream hung it on Ctrl+', so
+        // pressing quote-with-Ctrl typed the SIGQUIT character and killed
+        // the foreground job. Ctrl+' now falls through to plain text.
+        "\\",       Modifiers::CTRL; BindingAction::Char('\x1c');
         "-",        Modifiers::CTRL; BindingAction::Char('\x1f');
         // SHIFT
         Enter,      Modifiers::SHIFT; BindingAction::Char('\x0d');
@@ -262,7 +267,9 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         Backspace,  Modifiers::ALT; BindingAction::Esc("\x1b\x7f".into());
         End,        Modifiers::ALT; BindingAction::Esc("\x1b[1;3F".into());
         Home,       Modifiers::ALT; BindingAction::Esc("\x1b[1;3H".into());
-        Insert,     Modifiers::ALT; BindingAction::Esc("\x1b[3;2~".into());
+        // Insert is 2~ and Alt is modifier 3 — upstream's "\x1b[3;2~" was
+        // Shift+Delete.
+        Insert,     Modifiers::ALT; BindingAction::Esc("\x1b[2;3~".into());
         Delete,     Modifiers::ALT; BindingAction::Esc("\x1b[3;3~".into());
         PageUp,     Modifiers::ALT; BindingAction::Esc("\x1b[5;3~".into());
         PageDown,   Modifiers::ALT; BindingAction::Esc("\x1b[6;3~".into());

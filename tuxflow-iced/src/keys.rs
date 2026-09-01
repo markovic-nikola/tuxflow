@@ -200,26 +200,40 @@ pub fn chord_string(key: &Key, modifiers: Modifiers) -> Option<String> {
             _ => return None,
         },
         Key::Character(c) => {
-            // A chord needs a real modifier or a function key — a bare
-            // letter would shadow typing everywhere.
-            if c.chars().count() != 1 {
+            let mut chars = c.chars();
+            let (Some(ch), None) = (chars.next(), chars.next()) else {
                 return None;
+            };
+            match ch {
+                // '+' is the separator, so as a KEY it has to carry a name —
+                // "Ctrl++" splits into an empty part and can never re-parse.
+                // GTK writes/reads the same name.
+                '+' => String::from("Plus"),
+                // ASCII-only uppercasing: `to_uppercase` on ß expands to
+                // "SS", which parses to a two-char chord nothing can press.
+                ch if ch.is_ascii() => ch.to_ascii_uppercase().to_string(),
+                ch => ch.to_string(),
             }
-            c.to_uppercase()
         }
         Key::Unidentified => return None,
     };
+    // Same order GTK's `keybinding_to_string` writes — the shells share the
+    // settings file, and the conflict check compares these as strings.
     let mut out = String::new();
     if modifiers.control() {
         out.push_str("Ctrl+");
     }
-    if modifiers.alt() {
-        out.push_str("Alt+");
-    }
     if modifiers.shift() {
         out.push_str("Shift+");
     }
-    if out.is_empty() && !key_part.starts_with('F') {
+    if modifiers.alt() {
+        out.push_str("Alt+");
+    }
+    // A chord needs a real modifier or a function key — a bare letter would
+    // shadow typing everywhere. Only F1–F12 pass (len > 1): the letter F
+    // itself must not slip through this gate, or capturing it installs a
+    // modifier-less Passthrough that eats every `f` in every terminal.
+    if out.is_empty() && !(key_part.len() > 1 && key_part.starts_with('F')) {
         return None;
     }
     out.push_str(&key_part);
@@ -266,6 +280,8 @@ fn parse(raw: &str) -> Option<Chord> {
         "F10" => ChordKey::Named(Named::F10),
         "F11" => ChordKey::Named(Named::F11),
         "F12" => ChordKey::Named(Named::F12),
+        // The named form of the separator character (see `chord_string`).
+        "Plus" => ChordKey::Char("+".to_string()),
         other if !other.is_empty() => ChordKey::Char(other.to_lowercase()),
         _ => return None,
     };
@@ -305,7 +321,7 @@ mod tests {
 
     #[test]
     fn chord_string_round_trips_through_parse() {
-        let cases: [(LogicalKey, Modifiers, &str); 4] = [
+        let cases: [(LogicalKey, Modifiers, &str); 6] = [
             (
                 LogicalKey::Character("f".into()),
                 Modifiers::CTRL | Modifiers::SHIFT,
@@ -317,10 +333,25 @@ mod tests {
                 "Ctrl+Up",
             ),
             (LogicalKey::Character(",".into()), Modifiers::CTRL, "Ctrl+,"),
+            // Three-modifier chords use GTK's Ctrl,Shift,Alt order — the
+            // shells share the file and the conflict check is a string
+            // compare, so a second spelling of one chord is a drift.
             (
                 LogicalKey::Character("c".into()),
-                Modifiers::CTRL | Modifiers::ALT,
-                "Ctrl+Alt+C",
+                Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT,
+                "Ctrl+Shift+Alt+C",
+            ),
+            // The separator as a key needs its named form to survive parse.
+            (
+                LogicalKey::Character("+".into()),
+                Modifiers::CTRL,
+                "Ctrl+Plus",
+            ),
+            // Non-ASCII keys pass through unexpanded (ß must not become SS).
+            (
+                LogicalKey::Character("\u{df}".into()),
+                Modifiers::CTRL,
+                "Ctrl+\u{df}",
             ),
         ];
         for (key, mods, want) in cases {
@@ -330,11 +361,18 @@ mod tests {
             assert_eq!(chord.modifiers, mods);
             assert!(chord_matches(&chord.key, &key));
         }
-        // Inexpressible: bare letters and lone modifiers.
+        // Inexpressible: bare letters and lone modifiers. The letter F is
+        // the trap — the F1-F12 exemption must not admit it, or capturing
+        // it installs a modifier-less binding that eats every typed `f`.
         assert_eq!(
             chord_string(&LogicalKey::Character("x".into()), Modifiers::empty()),
             None
         );
+        assert_eq!(
+            chord_string(&LogicalKey::Character("f".into()), Modifiers::empty()),
+            None
+        );
+        assert!(chord_string(&LogicalKey::Named(Named::F5), Modifiers::empty()).is_some());
     }
 
     #[test]

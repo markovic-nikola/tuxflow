@@ -188,7 +188,7 @@ pub fn view<'a>(state: &'a State, s: &'a AppSettings) -> Element<'a, Msg> {
         .spacing(16),
     )
     .padding(20)
-    .style(theme::terminal_pane)
+    .style(theme::pane)
     .width(Length::Fill)
     .height(Length::Fill)
     .into()

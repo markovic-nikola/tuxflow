@@ -325,6 +325,14 @@ struct ProjectState {
     /// starts producing output, cleared only at a pass boundary — see
     /// [`Sweep::tick`].
     sweeping: bool,
+    /// Whether the project sat in the running TIER at the last look —
+    /// [`App::refresh_recent_order`] stamps `last_used` and re-sorts the
+    /// sidebar on the flip, GTK's `refresh_project_running_state`. Starts
+    /// false, so a project loading with live sessions (reattach) flips and
+    /// stamps like a start, while a project loading idle stamps nothing —
+    /// stamping at load would re-date every project and wipe the saved
+    /// recency order.
+    was_running: bool,
 }
 
 impl ProjectState {
@@ -840,6 +848,7 @@ impl App {
             diffstat: tuxflow_core::remote::git::DiffStat::default(),
             icon: None,
             sweeping: false,
+            was_running: false,
             location,
         };
 
@@ -1073,16 +1082,12 @@ impl App {
     }
 
     /// Manual start: forgives past failures, cancels pending timers, arms
-    /// the one-shot auto-open, and stamps the project recently-used.
+    /// the one-shot auto-open. NO last_used stamp here — recency is stamped
+    /// on running-tier FLIPS by `refresh_recent_order` (GTK parity). A
+    /// per-start stamp re-dates a project that is already running, which
+    /// moves it WITHIN the running tier the moment a second process starts;
+    /// GTK's running tier holds still.
     fn start_fresh(&mut self, pidx: usize, index: usize) -> Task<Event> {
-        let key = self.projects[pidx].key();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.saved.set_last_used(&key, now);
-        self.saved.save();
-
         let entry = &mut self.projects[pidx].entries[index];
         entry.restart_attempts = 0;
         entry.restart_generation += 1;
@@ -2457,6 +2462,10 @@ impl App {
         {
             self.git_ui = None;
         }
+        // Running-tier flips stamp last_used and re-sort the sidebar —
+        // checked here for the same reason as the git view above: the
+        // statuses move from many places (clicks, async exits, reattach).
+        self.refresh_recent_order();
         match event {
             Event::WindowResized(size) => {
                 self.window_size = size;
@@ -5474,8 +5483,13 @@ impl App {
             Msg::KeybindHints(v) => self.settings.sidebar.show_keybind_hints = v,
             Msg::RecentFirst(v) => {
                 self.settings.sidebar.recent_first = v;
+                // Both directions re-sort — GTK's set_recent_first applies
+                // the manual order when switched OFF, not a freeze of
+                // whatever recency had produced.
                 if v {
                     self.sort_projects_recent_first();
+                } else {
+                    self.sort_projects_manual();
                 }
             }
             Msg::NotifyCrash(v) => self.settings.notifications.on_crash = v,
@@ -5595,17 +5609,99 @@ impl App {
         }
     }
 
-    /// Live re-sort for the recent-first toggle (project ids keep timers
-    /// safe — only the vec order changes).
+    /// GTK's sidebar order (`sort_project_rows` in project_list.rs), not a
+    /// flat recency sort: TWO TIERS. Projects with something running sit on
+    /// top in stable start order (`last_used` ASCENDING — a newly started
+    /// project appends BELOW the already-running, so their positions hold
+    /// still), stopped ones below it most-recently-used first, and
+    /// never-used projects tie at zero and keep the manual order at the
+    /// bottom. "Used" is the last tier FLIP, start or stop — see
+    /// [`Self::refresh_recent_order`]. Project ids keep timers safe — only
+    /// the vec order changes.
     fn sort_projects_recent_first(&mut self) {
         let active_id = self.projects.get(self.active).map(|p| p.id);
         let saved = &self.saved;
-        self.projects
-            .sort_by_key(|p| std::cmp::Reverse(saved.get_last_used(&p.key())));
+        let keys: HashMap<u64, (std::cmp::Reverse<bool>, i64, usize)> = self
+            .projects
+            .iter()
+            .map(|p| {
+                let key = p.key();
+                let manual = saved
+                    .directories
+                    .iter()
+                    .position(|d| d == &key)
+                    .unwrap_or(usize::MAX);
+                (
+                    p.id,
+                    recent_order_key(p.has_running(), saved.get_last_used(&key), manual),
+                )
+            })
+            .collect();
+        self.projects.sort_by_key(|p| keys[&p.id]);
         if let Some(id) = active_id
             && let Some(idx) = self.projects.iter().position(|p| p.id == id)
         {
             self.active = idx;
+        }
+    }
+
+    /// The order with recent-first OFF: the manual (saved) one — GTK's
+    /// `desired = order` branch. Turning the setting off must actually go
+    /// back, not freeze whatever recency had produced.
+    fn sort_projects_manual(&mut self) {
+        let active_id = self.projects.get(self.active).map(|p| p.id);
+        let saved = &self.saved;
+        let keys: HashMap<u64, usize> = self
+            .projects
+            .iter()
+            .map(|p| {
+                let key = p.key();
+                let manual = saved
+                    .directories
+                    .iter()
+                    .position(|d| d == &key)
+                    .unwrap_or(usize::MAX);
+                (p.id, manual)
+            })
+            .collect();
+        self.projects.sort_by_key(|p| keys[&p.id]);
+        if let Some(id) = active_id
+            && let Some(idx) = self.projects.iter().position(|p| p.id == id)
+        {
+            self.active = idx;
+        }
+    }
+
+    /// Stamp and re-sort on running-tier FLIPS — GTK's
+    /// `refresh_project_running_state`, centralized: both edges stamp
+    /// `last_used` (starting floats the project to the bottom of the
+    /// running tier, stopping slots it at the TOP of the stopped tier —
+    /// stamping only on start would order stopped projects by when they
+    /// were last STARTED, so stopping the one you started first would drop
+    /// it below projects you had already stopped). Runs at the top of
+    /// `update()`, the git-view invalidation idiom, so no status-mutation
+    /// site can be missed — exits arrive async, and stop/start/restart are
+    /// eight call sites. The event AFTER the mutating one applies the
+    /// order (a release always follows a press), which is also GTK's
+    /// deferred-to-idle timing.
+    fn refresh_recent_order(&mut self) {
+        let mut flipped = false;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for pidx in 0..self.projects.len() {
+            let running = self.projects[pidx].has_running();
+            if self.projects[pidx].was_running == running {
+                continue;
+            }
+            self.projects[pidx].was_running = running;
+            let key = self.projects[pidx].key();
+            self.saved.set_last_used(&key, now);
+            flipped = true;
+        }
+        if flipped && self.settings.sidebar.recent_first {
+            self.sort_projects_recent_first();
         }
     }
 
@@ -5856,6 +5952,24 @@ fn bold() -> iced::Font {
     }
 }
 
+/// The recent-first comparison key for one project, sorted ascending:
+/// running tier first, then within it `last_used` ASCENDING (stable start
+/// order — GTK appends a newly started project BELOW the already-running),
+/// while the stopped tier runs DESCENDING (most recently used first); the
+/// sign flip encodes the direction switch into one key. Never-used stopped
+/// projects tie at zero and fall to the manual position.
+fn recent_order_key(
+    running: bool,
+    last_used: u64,
+    manual: usize,
+) -> (std::cmp::Reverse<bool>, i64, usize) {
+    let tier_key = match running {
+        true => last_used as i64,
+        false => -(last_used as i64),
+    };
+    (std::cmp::Reverse(running), tier_key, manual)
+}
+
 /// An avatar path we can actually draw, or None for the initials square.
 /// Existence is checked HERE, once at load, and never again: a saved icon
 /// can outlive the file it names (a deleted logo, a cleared cache), and iced
@@ -6063,6 +6177,35 @@ mod tests {
         ];
         let order: Vec<usize> = sidebar_order(&entries).collect();
         assert_eq!(order, vec![3, 2, 1, 0]);
+    }
+
+    /// GTK's sort_project_rows contract: running projects on top in START
+    /// order (ascending stamps — the newest start sits at the BOTTOM of
+    /// the tier, so the already-running rows hold still), stopped ones
+    /// below it most-recently-used first, never-used last in manual order.
+    #[test]
+    fn recent_first_orders_in_two_tiers() {
+        let mut rows = vec![
+            ("stopped-recent", recent_order_key(false, 200, 0)),
+            ("running-old", recent_order_key(true, 50, 1)),
+            ("never-used-b", recent_order_key(false, 0, 3)),
+            ("running-new", recent_order_key(true, 90, 4)),
+            ("stopped-older", recent_order_key(false, 100, 5)),
+            ("never-used-a", recent_order_key(false, 0, 2)),
+        ];
+        rows.sort_by_key(|(_, k)| *k);
+        let order: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            order,
+            vec![
+                "running-old",
+                "running-new",
+                "stopped-recent",
+                "stopped-older",
+                "never-used-a",
+                "never-used-b",
+            ]
+        );
     }
 
     #[test]

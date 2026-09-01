@@ -75,6 +75,19 @@ memory, rendering under your real workload.
   (working directory field included), add project, SSH section rows,
   git chip in the status bar (branch ↑ahead ↓behind ±changed, 20 s
   refresh, over ssh for remote projects).
+- **Drag-and-drop reorder**, GTK's rules exactly: drag a process row onto
+  another row of the SAME project and category section (a command never
+  lands among agents), a project header onto ANOTHER project's header —
+  above or below by which half of the target you release on. The lifted
+  row fades in its seat while a ghost of it follows the pointer; the
+  target opens a 4 px gap with a 2 px accent rule marking the slot, and
+  nothing is drawn over a drop that would be refused. A press that moves
+  less than 8 px is still a click. Holding a drag near the list's top or
+  bottom edge scrolls it (the wheel works mid-drag too). The order
+  persists to projects.toml (`process_order` / `directories`) like GTK's,
+  and Alt+Shift+Up/Down still works. With recent-first on, a project drop
+  changes the SAVED order but the visible order stays recency-driven —
+  GTK does the same — so it shows once the setting is off.
 - **Header cluster** at the top of the sidebar: sidebar toggle, sidebar
   filter, settings, add project — same Adwaita symbolic icons as GTK,
   tooltips with your chords, toggled buttons keep their wash. Hiding the
@@ -172,7 +185,6 @@ memory, rendering under your real workload.
 
 ## Not there yet (deliberate, GTK still covers these)
 
-- Drag-and-drop reorder (use Alt+Shift+Up/Down).
 - Local-only trio: file watcher restarts, MCP socket, update chip — the
   update chip is why the bottom bar still has no "Update available".
 - Voice bridge for remote agents.

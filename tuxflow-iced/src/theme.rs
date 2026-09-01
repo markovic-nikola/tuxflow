@@ -540,6 +540,42 @@ pub fn process_row(
     }
 }
 
+/// How much of a dragged row is left behind in the sidebar while its
+/// ghost travels — style.css `.dragging { opacity: 0.35 }`. Applied to
+/// the row's ink and dot from the view; a button style can't fade its
+/// content.
+pub const LIFTED_ALPHA: f32 = 0.35;
+
+/// The 2px rule marking a drop slot, GTK's `.drop-target-above/-below`
+/// border in `@accent_bg_color`. Drawn as a layer of its own because iced
+/// borders are all-or-nothing across the four sides; transparent when
+/// idle, since the layer is always in the tree.
+pub fn drop_line(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(color)),
+        ..Default::default()
+    }
+}
+
+/// The lifted row following the pointer — GTK's WidgetPaintable drag
+/// icon, done as a floating card in the row's own colours.
+pub fn drag_ghost(accent: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(BG_FIELD)),
+        border: Border {
+            color: alpha(accent, 0.55),
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        shadow: Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            offset: Vector::new(0.0, 4.0),
+            blur_radius: 14.0,
+        },
+        ..Default::default()
+    }
+}
+
 /// A pickable card — the add-project flow's Local/Remote fork.
 ///
 /// Unlike `process_row`, this one is drawn at rest: it is the only thing on

@@ -250,6 +250,11 @@ fn default_keyboard_bindings() -> Vec<(Binding<InputKind>, BindingAction)> {
         // the foreground job. Ctrl+' now falls through to plain text.
         "\\",       Modifiers::CTRL; BindingAction::Char('\x1c');
         "-",        Modifiers::CTRL; BindingAction::Char('\x1f');
+        // NUL, as xterm sends it (emacs set-mark and friends). These rows
+        // must exist so the named-key text fallback in view.rs can't type
+        // a plain space where a control code belongs.
+        Space,      Modifiers::CTRL; BindingAction::Char('\x00');
+        Space,      Modifiers::SHIFT | Modifiers::CTRL; BindingAction::Char('\x00');
         // SHIFT
         Enter,      Modifiers::SHIFT; BindingAction::Char('\x0d');
         Backspace,  Modifiers::SHIFT; BindingAction::Char('\x7f');

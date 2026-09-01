@@ -463,17 +463,10 @@ impl<'a> TerminalView<'a> {
 
                     // If no binding matched, only write printable text (when provided)
                     if binding_action == BindingAction::Ignore {
-                        if let Some(c) = text {
-                            let mut bytes = c.as_bytes().to_vec();
-                            // Alt means ESC-prefix (xterm metaSendsEscape;
-                            // VTE and alacritty defaults) — single-byte
-                            // input only: AltGr-composed characters can
-                            // arrive with alt() set and must pass unmangled.
-                            if state.keyboard_modifiers.alt()
-                                && bytes.len() == 1
-                            {
-                                bytes.insert(0, 0x1b);
-                            }
+                        if let Some(bytes) = text_fallback(
+                            text.as_deref(),
+                            state.keyboard_modifiers.alt(),
+                        ) {
                             return Some(Command::Write(bytes));
                         }
                     }
@@ -484,6 +477,25 @@ impl<'a> TerminalView<'a> {
                         *modifiers,
                         last_content.terminal_mode,
                     );
+
+                    // Named keys need the SAME no-binding text fallback as
+                    // characters, because binding lookup is an EXACT
+                    // modifier match: Space is a named key with one bare
+                    // row, so a space struck while Shift is still held —
+                    // fast prose typing, a capital then the spacebar —
+                    // matched nothing and was silently swallowed. The
+                    // table keeps priority, so combos with real encodings
+                    // (Ctrl+Space = NUL, Shift+Enter, Alt+Enter) are
+                    // untouched; keys with no text (F-keys, arrows) still
+                    // write nothing.
+                    if binding_action == BindingAction::Ignore {
+                        if let Some(bytes) = text_fallback(
+                            text.as_deref(),
+                            state.keyboard_modifiers.alt(),
+                        ) {
+                            return Some(Command::Write(bytes));
+                        }
+                    }
                 },
                 _ => {},
             },
@@ -1015,6 +1027,23 @@ impl operation::Focusable for TerminalViewState {
     }
 }
 
+/// The no-binding fallback shared by both keyboard arms: the text the key
+/// itself produced, ESC-prefixed when Alt is held (xterm metaSendsEscape,
+/// the VTE and alacritty defaults) — single-byte input only, so
+/// AltGr-composed characters pass unmangled. `None` when the key produced
+/// no text (F-keys, arrows): those write nothing without a binding.
+fn text_fallback(text: Option<&str>, alt: bool) -> Option<Vec<u8>> {
+    let text = text?;
+    if text.is_empty() {
+        return None;
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    if alt && bytes.len() == 1 {
+        bytes.insert(0, 0x1b);
+    }
+    Some(bytes)
+}
+
 /// Prepare clipboard text for the PTY the way VTE/alacritty do: wrap in the
 /// bracketed-paste markers when the app opted in (stripping an embedded end
 /// marker — paste injection guard), otherwise normalize newlines to carriage
@@ -1192,6 +1221,25 @@ impl BackgroundRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shared no-binding fallback: a modified-but-unbound key still
+    /// types what it produced. Space-with-Shift-held is the case that
+    /// found it — fast prose typing (a capital, then the spacebar)
+    /// silently swallowed the space.
+    #[test]
+    fn text_fallback_types_what_the_key_produced() {
+        assert_eq!(text_fallback(Some(" "), false), Some(b" ".to_vec()));
+        // Alt ESC-prefixes single-byte input (metaSendsEscape)...
+        assert_eq!(text_fallback(Some(" "), true), Some(b"\x1b ".to_vec()));
+        // ...but multi-byte (AltGr compositions) pass unmangled.
+        assert_eq!(
+            text_fallback(Some("\u{20ac}"), true),
+            Some("\u{20ac}".as_bytes().to_vec())
+        );
+        // No text (F-keys, arrows) or empty text writes nothing.
+        assert_eq!(text_fallback(None, false), None);
+        assert_eq!(text_fallback(Some(""), false), None);
+    }
 
     mod handle_left_button_pressed_tests {
         use super::*;

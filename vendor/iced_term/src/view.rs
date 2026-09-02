@@ -475,6 +475,36 @@ impl<'a> TerminalView<'a> {
                     state.mouse_position_on_grid,
                 ));
             },
+            // Hold reporting (patch 22): the release, and the bare Space
+            // auto-repeats, are the embedder's to deliver — Claude Code's
+            // hold-to-talk reads them as a keyboard held down, and over ssh
+            // + tmux forwarded bytes arrive too unevenly for that. The first
+            // press (repeat = false) still types its space, so tapping is
+            // untouched; modified or non-Space repeats never enter here.
+            iced::keyboard::Event::KeyReleased { key, .. }
+                if self.term.hold_relay
+                    && matches!(
+                        key,
+                        Key::Named(iced::keyboard::key::Named::Space)
+                    ) =>
+            {
+                return Some(Command::HoldRelease);
+            },
+            iced::keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                repeat,
+                ..
+            } if *repeat
+                && self.term.hold_relay
+                && modifiers.is_empty()
+                && matches!(
+                    key,
+                    Key::Named(iced::keyboard::key::Named::Space)
+                ) =>
+            {
+                return Some(Command::HoldRepeat);
+            },
             iced::keyboard::Event::KeyPressed {
                 key,
                 modifiers,

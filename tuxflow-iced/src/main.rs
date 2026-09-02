@@ -434,6 +434,10 @@ struct App {
     /// unkeyed flag put the spinner on project B's chip and hung B's repo
     /// name on A's failure notice.
     git_syncing: std::collections::HashSet<u64>,
+    /// Hold-to-talk relays by TERMINAL id (core `remote/hold.rs`): a held
+    /// Space in a remote agent terminal is generated on the host, not
+    /// forwarded byte-by-byte — see fork patch 22 for why.
+    hold_relays: HashMap<u64, remote::hold::HoldRelay>,
     /// The sync spinner's phase: a second [`Sweep`] chain at the same
     /// 20 fps cadence, alive only while `git_syncing` is non-empty. One
     /// chain serves however many syncs overlap.
@@ -619,6 +623,17 @@ enum Event {
         project: u64,
         result: ProbeResult,
     },
+    /// The microphone bridge for a freshly probed remote project reported
+    /// (up, refused, or timed out). Carries the probe's live sessions, since
+    /// the boot that reattaches them waited on this.
+    MicBridgeReady {
+        project: u64,
+        live_sessions: Vec<String>,
+        result: Result<(), String>,
+    },
+    /// Settings → Remote Microphone switched on: one (host, reason) per
+    /// bridge that could not be brought up.
+    MicBridgeReport(Vec<(String, String)>),
     RetryProbe(u64),
     SelectProcess {
         project: u64,
@@ -839,6 +854,10 @@ enum Event {
 impl App {
     fn new() -> (Self, Task<Event>) {
         let settings = AppSettings::load();
+        // Must reach the mic module before any project registers its host,
+        // or the first load would skip bridging (GTK's window does the same
+        // before it builds anything).
+        remote::mic::set_enabled(settings.tools.remote_microphone);
         theme::set_accents(
             &settings.appearance.local_accent_color,
             &settings.appearance.remote_accent_color,
@@ -860,6 +879,7 @@ impl App {
             settings_ui: None,
             git_ui: None,
             git_syncing: std::collections::HashSet::new(),
+            hold_relays: HashMap::new(),
             sync_spin: Sweep::default(),
             git_fetching: std::collections::HashSet::new(),
             git_ticks: 0,
@@ -1185,6 +1205,93 @@ impl App {
         )
     }
 
+    /// A Space auto-repeat in a remote agent terminal (fork patch 22): keep
+    /// the running relay alive, start one if there is none, and fall back
+    /// to forwarding the repeat as a byte — the behaviour before the relay
+    /// — when the host has no tmux session to inject into or the relay is
+    /// gone (a link stalled past `STALE_MS`, a host without tmux, the
+    /// session ended). The fallback is what keeps the flag safe to set.
+    fn hold_repeat(&mut self, pidx: usize, index: usize, term_id: u64) {
+        if let Some(relay) = self.hold_relays.get_mut(&term_id) {
+            if relay.keepalive() {
+                return;
+            }
+            log::info!("hold relay for terminal {term_id} is gone; forwarding");
+            self.hold_relays.remove(&term_id);
+            self.forward_space(pidx, index);
+            return;
+        }
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
+        let target = match (project.location.host(), entry.remote_session.as_deref()) {
+            (Some(host), Some(session)) if entry.is_running() => {
+                Some((host.to_string(), session.to_string()))
+            }
+            _ => None,
+        };
+        let Some((host, session)) = target else {
+            self.forward_space(pidx, index);
+            return;
+        };
+        match remote::hold::HoldRelay::spawn(&host, &session) {
+            Ok(relay) => {
+                log::info!("hold relay started: {session} on {host}");
+                self.hold_relays.insert(term_id, relay);
+            }
+            Err(e) => {
+                log::warn!("hold relay for {session} on {host} failed to start: {e}");
+                self.forward_space(pidx, index);
+            }
+        }
+    }
+
+    /// The pre-relay behaviour for one repeat: write the space.
+    fn forward_space(&mut self, pidx: usize, index: usize) {
+        if let Some(term) = self.projects[pidx].entries[index].terminal.as_mut() {
+            term.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
+                b" ".to_vec(),
+            )));
+        }
+    }
+
+    /// End a relay whose terminal is stopping, exiting or closing.
+    fn drop_hold_relay(&mut self, term_id: Option<u64>) {
+        if let Some(relay) = term_id.and_then(|id| self.hold_relays.remove(&id)) {
+            relay.stop();
+        }
+    }
+
+    /// GTK parity (window.rs, the probe's reattach): note the host with the
+    /// mic module and, while bridging is on, wait (bounded) for its bridge
+    /// BEFORE the processes appear. Claude Code probes for a microphone
+    /// once and caches the answer for the life of the agent process, so an
+    /// agent whose pane shows up before the bridge is up can never see it —
+    /// and the user has no way to tell that from a broken bridge. Boots
+    /// either way; a failure lands as a notification, because every
+    /// downstream symptom points nowhere near the cause.
+    fn boot_after_mic_bridge(&mut self, pidx: usize, live_sessions: Vec<String>) -> Task<Event> {
+        let Some(host) = self.projects[pidx].location.host().map(String::from) else {
+            return self.boot_processes(pidx, &live_sessions);
+        };
+        // Registered unconditionally — `mic` decides whether to bridge from
+        // the setting, so toggling it later reaches projects already open.
+        remote::mic::register_host(&host);
+        if !remote::mic::is_enabled() {
+            return self.boot_processes(pidx, &live_sessions);
+        }
+        let id = self.projects[pidx].id;
+        Task::perform(
+            // Parks on the mic worker's reply (20 s cap inside) — exactly
+            // what the blocking pool is for.
+            tokio::task::spawn_blocking(move || remote::mic::wait_ready(&host)),
+            move |joined| Event::MicBridgeReady {
+                project: id,
+                live_sessions: live_sessions.clone(),
+                result: joined.unwrap_or_else(|e| Err(format!("mic bridge worker died: {e}"))),
+            },
+        )
+    }
+
     /// Start what should be up after load: sessions still alive on the host
     /// (reattach — never show "stopped" for a running detached process) and
     /// start_with_project ones (those count as user-initiated).
@@ -1242,6 +1349,14 @@ impl App {
         );
         let remote_agent = project.location.host().is_some()
             && project.entries[index].config.category == ProcessCategory::Agent;
+        // Beyond GTK: re-ensure the mic bridge on every remote run. The
+        // forward is its own ssh connection, so the outage that has this
+        // process reconnecting killed the bridge too — and nothing else
+        // would bring it back before the next launch. Non-blocking, and
+        // one try_wait on the mic worker while the bridge is up.
+        if let Some(host) = project.location.host() {
+            remote::mic::register_host(host);
+        }
         let entry = &mut project.entries[index];
         let separator_label = run_label(&entry.status);
         // (widget id to focus, terminal id, whether `fresh_id` was taken)
@@ -1274,6 +1389,10 @@ impl App {
                         },
                         iced_term::bindings::BindingAction::Paste,
                     )]));
+                    // Hold-to-talk over a jittery link: Space repeats
+                    // and the release surface as actions and the hold is
+                    // relayed on the host (fork patch 22, `hold_repeat`).
+                    term.handle(iced_term::Command::SetHoldRelay(true));
                 }
                 let widget = term.widget_id().clone();
                 entry.terminal = Some(term);
@@ -1330,6 +1449,7 @@ impl App {
     /// minus the part that threw away everything the process printed.
     /// It emits no Exit event, so the status set here is the final word.
     fn stop(&mut self, pidx: usize, index: usize) {
+        self.drop_hold_relay(self.projects[pidx].entries[index].term_id);
         let project = &mut self.projects[pidx];
         if let Some(host) = project.location.host() {
             let entry = &mut project.entries[index];
@@ -1439,6 +1559,14 @@ impl App {
     /// sessions DETACH (kill only happens on explicit per-process stop) —
     /// the same contract as quitting the app.
     fn close_project(&mut self, pidx: usize) {
+        let held: Vec<u64> = self.projects[pidx]
+            .entries
+            .iter()
+            .filter_map(|e| e.term_id)
+            .collect();
+        for id in held {
+            self.drop_hold_relay(Some(id));
+        }
         let key = self.projects[pidx].key();
         if let Some(tunnels) = &mut self.projects[pidx].tunnels {
             tunnels.close_all();
@@ -1459,6 +1587,7 @@ impl App {
     /// A terminal's run ended (Exit event) — classify and schedule what the
     /// policy asks for (restart with backoff, endless reconnect, nothing).
     fn finalize_exit(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        self.drop_hold_relay(self.projects[pidx].entries[index].term_id);
         let project = &mut self.projects[pidx];
         let connection_loss = project.location.is_remote()
             && project.entries[index].config.category != ProcessCategory::SSH
@@ -3353,6 +3482,11 @@ impl App {
                 position,
             } => {
                 self.save_window_state(maximized, position);
+                // Remote processes deliberately outlive us, but the
+                // microphone bridge must not: it is the one thing that stays
+                // pointed at this machine's hardware. PDEATHSIG covers the
+                // exits that skip this (crash, SIGKILL, cargo watch).
+                remote::mic::shutdown();
                 iced::window::close(id)
             }
             Event::Probed { project, result } => {
@@ -3384,7 +3518,7 @@ impl App {
                         let merged = processes::merge_saved(configs, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
-                        let boot = self.boot_processes(pidx, &live_sessions);
+                        let boot = self.boot_after_mic_bridge(pidx, live_sessions);
                         // The chip shouldn't wait for the next 20 s tick —
                         // and this is the first poll that can fetch, so ↓
                         // is truthful from Ready on (GTK fetches from its
@@ -3406,6 +3540,28 @@ impl App {
                 Some(pidx) => self.probe_task(pidx),
                 None => Task::none(),
             },
+            Event::MicBridgeReady {
+                project,
+                live_sessions,
+                result,
+            } => {
+                // A project closed during the wait has nothing left to boot.
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                if let Err(reason) = result
+                    && let Some(host) = self.projects[pidx].location.host()
+                {
+                    notify::mic_bridge_failed(&self.settings.notifications, host, &reason);
+                }
+                self.boot_processes(pidx, &live_sessions)
+            }
+            Event::MicBridgeReport(failures) => {
+                for (host, reason) in failures {
+                    notify::mic_bridge_failed(&self.settings.notifications, &host, &reason);
+                }
+                Task::none()
+            }
             Event::SelectProcess { project, index } => {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
@@ -4636,6 +4792,16 @@ impl App {
                             iced::clipboard::write(text.clone()),
                             iced::clipboard::write_primary(text),
                         ])
+                    }
+                    iced_term::actions::Action::HoldRepeat => {
+                        self.hold_repeat(pidx, index, term_id);
+                        Task::none()
+                    }
+                    iced_term::actions::Action::HoldRelease => {
+                        if let Some(relay) = self.hold_relays.remove(&term_id) {
+                            relay.stop();
+                        }
+                        Task::none()
                     }
                     iced_term::actions::Action::ReportedSelectionGesture => {
                         // The pane's app owns the mouse, so the selection
@@ -6756,7 +6922,22 @@ impl App {
                 self.rebuild_keys();
             }
             Msg::Composer(v) => self.settings.tools.agent_composer = v,
-            Msg::RemoteMic(v) => self.settings.tools.remote_microphone = v,
+            Msg::RemoteMic(v) => {
+                self.settings.tools.remote_microphone = v;
+                // Applies live, to projects that are already open, in both
+                // directions — on bridges them, off tears every bridge down.
+                remote::mic::set_enabled(v);
+                // Flipping this on is the one moment the user is actually
+                // looking for a result, so report failures instead of only
+                // logging them. Saves here because the arm returns early.
+                if v {
+                    self.settings.save();
+                    return Task::perform(
+                        tokio::task::spawn_blocking(remote::mic::wait_ready_all),
+                        |joined| Event::MicBridgeReport(joined.unwrap_or_default()),
+                    );
+                }
+            }
             Msg::Editor(label) => {
                 if let Some((cmd, _)) = tuxflow_core::config::settings::EDITOR_CHOICES
                     .iter()

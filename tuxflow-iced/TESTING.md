@@ -61,6 +61,29 @@ memory, rendering under your real workload.
   Ctrl+Shift+C fetches the newest tmux buffer (incl. agent OSC 52),
   image paste uploads and types the remote path.
 - **Composer** under agent terminals: type locally, Enter/send delivers.
+- **Voice input on remote agents** (Settings → Tools → Remote
+  Microphone): with it on, opening a remote project brings up a reverse
+  forward — `ps` shows `ssh -N … -R …/.cache/tuxflow/mic.sock` under the
+  app and `$XDG_RUNTIME_DIR/tuxflow/mic.sock` exists locally. Hold-to-talk
+  in Claude Code on that host then records through THIS machine's mic.
+  Off tears every forward down at once; on brings them back for projects
+  already open and reports a host that refuses in a notification. Quit
+  tears them down too (remote sessions outlive the app; the mic must not),
+  and a forward lost to an outage comes back with the next run of any
+  process on that host. An agent that already gave up ("voice input …
+  paused" from before the bridge was up) needs its voice re-enabled or a
+  restart — the host-side shim never changed, only what answers behind it.
+- **Hold-to-talk itself, over ssh**: hold Space in a remote agent for a
+  few seconds. "keep holding…" then "listening…" should appear in the
+  footer and stay for the whole hold, and one hold must yield ONE
+  transcript. Under the hood the held key is no longer forwarded as
+  repeated spaces (over ssh + tmux they arrive unevenly enough that
+  Claude Code's 200 ms release timer ended recordings mid-hold — the
+  "double recordings" symptom); a relay on the host generates them inside
+  the tmux session. `RUST_LOG=info` shows `hold relay started: …` on the
+  first repeat and `tuxflow hold relay: N spaces` on release; tapping
+  Space still types a space, and hosts without tmux fall back to plain
+  forwarding.
 - **Lifecycle**: crash → auto-restart backoff (1s→32s, gives up at 5,
   60 s of stability resets), notifications per your settings flags.
 - **Output survives the run** (GTK's one-VTE-per-process): a command that
@@ -187,7 +210,6 @@ memory, rendering under your real workload.
 
 - Local-only trio: file watcher restarts, MCP socket, update chip — the
   update chip is why the bottom bar still has no "Update available".
-- Voice bridge for remote agents.
 - Menu stragglers: Edit Project (dialog not ported), Redraw Terminal (a
   VTE workaround with nothing to port).
 

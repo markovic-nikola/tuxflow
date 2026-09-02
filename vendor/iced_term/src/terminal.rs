@@ -26,6 +26,10 @@ pub enum Command {
     ChangeFont(FontSettings),
     AddBindings(Vec<(Binding<InputKind>, BindingAction)>),
     ProxyToBackend(backend::Command),
+    /// Hold reporting (patch 22): with it on, a bare Space auto-repeat
+    /// surfaces as `Action::HoldRepeat` instead of being written, and a
+    /// Space release as `Action::HoldRelease`. Off by default.
+    SetHoldRelay(bool),
 }
 
 pub struct Terminal {
@@ -35,6 +39,7 @@ pub struct Terminal {
     pub(crate) theme: Theme,
     pub(crate) cache: Cache,
     pub(crate) bindings: BindingsLayout,
+    pub(crate) hold_relay: bool,
     pub(crate) backend: backend::Backend,
     backend_event_rx: Arc<Mutex<UnboundedReceiver<(u64, AlacrittyEvent)>>>,
 }
@@ -81,6 +86,7 @@ impl Terminal {
             font,
             theme,
             bindings: BindingsLayout::default(),
+            hold_relay: false,
             cache: Cache::default(),
             backend,
             backend_event_rx: Arc::new(Mutex::new(backend_event_rx)),
@@ -158,6 +164,9 @@ impl Terminal {
             Command::AddBindings(bindings) => {
                 self.bindings.add_bindings(bindings);
             },
+            Command::SetHoldRelay(on) => {
+                self.hold_relay = on;
+            },
             Command::ProxyToBackend(cmd) => {
                 // Snapshotting the viewport and clearing the canvas cache on
                 // every event is wasted work for commands that cannot change
@@ -212,6 +221,8 @@ fn proxied_cmd_changes_content(cmd: &backend::Command) -> bool {
         // on screen. ReportedSelectionGesture is pure notification.
         backend::Command::SelectRelease
         | backend::Command::ReportedSelectionGesture
+        | backend::Command::HoldRepeat
+        | backend::Command::HoldRelease
         | backend::Command::ProcessLink(..)
         | backend::Command::MouseReport(..) => false,
     }

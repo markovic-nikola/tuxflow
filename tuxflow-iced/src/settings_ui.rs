@@ -8,7 +8,7 @@
 //! Mutation, saving and live-apply happen in `App::handle_settings` —
 //! every change saves immediately, like the GTK dialog's per-row saves.
 //! Settings whose iced consumer doesn't exist yet (color scheme, MCP,
-//! file-watch, mic…) still edit the shared settings.toml and say so in
+//! file-watch…) still edit the shared settings.toml and say so in
 //! their subtitle rather than pretending.
 
 use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
@@ -565,7 +565,7 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
                 ),
                 switch_row(
                     "Remote Microphone",
-                    "GTK shell \u{2014} this shell's voice bridge is still pending. While a remote project is open there, the host can listen.",
+                    "Let agents on remote hosts record voice input through this machine's microphone \u{2014} while a remote project is open, the host can listen",
                     t.remote_microphone,
                     Msg::RemoteMic,
                 ),

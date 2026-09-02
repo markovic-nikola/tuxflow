@@ -76,3 +76,16 @@ pub fn finish(ns: &NotificationSettings, project: &str, process: &str) {
     }
     send_with_sound(ns, project, &format!("{process} finished"));
 }
+
+/// The microphone bridge to a remote host couldn't be brought up. Worth
+/// interrupting for: every downstream symptom (agents reporting no
+/// microphone, voice "failing repeatedly and paused") points nowhere near
+/// the cause. Unconditional like GTK's `notify_mic_bridge_failed`, and
+/// carrying the sound like every other kind.
+pub fn mic_bridge_failed(ns: &NotificationSettings, host: &str, reason: &str) {
+    send_with_sound(
+        ns,
+        "Microphone bridge unavailable",
+        &format!("Voice input won't work on {host} \u{2014} {reason}"),
+    );
+}

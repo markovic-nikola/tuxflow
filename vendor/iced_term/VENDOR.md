@@ -360,3 +360,21 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     direction). Copy still never captures, so the chord falls through
     and the embedder routes it to the tmux buffer when the widget had
     nothing.
+22. **Hold reporting: `terminal::Command::SetHoldRelay` +
+    `Action::HoldRepeat`/`HoldRelease`** — the embedder's hook for Claude
+    Code's hold-to-talk over a remote link. Claude Code recognises a held
+    Space purely from keyboard auto-repeat: five repeats within 120 ms of
+    each other start a recording and, once recording, each repeat re-arms
+    a 200 ms release timer. Measured against a VPS 50 ms away, a steady
+    30 ms repeat stream forwarded byte-by-byte through ssh and tmux
+    arrived with gaps of up to ~290 ms — one such gap ends the recording
+    mid-hold, and the repeats still arriving start a second one. Keys
+    generated on the host itself, inside tmux, arrive cleanly, so the
+    embedder relays the HOLD rather than the bytes (core `remote/hold.rs`).
+    With the flag on, a bare Space auto-repeat is not written to the PTY
+    but surfaces as `Action::HoldRepeat`, and a Space release as
+    `HoldRelease`; the first press (repeat = false) still types its space,
+    so tapping is untouched, and modified or non-Space repeats never enter
+    this path. Off (the default, and every local terminal) nothing changes.
+    The diverted events are captured like any key the widget handles, so
+    no app chord sees a phantom Space.

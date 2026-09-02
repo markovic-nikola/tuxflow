@@ -1,5 +1,6 @@
 pub mod fs;
 pub mod git;
+pub mod hold;
 pub mod icon;
 pub mod mic;
 pub mod ports;

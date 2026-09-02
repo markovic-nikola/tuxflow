@@ -19,6 +19,16 @@ pub enum Action {
     /// the browser — after rewriting the URL if the terminal is remote
     /// (the printed port is the host's; only a tunnel makes it local).
     OpenUrl(String),
+    /// Space is auto-repeating in a terminal whose embedder asked for hold
+    /// reporting (`terminal::Command::SetHoldRelay`). The repeat was NOT
+    /// written to the PTY: the embedder decides how the hold reaches the
+    /// application — over a jittery link, by generating the repeats where
+    /// the application runs (Claude Code's hold-to-talk ends a recording
+    /// at the first 200 ms gap between repeats).
+    HoldRepeat,
+    /// Space was released in such a terminal. Sent whether or not a hold
+    /// was underway; the embedder ignores the ones it wasn't relaying.
+    HoldRelease,
     #[default]
     Ignore,
 }

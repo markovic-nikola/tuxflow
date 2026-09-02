@@ -65,6 +65,10 @@ pub enum Command {
     /// the embedder is told because only it can reach wherever the app
     /// keeps its selections (tmux: the newest paste buffer, over ssh).
     ReportedSelectionGesture,
+    /// Space auto-repeat / release in a hold-reporting terminal (patch 22);
+    /// bounces off the backend as the matching `Action`, writes nothing.
+    HoldRepeat,
+    HoldRelease,
     /// Find the next scrollback match for a regex (VTE `search_set_regex`
     /// + `search_find_next/previous` parity). A changed pattern restarts
     ///   from the visible edge; a repeated one advances, wrapping around.
@@ -393,6 +397,12 @@ impl Backend {
             Command::ReportedSelectionGesture => {
                 return Action::ReportedSelectionGesture;
             },
+            Command::HoldRepeat => {
+                return Action::HoldRepeat;
+            },
+            Command::HoldRelease => {
+                return Action::HoldRelease;
+            },
             _ => {},
         }
 
@@ -437,7 +447,9 @@ impl Backend {
             },
             Command::ProcessAlacrittyEvent(..)
             | Command::MouseReport(..)
-            | Command::ReportedSelectionGesture => {
+            | Command::ReportedSelectionGesture
+            | Command::HoldRepeat
+            | Command::HoldRelease => {
                 unreachable!()
             },
         };

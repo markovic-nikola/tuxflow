@@ -189,9 +189,12 @@ memory, rendering under your real workload.
     pushes; the counters hide while it runs. A diverged history can't
     fast-forward, so it fails on purpose — you should get a card with
     git's own explanation, not a silent no-op.
-  - The **changes chip** shows `+N −M` against HEAD (hover for the exact
-    numbers and the untracked count, which line counts can't include).
-    Click it for the **Git Changes** view.
+  - The **changes chip** is text only and appears only while the tree is
+    dirty: `+N −M` against HEAD (hover for the exact numbers and the
+    untracked count, which line counts can't include), or `N files` when
+    the only changes count no lines — a new untracked file, a binary
+    edit. A clean tree shows no chip. Click it for the **Git Changes**
+    view.
   - **Focus** hides the sidebar (same as Ctrl+\). **Clear** empties the
     selected terminal — scrollback included — WITHOUT touching the
     process, so try it on something mid-output and confirm the program

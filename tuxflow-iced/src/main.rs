@@ -6761,30 +6761,18 @@ impl App {
         Some(tip(chip.into(), hint, iced::widget::tooltip::Position::Top))
     }
 
-    /// Working-tree `+N −M`; click opens the Git Changes view. Shown for
-    /// any repo, counters and all, even clean — the way in has to be there
-    /// before there is anything to see.
+    /// Working-tree `+N −M`; click opens the Git Changes view. Text only,
+    /// and shown only while the tree is dirty: a clean repo has nothing to
+    /// see there, and the sync chip beside it already says where the
+    /// branch stands. `changes_chip_parts` decides what it carries.
     fn view_git_changes_chip(&'_ self) -> Option<Element<'_, Event>> {
         let project = self.active_project()?;
         project.git.as_ref()?;
         let stat = project.diffstat;
 
-        let mut content = row![symbolic(ICON_CHANGES, 12.0, TEXT_SECONDARY)]
-            .spacing(5)
-            .align_y(iced::Alignment::Center);
-        if stat.added > 0 {
-            content = content.push(
-                text(format!("+{}", git_view::compact_count(stat.added)))
-                    .size(10.5)
-                    .color(GIT_ADDED),
-            );
-        }
-        if stat.removed > 0 {
-            content = content.push(
-                text(format!("\u{2212}{}", git_view::compact_count(stat.removed)))
-                    .size(10.5)
-                    .color(GIT_REMOVED),
-            );
+        let mut content = row![].spacing(5).align_y(iced::Alignment::Center);
+        for (label, color) in changes_chip_parts(stat)? {
+            content = content.push(text(label).size(10.5).color(color));
         }
 
         // Exact numbers live in the tooltip; the chip carries the compact
@@ -7536,7 +7524,6 @@ const ICON_ADD: &[u8] = include_bytes!("../assets/icons/list-add-symbolic.svg");
 const ICON_PLAY: &[u8] = include_bytes!("../assets/icons/media-playback-start-symbolic.svg");
 const ICON_STOP: &[u8] = include_bytes!("../assets/icons/media-playback-stop-symbolic.svg");
 const ICON_RESTART: &[u8] = include_bytes!("../assets/icons/view-refresh-symbolic.svg");
-const ICON_CHANGES: &[u8] = include_bytes!("../assets/icons/send-to-symbolic.svg");
 const ICON_FOCUS: &[u8] = include_bytes!("../assets/icons/focus-windows-symbolic.svg");
 const ICON_CLEAR: &[u8] = include_bytes!("../assets/icons/edit-clear-symbolic.svg");
 const ICON_EXTERNAL: &[u8] = include_bytes!("../assets/icons/external-link-symbolic.svg");
@@ -7594,11 +7581,81 @@ fn notification_allowed(suppress_when_focused: bool, window_focused: bool, visib
     !(suppress_when_focused && window_focused && visible)
 }
 
+/// The status bar's changes chip, as `(label, color)` badges: `+N` and
+/// `−M` when the tree has line changes, else the file count — untracked
+/// files and binary or mode-only edits count no lines under `git diff`,
+/// and the chip is the way into Git Changes, so it must not vanish while
+/// there is something to commit. `None` on a clean tree hides the chip.
+fn changes_chip_parts(
+    stat: tuxflow_core::remote::git::DiffStat,
+) -> Option<Vec<(String, iced::Color)>> {
+    let mut parts = Vec::new();
+    if stat.added > 0 {
+        parts.push((
+            format!("+{}", git_view::compact_count(stat.added)),
+            GIT_ADDED,
+        ));
+    }
+    if stat.removed > 0 {
+        parts.push((
+            format!("\u{2212}{}", git_view::compact_count(stat.removed)),
+            GIT_REMOVED,
+        ));
+    }
+    if parts.is_empty() {
+        let files = stat.files + stat.untracked;
+        if files == 0 {
+            return None;
+        }
+        let noun = if files == 1 { "file" } else { "files" };
+        parts.push((format!("{files} {noun}"), TEXT_SECONDARY));
+    }
+    Some(parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SPAN: f32 = 160.0;
+
+    #[test]
+    fn changes_chip_hides_clean_and_names_lineless_changes() {
+        use tuxflow_core::remote::git::DiffStat;
+        let labels = |stat: DiffStat| -> Vec<String> {
+            changes_chip_parts(stat)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect()
+        };
+        assert!(changes_chip_parts(DiffStat::default()).is_none());
+        let both = DiffStat {
+            files: 2,
+            added: 1200,
+            removed: 3,
+            untracked: 1,
+        };
+        assert_eq!(labels(both), ["+1.2K", "\u{2212}3"]);
+        let added_only = DiffStat {
+            files: 1,
+            added: 4,
+            ..Default::default()
+        };
+        assert_eq!(labels(added_only), ["+4"]);
+        // No lines to count, but something to commit: the way in stays.
+        let untracked = DiffStat {
+            untracked: 1,
+            ..Default::default()
+        };
+        assert_eq!(labels(untracked), ["1 file"]);
+        let binary_and_new = DiffStat {
+            files: 2,
+            untracked: 1,
+            ..Default::default()
+        };
+        assert_eq!(labels(binary_and_new), ["3 files"]);
+    }
 
     #[test]
     fn focus_gate_drops_only_the_watched_terminal() {

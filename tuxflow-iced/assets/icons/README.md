@@ -21,7 +21,6 @@ Sidebar lifecycle controls (process rows + project headers):
 
 Status bar:
 
-- `send-to-symbolic.svg` — git changes chip
 - `focus-windows-symbolic.svg` — focus mode (hide the sidebar)
 - `edit-clear-symbolic.svg` — clear the terminal
 - `external-link-symbolic.svg` — open the detected URL

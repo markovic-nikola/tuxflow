@@ -455,7 +455,7 @@ fn page_notifications<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget:
                 ),
                 switch_row(
                     "Agent Idle",
-                    "Notify when an AI agent finishes its turn (needs the agent's terminal bell)",
+                    "Notify when an AI agent rings its terminal bell. Claude Code: set its notification channel to Terminal Bell (\"auto\" is silent here); it rings ~1 min after a turn ends.",
                     n.on_agent_idle,
                     Msg::NotifyAgentIdle,
                 ),

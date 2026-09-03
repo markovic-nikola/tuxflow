@@ -86,6 +86,38 @@ memory, rendering under your real workload.
   forwarding.
 - **Lifecycle**: crash → auto-restart backoff (1s→32s, gives up at 5,
   60 s of stability resets), notifications per your settings flags.
+- **Notifications** (GTK's full set): crash / auto-restart / connection
+  lost (once per outage) / finished, and an agent's "waiting for input" on
+  its terminal bell (Claude Code rings one when its turn ends; through
+  tmux on a remote host too) — each carrying the project icon, the sound,
+  and the per-agent sound where one is picked. Silence-based Fallback
+  fires once per quiet spell of N seconds and re-arms on output. Suppress
+  When Focused drops what you are looking at: the window has focus AND the
+  process is the selected one of the active project with no full-pane
+  view over it — switch to another row and the same bell notifies. Watch
+  the gates with `RUST_LOG=tuxflow_iced=debug` (`bell from X`, `agent
+  idle: X — notifying / suppressed, focused`). Headless: a fake
+  `org.freedesktop.Notifications` on `dbus-run-session` records every
+  Notify; mind that local commands run through your LOGIN shell, so a
+  fixture `codex` on PATH loses to the real one nvm prepends — use
+  absolute paths. What the AGENT does (measured, Claude Code 2.1.25x):
+  the bell is Claude Code's `idle_prompt` notification, which fires ONCE,
+  `messageIdleNotifThresholdMs` (default 60 000) after a turn ends and
+  only if you have not typed since — so expect it a minute late, not at
+  turn end. It fires only when `preferredNotifChannel` is
+  `terminal_bell` (settings.json or `.claude.json`; `/config` →
+  Notifications); the default `auto` recognises only Apple Terminal,
+  iTerm2, kitty and ghostty and is SILENT on everything else — a
+  `CLAUDE_CONFIG_DIR` whose config lacks the key never rings. The 0x07 at
+  the end of every OSC title update is a terminator, not a bell — count
+  bare bells only when probing a PTY. Sound-but-no-banner on the REAL
+  desktop: run `dbus-monitor --session "interface=org.freedesktop.Notifications"`
+  and watch for a `NotificationClosed` (reason 2) within milliseconds of
+  each `Notify` — that is Cinnamon/GNOME destroying the source because the
+  sender's bus name vanished. The app sends over one lifelong connection
+  for exactly this reason; a shell probe (`notify-send`) never shows the
+  bug because it has no window. Nothing here is desktop-specific: plain
+  `org.freedesktop.Notifications.Notify` plus the `desktop-entry` hint.
 - **Output survives the run** (GTK's one-VTE-per-process): a command that
   finishes, crashes or is stopped leaves everything it printed on screen —
   the status is the sidebar dot and the exit banner. A bad exit gets the same

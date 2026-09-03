@@ -489,6 +489,11 @@ struct App {
     /// only decides whether the sidebar is currently answering "which one
     /// is 3?", which is why it can be dropped on focus loss without care.
     ctrl_held: bool,
+    /// The window has keyboard focus — GTK's `window.is_active()`, half of
+    /// the notification focus gate. Starts false: the WM's focus-in lands
+    /// as a Focused event once the window is mapped, and until then
+    /// "not looking at it" is the assumption that lets a bell through.
+    window_focused: bool,
     /// Shared by every card riding it, so their bands stay in step.
     sweep: Sweep,
     /// Last pointer position in window coords — where a right-click's
@@ -691,6 +696,8 @@ enum Event {
     /// The window lost focus: a held Ctrl comes back up unseen, and a
     /// drag's release will never arrive.
     WindowUnfocused,
+    /// The window gained focus — the other edge of the notification gate.
+    WindowFocused,
     /// One frame of the sidebar's collapse/expand glide.
     SidebarTick(u64),
     /// Fixed-interval sample of which agents are producing output.
@@ -898,6 +905,7 @@ impl App {
             drag_tick: 0,
             sidebar_scroll: iced::widget::Id::unique(),
             ctrl_held: false,
+            window_focused: false,
             hover_anim: Anim::default(),
             sweep: Sweep::default(),
             cursor: iced::Point::ORIGIN,
@@ -1145,6 +1153,85 @@ impl App {
                     .get(p.selected)
                     .is_some_and(|e| e.is_running() && e.config.category == ProcessCategory::Agent)
         })
+    }
+
+    /// A full-pane view (settings, git, the add/edit forms) is covering
+    /// the terminal pane.
+    fn full_pane_open(&self) -> bool {
+        self.settings_ui.is_some()
+            || self.git_ui.is_some()
+            || self.add_command.is_some()
+            || self.add_project.is_some()
+            || self.edit_project.is_some()
+    }
+
+    /// Is this process's terminal the one on screen? GTK reads the
+    /// terminal stack's visible child; here it is the active project's
+    /// selection, unless a full-pane view stands in front of it — GTK's
+    /// equivalents are separate windows, which leave the main window
+    /// inactive, so those count as "not looking" there too.
+    fn terminal_visible(&self, pidx: usize, index: usize) -> bool {
+        self.active == pidx && self.projects[pidx].selected == index && !self.full_pane_open()
+    }
+
+    /// GTK's notification focus gate (`auto_restart::should_notify`):
+    /// with Suppress When Focused on, skip what the user is looking at.
+    fn should_notify(&self, pidx: usize, index: usize) -> bool {
+        notification_allowed(
+            self.settings.notifications.suppress_when_focused,
+            self.window_focused,
+            self.terminal_visible(pidx, index),
+        )
+    }
+
+    /// "Waiting for input" for an agent, behind every gate GTK's bell
+    /// handler applies: agents only, the Agent Idle flag, the focus gate.
+    /// Fired by the terminal bell and by the silence fallback.
+    fn notify_agent_idle(&self, pidx: usize, index: usize) {
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
+        if entry.config.category != ProcessCategory::Agent || !entry.is_running() {
+            return;
+        }
+        if !self.settings.notifications.on_agent_idle {
+            log::debug!("agent idle: {} — Agent Idle is off", entry.config.name);
+            return;
+        }
+        if !self.should_notify(pidx, index) {
+            log::debug!("agent idle: {} — suppressed, focused", entry.config.name);
+            return;
+        }
+        log::debug!("agent idle: {} — notifying", entry.config.name);
+        notify::agent_idle(
+            &self.settings.notifications,
+            &project.name,
+            &entry.config.name,
+            project.icon.as_deref(),
+            agents::AgentKind::from_command(&entry.config.command),
+        );
+    }
+
+    /// The idle-silence fallback (GTK's `check_agent_silence`, on the same
+    /// 2 s ticker as the working dot): an agent that stopped printing
+    /// `agent_idle_silence_seconds` ago is treated as waiting, once per
+    /// silence. Off unless both Agent Idle and the fallback are on.
+    fn check_agent_silence(&mut self) {
+        let ns = &self.settings.notifications;
+        if !ns.on_agent_idle || !ns.on_agent_idle_silence_fallback {
+            return;
+        }
+        let threshold = Duration::from_secs(ns.agent_idle_silence_seconds as u64);
+        let mut due = Vec::new();
+        for (pidx, project) in self.projects.iter_mut().enumerate() {
+            for (index, entry) in project.entries.iter_mut().enumerate() {
+                if entry.take_silence_due(threshold) {
+                    due.push((pidx, index));
+                }
+            }
+        }
+        for (pidx, index) in due {
+            self.notify_agent_idle(pidx, index);
+        }
     }
 
     /// Kick the blocking ssh probe onto a worker; the project shows Loading.
@@ -1409,6 +1496,10 @@ impl App {
                 entry.stopping = false;
                 entry.auto_open_grace = false;
                 entry.started_at = Some(Instant::now());
+                // Silence is measured from the spawn until the first
+                // repaint (GTK stamps `last_activity` at handler build).
+                entry.last_activity = Some(Instant::now());
+                entry.idle_notified = false;
                 let name = entry.config.name.clone();
                 project.ports.clear(&name);
                 project.selected = index;
@@ -1627,23 +1718,31 @@ impl App {
         entry.restart_attempts = attempts;
         entry.stopping = false;
 
-        // Desktop notifications, per the shared settings (GTK parity).
+        // Desktop notifications, per the shared settings and GTK's focus
+        // gate (`should_notify` guards every exit kind there). The outage
+        // flag flips whether or not the gate lets this one through: "once
+        // per outage" is once, not "once the user looks away".
+        let allowed = self.should_notify(pidx, index);
         let project_name = self.projects[pidx].name.clone();
+        let icon = self.projects[pidx].icon.clone();
+        let ns = &self.settings.notifications;
         let entry = &mut self.projects[pidx].entries[index];
         let name = entry.config.name.clone();
         match &entry.status {
-            Status::Crashed(code) => {
-                notify::crash(&self.settings.notifications, &project_name, &name, *code)
+            Status::Crashed(code) if ns.on_crash && allowed => {
+                notify::crash(ns, &project_name, &name, *code, icon.as_deref())
             }
-            Status::Restarting(attempt) => {
-                notify::auto_restart(&self.settings.notifications, &project_name, &name, *attempt)
+            Status::Restarting(attempt) if ns.on_auto_restart && allowed => {
+                notify::auto_restart(ns, &project_name, &name, *attempt, icon.as_deref())
             }
             Status::Reconnecting(_) if !entry.outage_notified => {
                 entry.outage_notified = true;
-                notify::disconnect(&self.settings.notifications, &project_name, &name);
+                if allowed {
+                    notify::disconnect(ns, &project_name, &name, icon.as_deref());
+                }
             }
-            Status::Stopped if !stopping_was => {
-                notify::finish(&self.settings.notifications, &project_name, &name)
+            Status::Stopped if !stopping_was && ns.on_process_finish && allowed => {
+                notify::finish(ns, &project_name, &name, icon.as_deref())
             }
             _ => {}
         }
@@ -3701,6 +3800,11 @@ impl App {
                 // drag in flight would keep its ghost until the next press.
                 self.ctrl_held = false;
                 self.drag = None;
+                self.window_focused = false;
+                Task::none()
+            }
+            Event::WindowFocused => {
+                self.window_focused = true;
                 Task::none()
             }
             Event::DragPress { row, grab } => {
@@ -3906,6 +4010,9 @@ impl App {
                         .fold(false, |any, entry| entry.sample_activity() | any);
                     project.sweeping |= working;
                 }
+                // GTK's per-project ticker does both on this cadence: the
+                // working dot and the idle-silence fallback.
+                self.check_agent_silence();
                 let start = self
                     .projects
                     .iter()
@@ -4751,9 +4858,22 @@ impl App {
                             let entry = &mut self.projects[pidx].entries[index];
                             entry.activity_burst = entry.activity_burst.saturating_add(1);
                             entry.last_activity = Some(Instant::now());
+                            entry.idle_notified = false;
                         }
                         AEvent::ChildExit(code) => {
                             self.projects[pidx].entries[index].last_exit = Some(*code);
+                        }
+                        AEvent::Bell => {
+                            // The primary "agent waiting for input" signal
+                            // — GTK's `connect_bell` on agent VTEs. The
+                            // fork's backend files the event as Ignore, so
+                            // this is the only place it is read; the run
+                            // stamp above already dropped a stale run's.
+                            log::debug!(
+                                "bell from {}",
+                                self.projects[pidx].entries[index].config.name
+                            );
+                            self.notify_agent_idle(pidx, index);
                         }
                         AEvent::ClipboardStore(ty, data) if !data.is_empty() => {
                             // OSC 52 — agents' and tmux's copies; empty
@@ -7158,6 +7278,7 @@ impl App {
                 // Focus loss drops held state (keycaps, a drag) — see the
                 // handler.
                 iced::Event::Window(iced::window::Event::Unfocused) => Some(Event::WindowUnfocused),
+                iced::Event::Window(iced::window::Event::Focused) => Some(Event::WindowFocused),
                 _ => None,
             }),
             // exit_on_close_request(false): the close button routes through
@@ -7466,11 +7587,33 @@ fn remote_hint(location: &ProjectLocation) -> Option<String> {
     }
 }
 
+/// GTK's `should_notify`, minus the lookups: with the suppression off
+/// everything notifies; with it on, only what the user is NOT looking at
+/// — a focused window showing that very terminal is the one case dropped.
+fn notification_allowed(suppress_when_focused: bool, window_focused: bool, visible: bool) -> bool {
+    !(suppress_when_focused && window_focused && visible)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SPAN: f32 = 160.0;
+
+    #[test]
+    fn focus_gate_drops_only_the_watched_terminal() {
+        // Suppression off: always.
+        for focused in [false, true] {
+            for visible in [false, true] {
+                assert!(notification_allowed(false, focused, visible));
+            }
+        }
+        // Suppression on: dropped only when focused AND visible.
+        assert!(!notification_allowed(true, true, true));
+        assert!(notification_allowed(true, true, false), "another pane");
+        assert!(notification_allowed(true, false, true), "window unfocused");
+        assert!(notification_allowed(true, false, false));
+    }
 
     #[test]
     fn ramp_advances_then_settles() {

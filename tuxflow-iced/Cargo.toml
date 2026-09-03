@@ -20,4 +20,6 @@ env_logger = "0.11.11"
 arboard = "3"
 png = "0.18"
 dirs = "6"
-notify-rust = "4"
+# Desktop notifications over ONE app-lifetime bus connection (see notify.rs);
+# already in the tree through iced, so this costs no build.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }

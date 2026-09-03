@@ -127,6 +127,26 @@ start_with_project = true
 auto_restart = true
 ```
 
+### Agent notifications
+
+The "waiting for input" notification is triggered by the agent's **terminal bell**, so the agent has to be configured to ring one. For Claude Code:
+
+1. Set its notification channel to **Terminal Bell** — run `/config` inside Claude Code and change *Notifications*, or add to `settings.json`:
+
+   ```json
+   { "preferredNotifChannel": "terminal_bell" }
+   ```
+
+   The default `auto` only recognises iTerm2, kitty, ghostty and Apple Terminal and stays silent everywhere else. If you run agents with different `CLAUDE_CONFIG_DIR`s, each config needs the setting.
+
+2. Claude Code rings once, a minute after a turn ends (and only if you haven't typed since). To notify sooner, set the threshold in `.claude.json` (in `~` or in your `CLAUDE_CONFIG_DIR`), in milliseconds:
+
+   ```json
+   { "messageIdleNotifThresholdMs": 5000 }
+   ```
+
+Agents that never ring can use **Silence-based Fallback** in Settings → Notifications instead, which notifies after N seconds of no output. **Suppress When Focused** skips notifications for the terminal you are currently looking at.
+
 ## Keyboard Shortcuts
 
 | Key | Action |

@@ -90,6 +90,10 @@ pub struct ProcessEntry {
     /// Agent is producing output right now (core's `util::activity`
     /// hysteresis over the two fields above). Drives the card's sweep.
     pub working: bool,
+    /// The idle-silence fallback's edge trigger (GTK's `is_idle` cell):
+    /// set when it fires, cleared by the next repaint, so a quiet agent
+    /// notifies once per silence rather than once per tick.
+    pub idle_notified: bool,
 }
 
 impl ProcessEntry {
@@ -116,6 +120,7 @@ impl ProcessEntry {
             activity_burst: 0,
             last_activity: None,
             working: false,
+            idle_notified: false,
         }
     }
 
@@ -148,6 +153,28 @@ impl ProcessEntry {
                 self.last_activity.map_or(Duration::MAX, |at| at.elapsed()),
             );
         self.working
+    }
+
+    /// Has this agent been silent for `threshold`? Only a running agent
+    /// counts, measured from its last repaint (or its spawn), and only
+    /// once per silence — the flag is set HERE, before the caller consults
+    /// the focus gate, so a suppressed notification is still consumed
+    /// (GTK's `check_agent_silence` flips `is_idle` the same way).
+    pub fn take_silence_due(&mut self, threshold: Duration) -> bool {
+        if self.config.category != ProcessCategory::Agent
+            || !self.is_running()
+            || self.idle_notified
+        {
+            return false;
+        }
+        let Some(at) = self.last_activity else {
+            return false;
+        };
+        if at.elapsed() < threshold {
+            return false;
+        }
+        self.idle_notified = true;
+        true
     }
 }
 
@@ -500,6 +527,43 @@ mod tests {
     fn user_stop_of_lost_connection_stays_stopped() {
         let (status, ..) = plan_after_exit(true, true, true, Some(255), None, 2);
         assert_eq!(status, Status::Stopped);
+    }
+
+    /// The silence fallback fires once per silence, for running agents
+    /// only, measured from the last repaint — and a repaint re-arms it.
+    #[test]
+    fn silence_fallback_fires_once_per_silence() {
+        let threshold = Duration::from_secs(20);
+        let mut cfg = pc("claude");
+        cfg.category = ProcessCategory::Agent;
+        let mut entry = ProcessEntry::new(cfg);
+        let long_ago = Instant::now() - Duration::from_secs(60);
+
+        // Not running: never.
+        entry.last_activity = Some(long_ago);
+        assert!(!entry.take_silence_due(threshold));
+
+        entry.status = Status::Running;
+        // No repaint recorded yet: nothing to measure from.
+        entry.last_activity = None;
+        assert!(!entry.take_silence_due(threshold));
+        // Recent output: not yet.
+        entry.last_activity = Some(Instant::now());
+        assert!(!entry.take_silence_due(threshold));
+        // Quiet past the threshold: once, then armed off.
+        entry.last_activity = Some(long_ago);
+        assert!(entry.take_silence_due(threshold));
+        assert!(entry.idle_notified);
+        assert!(!entry.take_silence_due(threshold), "edge-triggered");
+        // A repaint (what the Wakeup arm does) re-arms it.
+        entry.idle_notified = false;
+        assert!(entry.take_silence_due(threshold));
+
+        // A command, however quiet, is not an agent waiting for input.
+        let mut cmd = ProcessEntry::new(pc("dev"));
+        cmd.status = Status::Running;
+        cmd.last_activity = Some(long_ago);
+        assert!(!cmd.take_silence_due(threshold));
     }
 
     fn pc(name: &str) -> ProcessConfig {

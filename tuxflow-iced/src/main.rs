@@ -489,6 +489,10 @@ struct App {
     /// only decides whether the sidebar is currently answering "which one
     /// is 3?", which is why it can be dropped on focus loss without care.
     ctrl_held: bool,
+    /// Shift is down — read at the search bar's submit, which is how a
+    /// text_input's Enter (it carries no modifiers) becomes GTK's
+    /// Shift+Enter "previous match".
+    shift_held: bool,
     /// The window has keyboard focus — GTK's `window.is_active()`, half of
     /// the notification focus gate. Starts false: the WM's focus-in lands
     /// as a Focused event once the window is mapped, and until then
@@ -511,6 +515,8 @@ struct App {
     palette_query: String,
     palette_index: usize,
     palette_input: iced::widget::Id,
+    /// The palette's result list, addressed by `palette_snap`.
+    palette_scroll: iced::widget::Id,
     add_project: Option<add_project::State>,
     add_command: Option<ProcessForm>,
     /// Edit Project form; `Some` = the main pane shows it. Mutually
@@ -587,6 +593,39 @@ struct ProbeOk {
     /// Icon pulled into `~/.cache/tuxflow/icons/`, when the project had none
     /// saved and the host had one to give.
     icon: Option<String>,
+}
+
+/// One command-palette row's target. GTK's palette is a flat list of
+/// action items (`New …`, Stop/Restart all), navigation items (one per
+/// process) and project items; the iced palette had only the middle tier.
+#[derive(Debug, Clone)]
+enum PaletteEntry {
+    Action(PaletteAction),
+    Process { project: u64, index: usize },
+    Project(u64),
+}
+
+#[derive(Debug, Clone)]
+enum PaletteAction {
+    /// Index into `agents::AGENT_PRESETS` — opens the agent form with
+    /// that preset picked.
+    NewAgent(usize),
+    NewCustomAgent,
+    NewCommand,
+    NewTerminal,
+    NewProject(add_project::Kind),
+    /// Every project's running processes, not the active card's.
+    StopAll,
+    RestartAll,
+}
+
+/// A palette row as listed: GTK's category chip, the label the query is
+/// matched against, and what picking it does.
+#[derive(Debug, Clone)]
+struct PaletteRow {
+    category: &'static str,
+    label: String,
+    entry: PaletteEntry,
 }
 
 #[derive(Debug, Clone)]
@@ -707,8 +746,9 @@ enum Event {
     /// One frame of the sync chip's spinner.
     SyncSpinTick(u64),
     CursorMoved(iced::Point),
-    /// Ctrl went down or up — reveals/hides the sidebar's keycaps.
-    CtrlHeld(bool),
+    /// The modifier set changed — Ctrl reveals/hides the sidebar's
+    /// keycaps, Shift decides the search bar's submit direction.
+    ModifiersHeld(iced::keyboard::Modifiers),
     /// Right-click on a sidebar row (index None = project header).
     OpenContextMenu {
         project: u64,
@@ -804,13 +844,13 @@ enum Event {
     ComposerSend,
     SearchQueryChanged(String),
     SearchStep(SearchDirection),
+    /// Enter in the search field: next match, or previous with Shift held.
+    SearchSubmit,
     SearchClose,
     PaletteInput(String),
     PaletteSubmit,
-    PaletteSelect {
-        project: u64,
-        index: usize,
-    },
+    /// A palette row picked by click.
+    PaletteActivate(PaletteEntry),
     /// Ignored-status keys — the widget consumed everything it wanted
     /// (Ctrl+Shift+V with TEXT on the clipboard never reaches here).
     Hotkey(iced::keyboard::Event),
@@ -905,6 +945,7 @@ impl App {
             drag_tick: 0,
             sidebar_scroll: iced::widget::Id::unique(),
             ctrl_held: false,
+            shift_held: false,
             window_focused: false,
             hover_anim: Anim::default(),
             sweep: Sweep::default(),
@@ -920,6 +961,7 @@ impl App {
             palette_query: String::new(),
             palette_index: 0,
             palette_input: iced::widget::Id::unique(),
+            palette_scroll: iced::widget::Id::unique(),
             add_project: None,
             add_command: None,
             edit_project: None,
@@ -1423,6 +1465,15 @@ impl App {
         let fresh_id = self.next_term_id;
 
         let reservations = self.app_keys.reservations();
+        // The hardcoded remote-agent Ctrl+V below yields to a configured
+        // chord on the same keys, as GTK's configurable map runs first.
+        let ctrl_v_is_free = self
+            .app_keys
+            .action_for(
+                &iced::keyboard::Key::Character("v".into()),
+                iced::keyboard::Modifiers::CTRL,
+            )
+            .is_none();
         let font = self.term_font();
         let scrollback = self.settings.appearance.scrollback_lines as usize;
         let palette = theme::terminal_palette(&self.settings.appearance.terminal_theme);
@@ -1459,7 +1510,7 @@ impl App {
                 // Reserve the app's chords before the first keystroke —
                 // the stock bindings would type them into the shell.
                 term.handle(iced_term::Command::AddBindings(reservations));
-                if remote_agent {
+                if remote_agent && ctrl_v_is_free {
                     // GTK parity (window.rs, "plain Ctrl+V in a remote
                     // agent terminal"): the agent's raw ^V reads the
                     // HOST's clipboard, which is not where the user's
@@ -1476,6 +1527,8 @@ impl App {
                         },
                         iced_term::bindings::BindingAction::Paste,
                     )]));
+                }
+                if remote_agent {
                     // Hold-to-talk over a jittery link: Space repeats
                     // and the release surface as actions and the hold is
                     // relayed on the host (fork patch 22, `hold_repeat`).
@@ -3114,16 +3167,40 @@ impl App {
     /// Dispatch a matched app shortcut.
     fn apply_action(&mut self, action: AppAction) -> Task<Event> {
         match action {
+            // The widget's own Copy ran first at this chord and never
+            // captures; this covers the pane where it had no selection —
+            // on a remote project the selection the user SEES is tmux's
+            // (`explicit_remote_copy` checks both).
+            AppAction::Copy => self.explicit_remote_copy(),
+            // Reaching here means the widget's Paste found no TEXT — the
+            // clipboard holds an image (or nothing).
+            AppAction::Paste => self.paste_image(),
             AppAction::TerminalSearch => {
                 self.search_open = true;
                 iced::widget::operation::focus(self.search_input.clone())
             }
-            AppAction::CommandPalette => {
-                self.palette_open = true;
-                self.palette_query.clear();
-                self.palette_index = 0;
-                iced::widget::operation::focus(self.palette_input.clone())
+            AppAction::CommandPalette => self.open_palette_with(""),
+            // GTK's `show_with_text`: the palette opened on a query that
+            // narrows it to one tier — the New rows, or the Switch rows.
+            AppAction::AddNew => self.open_palette_with("New "),
+            AppAction::QuickJump => self.open_palette_with("Switch "),
+            AppAction::FocusSidebar => self.set_sidebar(true),
+            AppAction::FocusTerminal => {
+                if self.palette_open {
+                    self.close_palette()
+                } else {
+                    self.focus_selected_terminal()
+                }
             }
+            AppAction::ClearOutput => self.update(Event::ClearTerminal),
+            AppAction::ToggleProcess => match self.selected_target() {
+                Some((project, index)) => self.update(Event::ToggleProcessAt { project, index }),
+                None => Task::none(),
+            },
+            AppAction::RestartProcess => match self.selected_target() {
+                Some((project, index)) => self.update(Event::Restart { project, index }),
+                None => Task::none(),
+            },
             AppAction::PrevProcess => self.step_process(-1),
             AppAction::NextProcess => self.step_process(1),
             AppAction::PrevProject => self.step_project(-1),
@@ -3155,16 +3232,29 @@ impl App {
                     None => Task::none(),
                 }
             }
-            AppAction::SelectProjectN(n) => {
-                let idx = n as usize - 1;
-                if idx < self.projects.len() && idx != self.active {
-                    self.active = idx;
-                    let git = self.poll_git_fetch();
-                    return Task::batch([self.focus_selected_terminal(), git]);
-                }
-                Task::none()
-            }
+            AppAction::SelectProjectN(n) => self.activate_project(n as usize - 1),
         }
+    }
+
+    /// Make project `idx` the active one — the Alt+N switcher and the
+    /// palette's GO TO rows: a switch re-polls git for the new card.
+    fn activate_project(&mut self, idx: usize) -> Task<Event> {
+        if idx < self.projects.len() && idx != self.active {
+            self.active = idx;
+            let git = self.poll_git_fetch();
+            return Task::batch([self.focus_selected_terminal(), git]);
+        }
+        Task::none()
+    }
+
+    /// (project id, entry index) of the selected process, for the chords
+    /// that act on the selection.
+    fn selected_target(&self) -> Option<(u64, usize)> {
+        let project = self.active_project()?;
+        project
+            .entries
+            .get(project.selected)
+            .map(|_| (project.id, project.selected))
     }
 
     /// Flip the sidebar and start its glide. A no-op when it is already
@@ -3355,11 +3445,123 @@ impl App {
         }
     }
 
-    fn close_palette(&mut self) -> Task<Event> {
+    /// Open the palette on `prefill` — GTK's `show_with_text`: the query
+    /// is set and the cursor lands at its end (iced's focus moves it
+    /// there), so the user keeps typing to narrow the tier it selected.
+    fn open_palette_with(&mut self, prefill: &str) -> Task<Event> {
+        self.palette_open = true;
+        self.palette_query = prefill.to_string();
+        self.palette_index = 0;
+        Task::batch([
+            iced::widget::operation::focus(self.palette_input.clone()),
+            self.palette_snap(),
+        ])
+    }
+
+    /// Take the palette down without moving focus — for the rows that go
+    /// on to raise a form, whose own focus must not race the terminal's.
+    fn dismiss_palette(&mut self) {
         self.palette_open = false;
         self.palette_query.clear();
         self.palette_index = 0;
+    }
+
+    fn close_palette(&mut self) -> Task<Event> {
+        self.dismiss_palette();
         self.focus_selected_terminal()
+    }
+
+    /// Keep the highlighted row in view. A relative offset of i/(n-1)
+    /// places row i inside the viewport whatever the row height: the
+    /// viewport top moves i/(n-1) of the way through the overflow while
+    /// the row sits i/(n-1) of the way through the content, so the two
+    /// never separate by more than the viewport minus a row.
+    fn palette_snap(&self) -> Task<Event> {
+        let n = self.palette_matches().len();
+        let y = match n {
+            0 | 1 => 0.0,
+            _ => self.palette_index as f32 / (n - 1) as f32,
+        };
+        iced::widget::operation::snap_to(
+            self.palette_scroll.clone(),
+            scrollable::RelativeOffset { x: 0.0, y },
+        )
+    }
+
+    /// Run a picked palette row. Process and project rows hand focus
+    /// back to the terminal; the New rows raise a form instead, and the
+    /// form's focus must not be fought over.
+    fn activate_palette(&mut self, entry: PaletteEntry) -> Task<Event> {
+        match entry {
+            PaletteEntry::Process { project, index } => {
+                let close = self.close_palette();
+                let select = self.update(Event::SelectProcess { project, index });
+                Task::batch([close, select])
+            }
+            PaletteEntry::Project(id) => {
+                let close = self.close_palette();
+                let select = match self.project_index(id) {
+                    Some(idx) => self.activate_project(idx),
+                    None => Task::none(),
+                };
+                Task::batch([close, select])
+            }
+            PaletteEntry::Action(action) => {
+                self.dismiss_palette();
+                // The per-project rows are only listed while a project is
+                // open (`palette_rows`), so `active` is Some for them.
+                let active = self.active_project().map(|p| p.id);
+                match (action, active) {
+                    (PaletteAction::NewAgent(preset), Some(project)) => {
+                        let open = self.update(Event::OpenAddCommand {
+                            project,
+                            agent: true,
+                        });
+                        let pick = self.update(Event::AgentPreset(preset));
+                        Task::batch([open, pick])
+                    }
+                    (PaletteAction::NewCustomAgent, Some(project)) => {
+                        self.update(Event::OpenAddCommand {
+                            project,
+                            agent: true,
+                        })
+                    }
+                    (PaletteAction::NewCommand, Some(project)) => {
+                        self.update(Event::OpenAddCommand {
+                            project,
+                            agent: false,
+                        })
+                    }
+                    (PaletteAction::NewTerminal, Some(project)) => {
+                        self.update(Event::AddTerminal(project))
+                    }
+                    (PaletteAction::NewProject(kind), _) => {
+                        let open = self.update(Event::OpenAddProject);
+                        let pick = self.update(Event::AddProjectMsg(add_project::Msg::Pick(kind)));
+                        Task::batch([open, pick])
+                    }
+                    // GTK's palette acts on EVERY project here, unlike the
+                    // header cluster's per-card All buttons.
+                    (PaletteAction::StopAll, _) => {
+                        let ids: Vec<u64> = self.projects.iter().map(|p| p.id).collect();
+                        let tasks: Vec<Task<Event>> = ids
+                            .into_iter()
+                            .map(|id| self.update(Event::StopAll(id)))
+                            .collect();
+                        Task::batch(tasks)
+                    }
+                    (PaletteAction::RestartAll, _) => {
+                        let ids: Vec<u64> = self.projects.iter().map(|p| p.id).collect();
+                        let tasks: Vec<Task<Event>> = ids
+                            .into_iter()
+                            .map(|id| self.update(Event::RestartAll(id)))
+                            .collect();
+                        Task::batch(tasks)
+                    }
+                    (_, None) => self.focus_selected_terminal(),
+                }
+            }
+        }
     }
 
     /// What Ctrl+1..9 reaches, in the order the sidebar shows it: every
@@ -3378,21 +3580,98 @@ impl App {
         switch_targets_of(self.projects.iter().map(|p| p.entries.as_slice()))
     }
 
-    /// (project id, entry index) pairs matching the palette query, in
-    /// sidebar order. Case-insensitive substring over "project process".
-    fn palette_matches(&self) -> Vec<(u64, usize)> {
-        let needle = self.palette_query.to_lowercase();
-        let mut out = Vec::new();
+    /// Every palette row in GTK's order (command_palette.rs
+    /// `default_items` + the navigation/project items): the New tier —
+    /// one agent row per preset, then custom agent, command, terminal, the
+    /// two project kinds — Stop/Restart all, NAVIGATION (a "Switch to"
+    /// row per process, sidebar order), GO TO (one per project). The rows
+    /// that add to or act on a project are left out while none is open;
+    /// GTK's "New SSH connection" is not ported (this shell has no add-SSH
+    /// form yet).
+    fn palette_rows(&self) -> Vec<PaletteRow> {
+        let action = |category: &'static str, label: &str, action: PaletteAction| PaletteRow {
+            category,
+            label: label.to_string(),
+            entry: PaletteEntry::Action(action),
+        };
+        let mut rows = Vec::new();
+        let has_project = !self.projects.is_empty();
+        if has_project {
+            for (i, preset) in agents::AGENT_PRESETS.iter().enumerate() {
+                rows.push(action(
+                    "AGENT",
+                    &format!("New {} agent", preset.label),
+                    PaletteAction::NewAgent(i),
+                ));
+            }
+            rows.push(action(
+                "AGENT",
+                "New custom agent",
+                PaletteAction::NewCustomAgent,
+            ));
+            rows.push(action("COMMAND", "New command", PaletteAction::NewCommand));
+            rows.push(action(
+                "TERMINAL",
+                "New terminal tab",
+                PaletteAction::NewTerminal,
+            ));
+        }
+        rows.push(action(
+            "PROJECT",
+            "New project (open directory)",
+            PaletteAction::NewProject(add_project::Kind::Local),
+        ));
+        rows.push(action(
+            "PROJECT",
+            "New remote project (over SSH)",
+            PaletteAction::NewProject(add_project::Kind::Remote),
+        ));
+        if has_project {
+            rows.push(action(
+                "ACTIONS",
+                "Stop all processes",
+                PaletteAction::StopAll,
+            ));
+            rows.push(action(
+                "ACTIONS",
+                "Restart all processes",
+                PaletteAction::RestartAll,
+            ));
+        }
         for project in &self.projects {
             for i in sidebar_order(&project.entries) {
-                let hay =
-                    format!("{} {}", project.name, project.entries[i].config.name).to_lowercase();
-                if needle.is_empty() || hay.contains(&needle) {
-                    out.push((project.id, i));
-                }
+                rows.push(PaletteRow {
+                    category: "NAVIGATION",
+                    label: format!(
+                        "Switch to {} {}",
+                        project.name, project.entries[i].config.name
+                    ),
+                    entry: PaletteEntry::Process {
+                        project: project.id,
+                        index: i,
+                    },
+                });
             }
         }
-        out
+        for project in &self.projects {
+            rows.push(PaletteRow {
+                category: "GO TO",
+                label: project.name.clone(),
+                entry: PaletteEntry::Project(project.id),
+            });
+        }
+        rows
+    }
+
+    /// The rows matching the palette query — GTK's rule: case-insensitive
+    /// substring over the label, untrimmed, which is what the "New " and
+    /// "Switch " prefills select a tier on.
+    fn palette_matches(&self) -> Vec<PaletteRow> {
+        let needle = self.palette_query.to_lowercase();
+        self.palette_rows()
+            .into_iter()
+            .filter(|row| needle.is_empty() || row.label.to_lowercase().contains(&needle))
+            .collect()
     }
 
     /// Ctrl+Shift+V with an image-only clipboard — the GTK app's flow,
@@ -3796,8 +4075,9 @@ impl App {
                 }
                 Task::none()
             }
-            Event::CtrlHeld(down) => {
-                self.ctrl_held = down;
+            Event::ModifiersHeld(m) => {
+                self.ctrl_held = m.control();
+                self.shift_held = m.shift();
                 Task::none()
             }
             Event::WindowUnfocused => {
@@ -3805,6 +4085,7 @@ impl App {
                 // the sidebar comes back still wearing its keycaps — and a
                 // drag in flight would keep its ghost until the next press.
                 self.ctrl_held = false;
+                self.shift_held = false;
                 self.drag = None;
                 self.window_focused = false;
                 Task::none()
@@ -4426,18 +4707,23 @@ impl App {
                 // Palette navigation first (its input consumes typing but
                 // not Esc/arrows).
                 if self.palette_open {
+                    // GTK's FocusTerminal hides the palette first; so does
+                    // its chord here (Ctrl+Right by default).
+                    if self.app_keys.action_for(&key, modifiers) == Some(AppAction::FocusTerminal) {
+                        return self.close_palette();
+                    }
                     return match key.as_ref() {
                         iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
                             self.close_palette()
                         }
                         iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp) => {
                             self.palette_index = self.palette_index.saturating_sub(1);
-                            Task::none()
+                            self.palette_snap()
                         }
                         iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown) => {
                             let max = self.palette_matches().len().saturating_sub(1);
                             self.palette_index = (self.palette_index + 1).min(max);
-                            Task::none()
+                            self.palette_snap()
                         }
                         _ => Task::none(),
                     };
@@ -4462,30 +4748,20 @@ impl App {
                     return self.apply_action(action);
                 }
                 match key.as_ref() {
-                    // Reaching here means the widget found no TEXT to paste
-                    // — the clipboard holds an image (or nothing). Plain
-                    // Ctrl+V only falls through on remote agent terminals,
-                    // where start() rebinds it to Paste (GTK's hardcoded
-                    // branch); the guard keeps a stray unfocused chord from
-                    // typing into a terminal it was never aimed at.
+                    // GTK's hardcoded branch beside the configurable Paste
+                    // chord (`AppAction::Paste` above): plain Ctrl+V on a
+                    // remote AGENT terminal, where start() rebinds it to
+                    // the widget's Paste. Reaching here means the widget
+                    // found no TEXT to paste — the clipboard holds an image
+                    // (or nothing); the guard keeps a stray unfocused chord
+                    // from typing into a terminal it was never aimed at.
                     iced::keyboard::Key::Character(c)
                         if c.eq_ignore_ascii_case("v")
                             && modifiers.control()
-                            && (modifiers.shift() || self.remote_agent_selected()) =>
+                            && !modifiers.shift()
+                            && self.remote_agent_selected() =>
                     {
                         self.paste_image()
-                    }
-                    // The fork's Copy binding never captures: it wrote the
-                    // widget's selection if there was one, and this arm
-                    // covers the pane where there wasn't — on a remote
-                    // project the selection the user SEES is tmux's
-                    // (`explicit_remote_copy` checks both).
-                    iced::keyboard::Key::Character(c)
-                        if c.eq_ignore_ascii_case("c")
-                            && modifiers.control()
-                            && modifiers.shift() =>
-                    {
-                        self.explicit_remote_copy()
                     }
                     _ => Task::none(),
                 }
@@ -4512,6 +4788,18 @@ impl App {
                 }
                 Task::none()
             }
+            Event::SearchSubmit => {
+                // GTK's terminal_search: Enter = next, Shift+Enter = previous.
+                // iced's text_input publishes one submit with no modifiers,
+                // so Shift is read off the tracked modifier state instead.
+                let direction = if self.shift_held {
+                    SearchDirection::Right
+                } else {
+                    SearchDirection::Left
+                };
+                log::debug!("search submit: {direction:?} (shift {})", self.shift_held);
+                self.update(Event::SearchStep(direction))
+            }
             Event::SearchClose => {
                 self.search_open = false;
                 self.search_query.clear();
@@ -4525,21 +4813,23 @@ impl App {
                 Task::none()
             }
             Event::PaletteSubmit => {
-                let target = self.palette_matches().get(self.palette_index).copied();
+                // Ctrl+Return is GTK's focus-terminal alias, and its window
+                // controller runs in the capture phase — so in the palette
+                // it hides the palette without picking anything. Here the
+                // text_input has already turned the chord into a submit.
+                if self.ctrl_held {
+                    return self.close_palette();
+                }
+                let target = self
+                    .palette_matches()
+                    .get(self.palette_index)
+                    .map(|row| row.entry.clone());
                 match target {
-                    Some((project, index)) => {
-                        let close = self.close_palette();
-                        let select = self.update(Event::SelectProcess { project, index });
-                        Task::batch([close, select])
-                    }
+                    Some(entry) => self.activate_palette(entry),
                     None => self.close_palette(),
                 }
             }
-            Event::PaletteSelect { project, index } => {
-                let close = self.close_palette();
-                let select = self.update(Event::SelectProcess { project, index });
-                Task::batch([close, select])
-            }
+            Event::PaletteActivate(entry) => self.activate_palette(entry),
             Event::ImagePasted {
                 project,
                 term,
@@ -4574,6 +4864,12 @@ impl App {
                 Task::none()
             }
             Event::ComposerSend => {
+                // Ctrl+Return: GTK's capture-phase focus-terminal alias wins
+                // over the composer's own Enter, so it leaves the draft in
+                // place and moves focus.
+                if self.ctrl_held {
+                    return self.focus_selected_terminal();
+                }
                 // The composer types into the selected terminal like the
                 // GTK composer_bar does via feed_child — local input beats
                 // ssh typing latency for remote agents.
@@ -5407,57 +5703,107 @@ impl App {
         .into()
     }
 
-    /// The command palette: a dimmed backdrop with a centered card —
-    /// type to filter every process across every project, Enter jumps.
+    /// GTK's command palette: one list, category chip on the left of each
+    /// row, the New tier first, then Switch to / GO TO. The list scrolls
+    /// under GTK's 400 px cap with the highlighted row kept in view by
+    /// `palette_snap`; the footer hints are GTK's verbatim.
     fn view_palette(&'_ self) -> Element<'_, Event> {
         let matches = self.palette_matches();
         let mut list = column![].spacing(1);
-        for (row_i, (project_id, index)) in matches.iter().take(12).enumerate() {
-            let Some(project) = self.projects.iter().find(|p| p.id == *project_id) else {
-                continue;
-            };
-            let Some(entry) = project.entries.get(*index) else {
-                continue;
-            };
-            let remote = project.location.is_remote();
-            let accent = accent_for(remote);
-            let dot_color = match entry.status {
-                Status::Running => accent,
-                Status::Stopped => STOPPED,
-                Status::Crashed(_) => CRASHED,
-                Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+        for (row_i, palette_row) in matches.iter().enumerate() {
+            let category = text(palette_row.category).size(10).color(DIM).width(84);
+            let (accent, content): (iced::Color, Element<'_, Event>) = match &palette_row.entry {
+                PaletteEntry::Process { project, index } => {
+                    let Some(project) = self.projects.iter().find(|p| p.id == *project) else {
+                        continue;
+                    };
+                    let Some(entry) = project.entries.get(*index) else {
+                        continue;
+                    };
+                    let accent = accent_for(project.location.is_remote());
+                    let dot_color = match entry.status {
+                        Status::Running => accent,
+                        Status::Stopped => STOPPED,
+                        Status::Crashed(_) => CRASHED,
+                        Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+                    };
+                    (
+                        accent,
+                        row![
+                            text("\u{25cf}").size(10).color(dot_color),
+                            text(&project.name).size(12).color(DIM),
+                            text(&entry.config.name).size(13).color(TEXT),
+                        ]
+                        .spacing(9)
+                        .align_y(iced::Alignment::Center)
+                        .into(),
+                    )
+                }
+                PaletteEntry::Project(id) => {
+                    let remote = self
+                        .projects
+                        .iter()
+                        .find(|p| p.id == *id)
+                        .is_some_and(|p| p.location.is_remote());
+                    (
+                        accent_for(remote),
+                        text(palette_row.label.clone()).size(13).color(TEXT).into(),
+                    )
+                }
+                PaletteEntry::Action(_) => (
+                    LOCAL_ACCENT,
+                    text(palette_row.label.clone()).size(13).color(TEXT).into(),
+                ),
             };
             list = list.push(
                 button(
-                    row![
-                        text("\u{25cf}").size(10).color(dot_color),
-                        text(&project.name).size(12).color(DIM),
-                        text(&entry.config.name).size(13).color(TEXT),
-                        iced::widget::space::horizontal(),
-                    ]
-                    .spacing(9)
-                    .align_y(iced::Alignment::Center),
+                    row![category, content, iced::widget::space::horizontal()]
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center),
                 )
                 .width(Length::Fill)
                 .padding([6, 12])
                 .style(theme::process_row(accent, row_i == self.palette_index))
-                .on_press(Event::PaletteSelect {
-                    project: *project_id,
-                    index: *index,
-                }),
+                .on_press(Event::PaletteActivate(palette_row.entry.clone())),
             );
         }
+        if matches.is_empty() {
+            list = list.push(container(text("No matches").size(12).color(DIM)).padding([6, 12]));
+        }
+
+        let hint = |key: &'static str, what: &'static str| {
+            row![
+                text(key).size(11).color(TEXT_SECONDARY),
+                text(what).size(11).color(DIM),
+            ]
+            .spacing(5)
+        };
+        let footer = row![
+            hint("\u{2191} \u{2193}", "navigate"),
+            hint("\u{21b5}", "select"),
+            hint("esc", "close"),
+        ]
+        .spacing(16);
 
         let card = container(
             column![
-                text_input("Jump to a process\u{2026}", &self.palette_query)
-                    .id(self.palette_input.clone())
-                    .on_input(Event::PaletteInput)
-                    .on_submit(Event::PaletteSubmit)
-                    .style(theme::input(LOCAL_ACCENT))
-                    .padding([8, 14])
-                    .size(14),
-                list,
+                text_input(
+                    "New command, terminal, or agent\u{2026}",
+                    &self.palette_query
+                )
+                .id(self.palette_input.clone())
+                .on_input(Event::PaletteInput)
+                .on_submit(Event::PaletteSubmit)
+                .style(theme::input(LOCAL_ACCENT))
+                .padding([8, 14])
+                .size(14),
+                container(
+                    scrollable(list)
+                        .id(self.palette_scroll.clone())
+                        .style(theme::overlay_scrollbar)
+                )
+                .max_height(400.0),
+                footer,
             ]
             .spacing(10)
             .width(560),
@@ -6399,7 +6745,7 @@ impl App {
                             text_input("Search scrollback (regex)\u{2026}", &self.search_query)
                                 .id(self.search_input.clone())
                                 .on_input(Event::SearchQueryChanged)
-                                .on_submit(Event::SearchStep(SearchDirection::Left))
+                                .on_submit(Event::SearchSubmit)
                                 .style(theme::input(accent))
                                 .padding([5, 12])
                                 .size(12.5),
@@ -6922,8 +7268,11 @@ impl App {
     }
 
     /// New chords take effect now: rebuild the matcher and re-reserve in
-    /// every live terminal (reservations are additive; a stale reservation
-    /// maps to an app action that no longer matches, which is inert).
+    /// every live terminal. Reservations are additive: the OLD chord's
+    /// Passthrough stays in terminals open at the time, so that chord is
+    /// swallowed there (neither typed nor acted on) until the terminal is
+    /// respawned; a stale Copy/Paste row keeps the widget's own action,
+    /// which is what the stock table had there anyway.
     fn rebuild_keys(&mut self) {
         self.app_keys = AppKeys::from_settings(&self.settings.keybindings);
         let reservations = self.app_keys.reservations();
@@ -7327,7 +7676,7 @@ impl App {
                 // swallows the keyboard whenever it has focus, which is
                 // exactly when the hint is wanted.
                 iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
-                    Some(Event::CtrlHeld(m.control()))
+                    Some(Event::ModifiersHeld(m))
                 }
                 // Focus loss drops held state (keycaps, a drag) — see the
                 // handler.

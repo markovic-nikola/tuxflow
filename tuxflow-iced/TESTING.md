@@ -28,16 +28,21 @@ Your settings.toml strings apply; defaults shown.
 | Chord | Action |
 |---|---|
 | Ctrl+Shift+F | search scrollback (Enter next, Shift+Enter previous, Esc close) |
-| Ctrl+Shift+P | command palette |
+| Ctrl+Shift+P | command palette — GTK's tiers: New agent/command/terminal/project rows, Stop/Restart all, Switch to (processes), GO TO (projects) |
+| Ctrl+N | palette prefilled with "New " (the add rows) |
+| Ctrl+G | palette prefilled with "Switch " (the process rows) |
 | Ctrl+F | filter the sidebar (projects & processes; Esc unfocuses, Esc again closes) |
 | Ctrl+\ | hide / show the sidebar |
+| Ctrl+Left | show the sidebar (GTK's Focus Sidebar) |
+| Ctrl+Right, Ctrl+Return | focus the selected terminal (closes the palette if open; in the composer, leaves the draft and moves focus) |
 | Ctrl+Up / Ctrl+Down | previous / next process |
 | Ctrl+Shift+Up / Ctrl+Shift+Down | previous / next project |
 | Ctrl+T | new terminal in the active project |
 | Ctrl+Shift+W | close the selected terminal / stop the process |
+| Ctrl+Alt+S / Ctrl+Alt+R / Ctrl+Alt+C | start-or-stop / restart / clear the selected process |
 | Ctrl+= / Ctrl+- | font size (applies to every terminal) |
 | Alt+Shift+Up / Alt+Shift+Down | move the selected process up / down (persists order) |
-| Ctrl+Shift+C / Ctrl+Shift+V | copy / paste (remote: tmux buffer bridge / image upload) |
+| Ctrl+Shift+C / Ctrl+Shift+V | copy / paste (remote: tmux buffer bridge / image upload) — rebindable like the rest; the widget's own copy/paste move with the chord |
 | Ctrl+V | remote agent terminals: paste text / bridge an image (GTK parity — a raw ^V would read the host's clipboard); elsewhere literal ^V |
 | Alt+Enter | ESC+CR to the terminal — newline in Claude Code |
 

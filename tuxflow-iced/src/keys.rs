@@ -14,15 +14,35 @@ use tuxflow_core::config::keybindings::KeybindingsSettings;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AppAction {
+    /// The widget copies its own selection at this chord (the fork's
+    /// `BindingAction::Copy`, see `reservations`); the app arm collects
+    /// the tmux buffer where a remote pane has no widget selection.
+    Copy,
+    /// Text paste is the widget's (`BindingAction::Paste`, captured); an
+    /// image-only clipboard falls through here to the upload bridge.
+    Paste,
     TerminalSearch,
     CommandPalette,
+    /// GTK's Ctrl+N: the palette prefilled with "New ".
+    AddNew,
+    /// GTK's Ctrl+G: the palette prefilled with "Switch ".
+    QuickJump,
     Settings,
+    /// GTK's `set_show_sidebar(true)` — there is no keyboard focus to
+    /// hand the list, showing it is the whole action.
+    FocusSidebar,
+    /// Hides the palette if it is up, then focuses the selected terminal.
+    /// Also GTK's hardcoded Ctrl+Return alias (a fixed built-in below).
+    FocusTerminal,
     PrevProcess,
     NextProcess,
     PrevProject,
     NextProject,
     NewTerminal,
     CloseProcess,
+    ClearOutput,
+    ToggleProcess,
+    RestartProcess,
     FontIncrease,
     FontDecrease,
     MoveProcessUp,
@@ -53,18 +73,29 @@ pub struct AppKeys {
 
 impl AppKeys {
     pub fn from_settings(kb: &KeybindingsSettings) -> Self {
-        let sources: [(&String, AppAction); 13] = [
+        // Every configurable action the settings page lists — a row there
+        // with no entry here is a chord the user can rebind to no effect.
+        let sources: [(&String, AppAction); 22] = [
+            (&kb.copy, AppAction::Copy),
+            (&kb.paste, AppAction::Paste),
             (&kb.terminal_search, AppAction::TerminalSearch),
             (&kb.toggle_sidebar, AppAction::ToggleSidebar),
             (&kb.filter_processes, AppAction::FilterSidebar),
             (&kb.command_palette, AppAction::CommandPalette),
+            (&kb.add_new, AppAction::AddNew),
+            (&kb.quick_jump, AppAction::QuickJump),
             (&kb.settings, AppAction::Settings),
+            (&kb.focus_sidebar, AppAction::FocusSidebar),
+            (&kb.focus_terminal, AppAction::FocusTerminal),
             (&kb.prev_process, AppAction::PrevProcess),
             (&kb.next_process, AppAction::NextProcess),
             (&kb.prev_project, AppAction::PrevProject),
             (&kb.next_project, AppAction::NextProject),
             (&kb.new_terminal, AppAction::NewTerminal),
             (&kb.close_process, AppAction::CloseProcess),
+            (&kb.clear_output, AppAction::ClearOutput),
+            (&kb.toggle_process, AppAction::ToggleProcess),
+            (&kb.restart_process, AppAction::RestartProcess),
             (&kb.font_increase, AppAction::FontIncrease),
             (&kb.font_decrease, AppAction::FontDecrease),
         ];
@@ -75,11 +106,14 @@ impl AppKeys {
                 None => log::warn!("unparseable keybinding {raw:?} for {action:?}"),
             }
         }
-        // Built-ins with no settings key (yet): process reorder — the
-        // keyboard stand-in for the GTK sidebar's drag-and-drop.
+        // Built-ins with no settings key: process reorder — the keyboard
+        // stand-in for the GTK sidebar's drag-and-drop — and GTK's
+        // hardcoded Ctrl+Return focus-terminal alias (window.rs, "Fixed
+        // Shortcuts" on the settings page).
         for (raw, action) in [
             ("Alt+Shift+Up", AppAction::MoveProcessUp),
             ("Alt+Shift+Down", AppAction::MoveProcessDown),
+            ("Ctrl+Return", AppAction::FocusTerminal),
         ] {
             if let Some(chord) = parse(raw) {
                 bindings.push((chord, action));
@@ -114,7 +148,15 @@ impl AppKeys {
             .map(|(_, action)| *action)
     }
 
-    /// Passthrough reservations to install on every terminal at spawn.
+    /// The bindings to install on every terminal at spawn: a Passthrough
+    /// reservation per app chord, except Copy and Paste, which install the
+    /// fork's OWN actions at the user's chord — the widget still copies
+    /// its selection / pastes clipboard text there, and both leave the
+    /// chord uncaptured when they have nothing to do (empty selection,
+    /// image-only clipboard), which is what lets the app arm run the
+    /// remote bridges behind them. Bindings replace on an identical
+    /// target, so the user's Copy chord landing on the stock Ctrl+Shift+C
+    /// row is a rewrite of it, not a second copy of it.
     pub fn reservations(
         &self,
     ) -> Vec<(
@@ -123,10 +165,15 @@ impl AppKeys {
     )> {
         self.bindings
             .iter()
-            .map(|(chord, _)| {
+            .map(|(chord, action)| {
                 let target = match &chord.key {
                     ChordKey::Char(c) => iced_term::bindings::InputKind::Char(c.clone()),
                     ChordKey::Named(n) => iced_term::bindings::InputKind::KeyCode(*n),
+                };
+                let binding_action = match action {
+                    AppAction::Copy => iced_term::bindings::BindingAction::Copy,
+                    AppAction::Paste => iced_term::bindings::BindingAction::Paste,
+                    _ => iced_term::bindings::BindingAction::Passthrough,
                 };
                 (
                     iced_term::bindings::Binding {
@@ -135,7 +182,7 @@ impl AppKeys {
                         terminal_mode_include: iced_term::TermMode::empty(),
                         terminal_mode_exclude: iced_term::TermMode::empty(),
                     },
-                    iced_term::bindings::BindingAction::Passthrough,
+                    binding_action,
                 )
             })
             .collect()
@@ -301,8 +348,8 @@ mod tests {
     fn default_chords_parse() {
         // All shipped defaults must parse — a silent drop means a
         // shortcut the GTK app honors and this shell ignores.
-        // 13 settings-backed + 2 reorder built-ins + 18 digit switchers.
-        assert_eq!(keys().bindings.len(), 33);
+        // 22 settings-backed + 3 built-ins + 18 digit switchers.
+        assert_eq!(keys().bindings.len(), 43);
     }
 
     #[test]
@@ -408,14 +455,54 @@ mod tests {
 
     #[test]
     fn reservations_cover_every_binding() {
+        use iced_term::bindings::{BindingAction, InputKind};
         let keys = keys();
         let reservations = keys.reservations();
         assert_eq!(reservations.len(), keys.bindings.len());
-        assert!(
-            reservations.iter().all(|(_, action)| matches!(
-                action,
-                iced_term::bindings::BindingAction::Passthrough
-            ))
+        // Copy and Paste keep the widget's own behaviour at the user's
+        // chord; everything else is reserved for the app.
+        for (binding, action) in &reservations {
+            let want = match (&binding.target, binding.modifiers) {
+                (InputKind::Char(c), m) if c == "c" && m == Modifiers::CTRL | Modifiers::SHIFT => {
+                    BindingAction::Copy
+                }
+                (InputKind::Char(c), m) if c == "v" && m == Modifiers::CTRL | Modifiers::SHIFT => {
+                    BindingAction::Paste
+                }
+                _ => BindingAction::Passthrough,
+            };
+            assert_eq!(action, &want, "{binding:?}");
+        }
+    }
+
+    #[test]
+    fn every_settings_row_reaches_the_matcher() {
+        // The settings page lists `action_metadata()`; each of those must
+        // resolve to SOME app action from its default chord, or the row is
+        // a rebind to nothing.
+        use tuxflow_core::config::keybindings::action_metadata;
+        let kb = KeybindingsSettings::default();
+        let keys = AppKeys::from_settings(&kb);
+        for (action, name, _) in action_metadata() {
+            let chord = parse(kb.get(action)).expect(name);
+            let key: LogicalKey = match &chord.key {
+                ChordKey::Char(c) => LogicalKey::Character(c.as_str().into()),
+                ChordKey::Named(n) => LogicalKey::Named(*n),
+            };
+            assert!(
+                keys.action_for(&key, chord.modifiers).is_some(),
+                "{name} ({}) is not wired",
+                kb.get(action)
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_return_is_the_focus_terminal_alias() {
+        let key: LogicalKey = LogicalKey::Named(Named::Enter);
+        assert_eq!(
+            keys().action_for(&key, Modifiers::CTRL),
+            Some(AppAction::FocusTerminal)
         );
     }
 }

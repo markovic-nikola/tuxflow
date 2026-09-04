@@ -619,6 +619,28 @@ mod tests {
         assert_eq!(names, vec!["web", "mine"]);
     }
 
+    /// What the edit form's rename writes — the old name's deletion
+    /// record, the new name as a custom command, the live order saved
+    /// under the new name — comes back on the next load as ONE renamed
+    /// process in its old slot, not the detected original beside a
+    /// renamed copy at the end (where a custom command lands with no
+    /// saved order to place it).
+    #[test]
+    fn a_renamed_detected_process_reloads_renamed_in_place() {
+        let mut saved = SavedProjects::default();
+        saved.remove_custom_command("k", "web");
+        saved.add_deleted_process("k", "web");
+        saved.set_process_order("k", vec!["frontend".into(), "api".into()]);
+        let mut renamed = pc("frontend");
+        renamed.command = "npm run dev".into();
+        saved.add_custom_command("k", renamed);
+
+        let merged = merge_saved(vec![pc("api"), pc("web")], &saved, "k");
+        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["frontend", "api"]);
+        assert_eq!(merged[0].command, "npm run dev");
+    }
+
     /// Saved order wins; unknown names keep relative order at the end.
     #[test]
     fn saved_order_applies() {

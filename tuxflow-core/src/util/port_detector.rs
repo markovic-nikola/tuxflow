@@ -161,6 +161,18 @@ impl PortDetector {
         self.seen_local.remove(process_name);
     }
 
+    /// A process was renamed while its badge is live: carry the badge and
+    /// the seen-port set over, so a stopped process's URL survives the
+    /// rename the way its terminal does.
+    pub fn rename(&mut self, old: &str, new: &str) {
+        if let Some(ports) = self.ports.remove(old) {
+            self.ports.insert(new.to_string(), ports);
+        }
+        if let Some(seen) = self.seen_local.remove(old) {
+            self.seen_local.insert(new.to_string(), seen);
+        }
+    }
+
     /// Scan complete logical lines. Local VTE text extraction joins its own
     /// soft wraps, and tmux *history* is captured with `-J` — but a live
     /// tmux screen redraw emits wrapped long lines as separate hard rows;

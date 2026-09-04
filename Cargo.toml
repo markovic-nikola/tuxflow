@@ -55,6 +55,7 @@ tempfile = "3"
 maintainer = "Nikola Markovic <markovic-nikola@users.noreply.github.com>"
 copyright = "2026, TuxFlow Contributors"
 depends = "$auto, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0"
+recommends = "pulseaudio-utils"
 section = "devel"
 priority = "optional"
 assets = [

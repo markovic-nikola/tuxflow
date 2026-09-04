@@ -28,6 +28,7 @@ use std::sync::{Mutex, OnceLock};
 
 use tuxflow_core::config::settings::NotificationSettings;
 use tuxflow_core::util::agents::AgentKind;
+use tuxflow_core::util::sounds::{NotificationKind, sound_for};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::Value;
 
@@ -77,11 +78,14 @@ fn notify(summary: &str, body: &str, icon: &str) -> zbus::Result<u32> {
 }
 
 /// GTK's `send`: a notification with an optional file icon, then the
-/// sound — `sound` overrides the global pick (the per-agent idle sounds),
-/// and nothing plays while sounds are off. paplay is fire-and-forget;
-/// failure is logged in core.
+/// sound — `kind` picks the cue from the chosen sound's pack (core's
+/// `sound_for`: crash → error, finish → success, outages → warning),
+/// `sound` overrides that whole (the per-agent idle sounds), and nothing
+/// plays while sounds are off. paplay is fire-and-forget; failure is
+/// logged in core.
 fn send(
     ns: &NotificationSettings,
+    kind: NotificationKind,
     summary: &str,
     body: &str,
     icon: Option<&Path>,
@@ -103,7 +107,8 @@ fn send(
         }
     });
     if ns.sound_enabled {
-        let _ = tuxflow_core::util::sounds::play_sound(sound.unwrap_or(&ns.sound_name));
+        let id = sound.unwrap_or_else(|| sound_for(&ns.sound_name, kind));
+        let _ = tuxflow_core::util::sounds::play_sound(id);
     }
 }
 
@@ -121,7 +126,7 @@ fn per_agent_sound(ns: &NotificationSettings, kind: AgentKind) -> Option<&str> {
 
 /// The settings page's "Send Test" button.
 pub fn test(ns: &NotificationSettings) {
-    send(ns, "TuxFlow", "test", None, None);
+    send(ns, NotificationKind::Test, "TuxFlow", "test", None, None);
 }
 
 pub fn crash(
@@ -135,7 +140,7 @@ pub fn crash(
         Some(code) => format!("{process} crashed (exit {code})"),
         None => format!("{process} crashed"),
     };
-    send(ns, project, &body, icon, None);
+    send(ns, NotificationKind::Crash, project, &body, icon, None);
 }
 
 pub fn auto_restart(
@@ -147,6 +152,7 @@ pub fn auto_restart(
 ) {
     send(
         ns,
+        NotificationKind::AutoRestart,
         project,
         &format!("{process} crashed — restarting ({attempt})"),
         icon,
@@ -159,6 +165,7 @@ pub fn auto_restart(
 pub fn disconnect(ns: &NotificationSettings, project: &str, process: &str, icon: Option<&Path>) {
     send(
         ns,
+        NotificationKind::Disconnect,
         project,
         &format!("{process}: connection lost — reconnecting (it keeps running on the host)"),
         icon,
@@ -167,7 +174,14 @@ pub fn disconnect(ns: &NotificationSettings, project: &str, process: &str, icon:
 }
 
 pub fn finish(ns: &NotificationSettings, project: &str, process: &str, icon: Option<&Path>) {
-    send(ns, project, &format!("{process} finished"), icon, None);
+    send(
+        ns,
+        NotificationKind::Finish,
+        project,
+        &format!("{process} finished"),
+        icon,
+        None,
+    );
 }
 
 /// An agent finished its turn — GTK's `notify_agent_idle`, fired on the
@@ -186,6 +200,7 @@ pub fn agent_idle(
     }
     send(
         ns,
+        NotificationKind::AgentIdle,
         project,
         &format!("{process}: waiting for input"),
         icon,
@@ -201,6 +216,7 @@ pub fn agent_idle(
 pub fn mic_bridge_failed(ns: &NotificationSettings, host: &str, reason: &str) {
     send(
         ns,
+        NotificationKind::MicBridgeFailed,
         "Microphone bridge unavailable",
         &format!("Voice input won't work on {host} \u{2014} {reason}"),
         None,
@@ -214,10 +230,10 @@ mod tests {
 
     fn settings() -> NotificationSettings {
         NotificationSettings {
-            sound_name: "sound1".into(),
-            claude_sound_name: Some("sound7".into()),
+            sound_name: "cinematic-notification".into(),
+            claude_sound_name: Some("soft-badge".into()),
             codex_sound_name: None,
-            gemini_sound_name: Some("sound3".into()),
+            gemini_sound_name: Some("glass-success".into()),
             ..NotificationSettings::default()
         }
     }
@@ -228,8 +244,11 @@ mod tests {
     #[test]
     fn per_agent_sound_overrides_only_where_configured() {
         let ns = settings();
-        assert_eq!(per_agent_sound(&ns, AgentKind::Claude), Some("sound7"));
-        assert_eq!(per_agent_sound(&ns, AgentKind::Gemini), Some("sound3"));
+        assert_eq!(per_agent_sound(&ns, AgentKind::Claude), Some("soft-badge"));
+        assert_eq!(
+            per_agent_sound(&ns, AgentKind::Gemini),
+            Some("glass-success")
+        );
         assert_eq!(per_agent_sound(&ns, AgentKind::Codex), None);
         assert_eq!(per_agent_sound(&ns, AgentKind::OpenCode), None);
         assert_eq!(per_agent_sound(&ns, AgentKind::Unknown), None);

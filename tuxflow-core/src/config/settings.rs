@@ -175,7 +175,7 @@ impl Default for NotificationSettings {
             agent_idle_silence_seconds: 20,
             suppress_when_focused: true,
             sound_enabled: false,
-            sound_name: "sound1".to_string(),
+            sound_name: crate::util::sounds::DEFAULT_SOUND_ID.to_string(),
             claude_sound_name: None,
             codex_sound_name: None,
             gemini_sound_name: None,

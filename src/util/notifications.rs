@@ -9,6 +9,7 @@ use crate::config::settings::AppSettings;
 // iced shell's settings window); re-exported so call sites keep reading
 // `util::notifications::BUNDLED_SOUNDS` etc.
 pub use tuxflow_core::util::sounds::{BUNDLED_SOUNDS, play_sound};
+use tuxflow_core::util::sounds::{NotificationKind, sound_for};
 
 // AgentKind and the per-agent resume table moved to core (shared with
 // the iced shell's context menus); re-exported so call sites keep reading
@@ -16,7 +17,16 @@ pub use tuxflow_core::util::sounds::{BUNDLED_SOUNDS, play_sound};
 pub use tuxflow_core::util::agents::{AgentKind, resume_command_for};
 
 /// Internal: send a desktop notification, optionally with a file-based icon.
-fn send(title: &str, body: &str, icon_path: Option<&Path>, sound_override: Option<&str>) {
+/// `kind` picks the cue from the chosen sound's pack (core's `sound_for`:
+/// crash → error, finish → success, outages → warning); `sound_override`
+/// replaces that whole (the per-agent idle sounds).
+fn send(
+    kind: NotificationKind,
+    title: &str,
+    body: &str,
+    icon_path: Option<&Path>,
+    sound_override: Option<&str>,
+) {
     let notification = gio::Notification::new(title);
     notification.set_body(Some(body));
 
@@ -34,15 +44,16 @@ fn send(title: &str, body: &str, icon_path: Option<&Path>, sound_override: Optio
         log::warn!("No application instance for notification: {title}");
     }
 
-    maybe_play_sound(sound_override);
+    maybe_play_sound(kind, sound_override);
 }
 
-fn maybe_play_sound(override_sound_id: Option<&str>) {
+fn maybe_play_sound(kind: NotificationKind, override_sound_id: Option<&str>) {
     let settings = AppSettings::load();
     if !settings.notifications.sound_enabled {
         return;
     }
-    let id = override_sound_id.unwrap_or(&settings.notifications.sound_name);
+    let id =
+        override_sound_id.unwrap_or_else(|| sound_for(&settings.notifications.sound_name, kind));
     let _ = play_sound(id);
 }
 
@@ -61,6 +72,7 @@ fn per_agent_sound(
 
 pub fn notify_crash(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
     send(
+        NotificationKind::Crash,
         project_name,
         &format!("{process_name}: crashed"),
         icon_path,
@@ -75,6 +87,7 @@ pub fn notify_restart(
     icon_path: Option<&Path>,
 ) {
     send(
+        NotificationKind::AutoRestart,
         project_name,
         &format!("{process_name}: restarting (attempt {attempt})"),
         icon_path,
@@ -90,6 +103,7 @@ pub fn notify_reconnect(
     icon_path: Option<&Path>,
 ) {
     send(
+        NotificationKind::Disconnect,
         project_name,
         &format!("{process_name}: connection lost — reconnecting (attempt {attempt})"),
         icon_path,
@@ -100,6 +114,7 @@ pub fn notify_reconnect(
 /// Remote process lost its ssh connection and won't be restarted automatically.
 pub fn notify_disconnect(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
     send(
+        NotificationKind::Disconnect,
         project_name,
         &format!("{process_name}: ssh connection lost"),
         icon_path,
@@ -111,6 +126,7 @@ pub fn notify_disconnect(project_name: &str, process_name: &str, icon_path: Opti
 /// TuxFlow keeps retrying in the background. Fired once per outage.
 pub fn notify_remote_unreachable(project_name: &str, host: &str) {
     send(
+        NotificationKind::RemoteUnreachable,
         project_name,
         &format!("Can't reach {host} — will keep retrying in the background"),
         None,
@@ -123,6 +139,7 @@ pub fn notify_remote_unreachable(project_name: &str, host: &str) {
 /// microphone, voice "failing repeatedly") points nowhere near the cause.
 pub fn notify_mic_bridge_failed(host: &str, reason: &str) {
     send(
+        NotificationKind::MicBridgeFailed,
         "Microphone bridge unavailable",
         &format!("Voice input won't work on {host} — {reason}"),
         None,
@@ -132,6 +149,7 @@ pub fn notify_mic_bridge_failed(host: &str, reason: &str) {
 
 pub fn notify_finish(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
     send(
+        NotificationKind::Finish,
         project_name,
         &format!("{process_name}: finished"),
         icon_path,
@@ -152,6 +170,7 @@ pub fn notify_agent_idle(
     let settings = AppSettings::load();
     let sound_override = per_agent_sound(&settings.notifications, kind);
     send(
+        NotificationKind::AgentIdle,
         project_name,
         &format!("{process_name}: waiting for input"),
         icon_path,
@@ -161,6 +180,7 @@ pub fn notify_agent_idle(
 
 pub fn notify_file_watch_restart(project_name: &str, process_name: &str, icon_path: Option<&Path>) {
     send(
+        NotificationKind::FileWatchRestart,
         project_name,
         &format!("{process_name}: file change → restart"),
         icon_path,

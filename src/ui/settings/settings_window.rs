@@ -608,6 +608,7 @@ impl SettingsWindow {
             .unwrap_or(0) as u32;
         let sound_combo = adw::ComboRow::builder()
             .title("Notification Sound")
+            .subtitle("Agents waiting for input play this. Crashes play its pack's error, finished commands its success, lost connections its warning.")
             .model(&string_list)
             .selected(current_idx)
             .build();

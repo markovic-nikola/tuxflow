@@ -18,6 +18,8 @@ usage() {
     echo "  Ubuntu/Debian: sudo apt install libgtk-4-1 libadwaita-1-0 libvte-2.91-gtk4-0"
     echo "  Fedora:        sudo dnf install gtk4 libadwaita vte291-gtk4"
     echo "  Arch:          sudo pacman -S gtk4 libadwaita vte4"
+    echo "Notification sounds need paplay (optional):"
+    echo "  Ubuntu/Debian/Fedora: pulseaudio-utils    Arch: libpulse"
     exit 0
 }
 
@@ -97,6 +99,8 @@ echo "Make sure you have the required system libraries:"
 echo "  Ubuntu/Debian: sudo apt install libgtk-4-1 libadwaita-1-0 libvte-2.91-gtk4-0"
 echo "  Fedora:        sudo dnf install gtk4 libadwaita vte291-gtk4"
 echo "  Arch:          sudo pacman -S gtk4 libadwaita vte4"
+echo "Notification sounds need paplay (optional):"
+echo "  Ubuntu/Debian/Fedora: pulseaudio-utils    Arch: libpulse"
 if [ "$USER_INSTALL" = true ]; then
     echo ""
     echo "Make sure ~/.local/bin is in your PATH."

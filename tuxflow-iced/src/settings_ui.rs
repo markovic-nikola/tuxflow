@@ -377,7 +377,7 @@ fn page_notifications<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget:
         ),
         preview_row(
             "Notification Sound",
-            "",
+            "Agents waiting for input play this. Crashes play its pack's error, finished commands its success, lost connections its warning.",
             sound_labels.clone(),
             label_for(&n.sound_name),
             Msg::Sound,

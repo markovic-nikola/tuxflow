@@ -7357,7 +7357,7 @@ fn accent_name_for_label(label: &str) -> String {
         .to_string()
 }
 
-/// Sound label ("Sound 3") back to its id ("sound3"); "(Use default)" and
+/// Sound label ("Soft · Badge") back to its id ("soft-badge"); "(Use default)" and
 /// unknown labels clear the override.
 fn sound_id_for_label(label: &str) -> Option<String> {
     tuxflow_core::util::sounds::BUNDLED_SOUNDS

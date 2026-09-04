@@ -2905,6 +2905,19 @@ impl App {
         }
         project.entries.swap(from, to as usize);
         project.selected = to as usize;
+        self.persist_process_order(self.active);
+        Task::none()
+    }
+
+    /// Write the project's live entry order as its saved `process_order`
+    /// — GTK's `save_process_order`, the one place the flat list is
+    /// built. Every caller has just changed what the order MEANS: a move
+    /// changed positions, a rename changed a name the saved list is keyed
+    /// by (a project with no saved order gets one here, or the renamed
+    /// process — a custom command now — appends after detection on the
+    /// next load).
+    fn persist_process_order(&mut self, pidx: usize) {
+        let project = &self.projects[pidx];
         let key = project.key();
         let order: Vec<String> = project
             .entries
@@ -2912,7 +2925,6 @@ impl App {
             .map(|e| e.config.name.clone())
             .collect();
         self.saved.set_process_order(&key, order);
-        Task::none()
     }
 
     /// Whether the live drag may drop on `target` — GTK's two DropTargets:
@@ -3018,19 +3030,13 @@ impl App {
         dnd::reorder(&mut project.entries, src, dst);
         project.selected = dnd::remap(project.selected, src, dst);
         let project_id = project.id;
-        let key = project.key();
-        let order: Vec<String> = project
-            .entries
-            .iter()
-            .map(|e| e.config.name.clone())
-            .collect();
         if let Some(form) = &mut self.add_command
             && let Some((id, index)) = form.editing
             && id == project_id
         {
             form.editing = Some((id, dnd::remap(index, src, dst)));
         }
-        self.saved.set_process_order(&key, order);
+        self.persist_process_order(pidx);
     }
 
     fn entry_for_term(&self, term_id: u64) -> Option<(usize, usize)> {
@@ -4752,30 +4758,87 @@ impl App {
                     let Some(pidx) = self.project_index(project_id) else {
                         return Task::none();
                     };
-                    let Some(entry) = self.projects[pidx].entries.get_mut(index) else {
+                    if self.projects[pidx].entries.get(index).is_none() {
                         return Task::none();
-                    };
-                    let command = form.command.trim();
-                    if command.is_empty() {
+                    }
+                    let name = form.name.trim().to_string();
+                    let command = form.command.trim().to_string();
+                    if name.is_empty() || command.is_empty() {
                         let mut form = form;
-                        form.error = Some(String::from("A command is required."));
+                        form.error = Some(String::from("A name and a command are both required."));
                         self.add_command = Some(form);
                         return Task::none();
                     }
-                    let mut config = entry.config.clone();
-                    config.command = command.to_string();
+                    let taken = self.projects[pidx]
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .any(|(i, e)| i != index && e.config.name == name);
+                    if taken {
+                        let mut form = form;
+                        form.error = Some(format!(
+                            "A process named \u{201c}{name}\u{201d} already exists in this project."
+                        ));
+                        self.add_command = Some(form);
+                        return Task::none();
+                    }
                     let wd = form.working_dir.trim();
-                    config.working_dir = if wd.is_empty() {
+                    let working_dir = if wd.is_empty() {
                         None
                     } else {
                         Some(wd.to_string())
                     };
+                    let mut config = self.projects[pidx].entries[index].config.clone();
+                    let old_name = config.name.clone();
+                    let name_changed = old_name != name;
+                    // GTK's edit handler kills a running process before the
+                    // edit and respawns it after, on every Save. Ported for
+                    // the edits a running process cannot absorb — its name
+                    // (a remote session is NAMED after it), command and
+                    // working directory. A flag flip alone leaves it be:
+                    // toggling "Restart on crash" on a busy agent must not
+                    // kill its session. Restart-backoff and reconnect count
+                    // as live too — their timer would otherwise respawn
+                    // under the new name and orphan the host-side session.
+                    let respawn = name_changed
+                        || config.command != command
+                        || config.working_dir != working_dir;
+                    let live = !matches!(
+                        self.projects[pidx].entries[index].status,
+                        Status::Stopped | Status::Crashed(_)
+                    );
+                    if live && respawn {
+                        self.stop(pidx, index);
+                    }
+                    config.name = name.clone();
+                    config.command = command;
+                    config.working_dir = working_dir;
                     config.start_with_project = form.start_with_project;
                     config.auto_restart = form.auto_restart;
                     config.open_in_browser = form.open_in_browser;
-                    entry.config = config.clone();
                     let key = self.projects[pidx].key();
-                    self.saved.add_custom_command(&key, config);
+                    if name_changed {
+                        // GTK's mark_process_deleted + save_custom_command:
+                        // the old name's custom copy goes, and its deletion
+                        // record keeps detection from resurrecting the old
+                        // name beside the renamed one on the next load.
+                        // The new name stops being "deleted" (a detected
+                        // process removed earlier) — it is present now —
+                        // and stops being auto-named: the user chose it.
+                        self.saved.remove_custom_command(&key, &old_name);
+                        self.saved.add_deleted_process(&key, &old_name);
+                        self.saved.unmark_process_deleted(&key, &name);
+                        self.projects[pidx].ports.rename(&old_name, &name);
+                        config.auto_named = false;
+                    }
+                    self.saved.add_custom_command(&key, config.clone());
+                    self.projects[pidx].entries[index].config = config;
+                    if name_changed {
+                        self.persist_process_order(pidx);
+                    }
+                    if live && respawn {
+                        return self.start_fresh(pidx, index);
+                    }
                     return Task::none();
                 }
                 let (name, command) = (form.name.trim().to_string(), form.command.trim());
@@ -6407,9 +6470,17 @@ impl App {
             (false, false) => "Add Command",
         };
 
+        // GTK's edit dialog is the add form pre-filled, Name row included
+        // — a rename is an edit like any other. Editing adds the category
+        // beside it, since that is the one thing the form cannot change.
+        let name_input = text_input("Name \u{2014} e.g. web", &form.name)
+            .on_input(Event::AddCommandName)
+            .style(theme::input(accent))
+            .padding([8, 14])
+            .size(13);
         let name_row: Element<'_, Event> = if editing {
             row![
-                text(&form.name).size(15).font(bold()),
+                name_input,
                 text(match form.original_category {
                     ProcessCategory::Agent => "Agent",
                     ProcessCategory::Command => "Command",
@@ -6423,12 +6494,7 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into()
         } else {
-            text_input("Name \u{2014} e.g. web", &form.name)
-                .on_input(Event::AddCommandName)
-                .style(theme::input(accent))
-                .padding([8, 14])
-                .size(13)
-                .into()
+            name_input.into()
         };
 
         let mut col = column![text(title).size(16).font(bold())].spacing(14);

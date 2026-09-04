@@ -384,6 +384,19 @@ fn clear_resets_for_new_run() {
 }
 
 #[test]
+fn rename_carries_the_badge_over() {
+    let mut pd = PortDetector::new();
+    pd.scan_output("dev", "Server at http://localhost:3000");
+    pd.scan_output("dev", "proxy server started on port 3001");
+    pd.rename("dev", "web");
+    assert_eq!(pd.get_port("dev"), None);
+    assert_eq!(pd.get_port("web"), Some(3000));
+    assert_eq!(pd.get_url("web"), Some("http://localhost:3000"));
+    assert_eq!(pd.all_local_ports("web"), vec![3000, 3001]);
+    assert!(pd.all_local_ports("dev").is_empty());
+}
+
+#[test]
 fn sticky_does_not_overwrite() {
     let mut pd = PortDetector::new();
     pd.scan_output("dev", "Server at http://localhost:3000");

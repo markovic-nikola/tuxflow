@@ -168,7 +168,12 @@ memory, rendering under your real workload.
   Start / Stop, Restart, Resume Session (agents), Open in Browser (when
   a URL is live), Edit / Copy Command, and Delete Command (also
   confirmed). The header's ✕ is gone — project removal lives here now,
-  like GTK. Esc or a click elsewhere closes.
+  like GTK. Esc or a click elsewhere closes. Edit Command is the add
+  form pre-filled, name included: a rename keeps the row's slot and its
+  badge, restarts the process if it was live (GTK's contract — a remote
+  session is named after the process), and the old name goes to
+  deleted_processes so detection can't bring it back beside the renamed
+  copy; a flag-only edit leaves a running process alone.
 - **Settings** (gear in the header bar, or Ctrl+,): full GTK-parity
   port — all seven pages, every change saves to the shared settings.toml
   immediately. Live-applies here: terminal theme + font family / size /

@@ -16,6 +16,7 @@ mod keys;
 mod mcp;
 mod notify;
 mod processes;
+mod scheme;
 mod settings_ui;
 mod status_dot;
 mod theme;
@@ -50,10 +51,7 @@ use tuxflow_core::util::watch::{self, WatchSet};
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
 use status_dot::{spinner, status_dot};
-use theme::{
-    CRASHED, DIM, GIT_ADDED, GIT_BEHIND, GIT_REMOVED, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT,
-    TEXT_SECONDARY, UPDATE_CHIP, accent_for,
-};
+use theme::{CRASHED, LOCAL_ACCENT, accent_for, pal};
 use tuxflow_core::config::settings::AppSettings;
 use widgets::form_card;
 
@@ -263,7 +261,13 @@ fn main() -> iced::Result {
     // the window maximizes on the monitor it was closed on.
     let window = tuxflow_core::config::settings::AppSettings::load().window;
     iced::application(App::new, App::update, App::view)
-        .theme(|_: &App| iced::Theme::Dark)
+        .theme(|_: &App| {
+            if theme::pal().light {
+                iced::Theme::Light
+            } else {
+                iced::Theme::Dark
+            }
+        })
         // The pane carries no toolbar, so the window title says what it
         // used to: which project, and what the selected process calls
         // itself right now (its OSC title, else its configured name).
@@ -509,6 +513,9 @@ struct App {
     sidebar_anim: Anim,
     /// Sidebar filter (GTK: the header search toggle + SearchEntry).
     filter_open: bool,
+    /// The desktop's light/dark preference (portal), for the System scheme.
+    /// None = no portal answered; the shell stays dark then.
+    system_light: Option<bool>,
     filter_query: String,
     filter_input: iced::widget::Id,
     /// Which sidebar row the pointer is on: (project id, process index),
@@ -753,6 +760,12 @@ enum Event {
         live_sessions: Vec<String>,
         result: Result<(), String>,
     },
+    /// The desktop's light/dark preference changed (portal signal).
+    SystemScheme(bool),
+    /// A mouse press landed on the terminal pane — GTK's auto-hide trigger
+    /// (Settings → Sidebar): clicking into the terminal collapses the
+    /// sidebar to the rail, where its toggle still lives.
+    TerminalPressed,
     /// An agent's tool call on a project's MCP socket (start / stop /
     /// restart / read logs). The reply travels back inside the request.
     McpCommand {
@@ -956,7 +969,7 @@ enum Event {
     /// A palette row picked by click.
     PaletteActivate(PaletteEntry),
     /// Ignored-status keys — the widget consumed everything it wanted
-    /// (Ctrl+Shift+V with TEXT on the clipboard never reaches here).
+    /// (Ctrl+Shift+V with pal().text on the clipboard never reaches here).
     Hotkey(iced::keyboard::Event),
     /// The image-paste worker finished: bytes to feed the terminal that
     /// initiated the paste (a typed path, or Ctrl+V for agents).
@@ -1014,6 +1027,10 @@ impl App {
         // or the first load would skip bridging (GTK's window does the same
         // before it builds anything).
         remote::mic::set_enabled(settings.tools.remote_microphone);
+        // The scheme goes in BEFORE the accents: the same accent name is a
+        // different hex per scheme, and set_accents reads the palette.
+        let system_light = scheme::system_prefers_light();
+        theme::set_scheme(effective_light(&settings.appearance.theme, system_light));
         theme::set_accents(
             &settings.appearance.local_accent_color,
             &settings.appearance.remote_accent_color,
@@ -1050,6 +1067,7 @@ impl App {
             // Settled: a fresh launch shows the sidebar without a glide.
             sidebar_anim: Anim { t: 1.0, stamp: 0 },
             filter_open: std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("filter"),
+            system_light,
             filter_query: String::new(),
             filter_input: iced::widget::Id::unique(),
             hovered_row: None,
@@ -1184,6 +1202,18 @@ impl App {
         }
         tasks.push(Task::done(Event::ActivityTick));
 
+        // Desktop scheme changes (a night-mode switch) arrive as events;
+        // the thread outlives the stream and is dropped with the process.
+        let (scheme_tx, scheme_rx) = tokio::sync::mpsc::unbounded_channel();
+        scheme::watch(move |light| {
+            let _ = scheme_tx.send(light);
+        });
+        tasks.push(Task::run(
+            iced::futures::stream::unfold(scheme_rx, |mut rx| async move {
+                rx.recv().await.map(|light| (light, rx))
+            }),
+            Event::SystemScheme,
+        ));
         (app, Task::batch(tasks))
     }
 
@@ -2830,6 +2860,20 @@ impl App {
                 let id = state.project;
                 self.update(Event::OpenInEditor(id))
             }
+            Msg::OpenTerminal => {
+                // GTK's "Open Terminal Here" (Settings → Tools → Default
+                // Terminal), shared launcher in core. GTK hides the button
+                // for remote projects; here the terminal app opens an ssh
+                // shell on the host instead, since the cwd is over there.
+                let id = state.project;
+                if let Some(pidx) = self.project_index(id) {
+                    let location = self.projects[pidx].location.clone();
+                    std::thread::spawn(move || {
+                        tuxflow_core::util::terminal_app::open_terminal(&location)
+                    });
+                }
+                Task::none()
+            }
             Msg::Save => self.save_edit_project(),
             Msg::RemoveProject => {
                 let id = state.project;
@@ -3022,7 +3066,7 @@ impl App {
 
         // Enables: unmark the deletion, persist as the custom command that
         // overrides same-named detection on every future load (GTK saves
-        // every enable), and join the sidebar STOPPED — enabling is not
+        // every enable), and join the sidebar pal().stopped — enabling is not
         // starting. The form lists by COMMAND, so an enabled row may carry
         // a name the project already uses for something else (the
         // detected `deploy` script beside a custom `deploy` that runs
@@ -3435,7 +3479,7 @@ impl App {
             // on a remote project the selection the user SEES is tmux's
             // (`explicit_remote_copy` checks both).
             AppAction::Copy => self.explicit_remote_copy(),
-            // Reaching here means the widget's Paste found no TEXT — the
+            // Reaching here means the widget's Paste found no pal().text — the
             // clipboard holds an image (or nothing).
             AppAction::Paste => self.paste_image(),
             AppAction::TerminalSearch => {
@@ -3617,17 +3661,6 @@ impl App {
         } else {
             iced::font::Family::Name(Box::leak(a.font_family.clone().into_boxed_str()))
         };
-        let weight = match a.font_weight {
-            0..=149 => iced::font::Weight::Thin,
-            150..=249 => iced::font::Weight::ExtraLight,
-            250..=349 => iced::font::Weight::Light,
-            350..=449 => iced::font::Weight::Normal,
-            450..=549 => iced::font::Weight::Medium,
-            550..=649 => iced::font::Weight::Semibold,
-            650..=749 => iced::font::Weight::Bold,
-            750..=849 => iced::font::Weight::ExtraBold,
-            _ => iced::font::Weight::Black,
-        };
         iced_term::settings::FontSettings {
             size: (a.font_size as f32).clamp(6.0, 32.0),
             // GTK's line_height 1.0 is "normal"; iced_term's normal is a
@@ -3635,9 +3668,12 @@ impl App {
             scale_factor: ((a.line_height as f32) * 1.3).clamp(1.0, 2.6),
             font_type: iced::Font {
                 family,
-                weight,
+                weight: font_weight(a.font_weight),
                 ..iced::Font::MONOSPACE
             },
+            // Fork patch 26: both were saved and read by nobody.
+            bold_weight: font_weight(a.bold_font_weight),
+            letter_spacing: (a.letter_spacing as f32).clamp(-2.0, 10.0),
         }
     }
 
@@ -4248,7 +4284,7 @@ impl App {
                     };
                     // GTK's watcher restarts the process whatever its state,
                     // a stopped one included. Deliberately narrower here: a
-                    // process the user STOPPED stays stopped — a save must
+                    // process the user pal().stopped stays stopped — a save must
                     // not undo an explicit stop — while a crashed one comes
                     // back (the save is usually the fix), and a running,
                     // restarting or reconnecting one restarts.
@@ -4450,6 +4486,25 @@ impl App {
             Event::DragEdges(edges) => {
                 if let Some(drag) = &mut self.drag {
                     drag.edges = edges;
+                }
+                Task::none()
+            }
+            Event::SystemScheme(light) => {
+                self.system_light = Some(light);
+                self.apply_scheme();
+                Task::none()
+            }
+            Event::TerminalPressed => {
+                // GTK's rule (window.rs, the capture-phase gesture on the
+                // terminal stack): auto-hide on, sidebar showing, and no
+                // palette or search bar up — those take the click.
+                if self.settings.sidebar.auto_hide_sidebar
+                    && self.sidebar_visible
+                    && !self.palette_open
+                    && !self.search_open
+                    && self.drag.is_none()
+                {
+                    return self.set_sidebar(false);
                 }
                 Task::none()
             }
@@ -5217,7 +5272,7 @@ impl App {
                     // chord (`AppAction::Paste` above): plain Ctrl+V on a
                     // remote AGENT terminal, where start() rebinds it to
                     // the widget's Paste. Reaching here means the widget
-                    // found no TEXT to paste — the clipboard holds an image
+                    // found no pal().text to paste — the clipboard holds an image
                     // (or nothing); the guard keeps a stray unfocused chord
                     // from typing into a terminal it was never aimed at.
                     iced::keyboard::Key::Character(c)
@@ -6102,8 +6157,8 @@ impl App {
 
         let card = container(
             column![
-                text(heading).size(15).font(bold()).color(TEXT),
-                text(body).size(12).color(TEXT_SECONDARY),
+                text(heading).size(15).font(bold()).color(pal().text),
+                text(body).size(12).color(pal().text_secondary),
                 container(
                     row![
                         button(text("Cancel").size(12))
@@ -6164,7 +6219,7 @@ impl App {
                     column![].into()
                 } else {
                     scrollable(
-                        container(text(notes).size(12).color(TEXT_SECONDARY))
+                        container(text(notes).size(12).color(pal().text_secondary))
                             .width(Length::Fill)
                             .padding(iced::Padding::ZERO.right(12)),
                     )
@@ -6198,14 +6253,14 @@ impl App {
             }
             UpdateCard::Installing => (
                 "Installing update".into(),
-                text("Downloading\u{2026}").size(12).color(TEXT_SECONDARY).into(),
+                text("Downloading\u{2026}").size(12).color(pal().text_secondary).into(),
                 row![].into(),
             ),
             UpdateCard::Installed => (
                 "Update installed".into(),
                 text("Restart TuxFlow to run the new version. Remote processes keep running while it restarts.")
                     .size(12)
-                    .color(TEXT_SECONDARY)
+                    .color(pal().text_secondary)
                     .into(),
                 row![
                     later("Later"),
@@ -6221,7 +6276,7 @@ impl App {
 
         let card = container(
             column![
-                text(heading).size(15).font(bold()).color(TEXT),
+                text(heading).size(15).font(bold()).color(pal().text),
                 container(body).max_height(320),
                 container(buttons)
                     .width(Length::Fill)
@@ -6261,8 +6316,8 @@ impl App {
     fn view_notice<'a>(&'a self, heading: &'a str, body: &'a str) -> Element<'a, Event> {
         let card = container(
             column![
-                text(heading).size(15).font(bold()).color(TEXT),
-                text(body).size(12).color(TEXT_SECONDARY),
+                text(heading).size(15).font(bold()).color(pal().text),
+                text(body).size(12).color(pal().text_secondary),
                 container(
                     button(text("OK").size(12))
                         .padding([6, 16])
@@ -6308,7 +6363,10 @@ impl App {
         let matches = self.palette_matches();
         let mut list = column![].spacing(1);
         for (row_i, palette_row) in matches.iter().enumerate() {
-            let category = text(palette_row.category).size(10).color(DIM).width(84);
+            let category = text(palette_row.category)
+                .size(10)
+                .color(pal().dim)
+                .width(84);
             let (accent, content): (iced::Color, Element<'_, Event>) = match &palette_row.entry {
                 PaletteEntry::Process { project, index } => {
                     let Some(project) = self.projects.iter().find(|p| p.id == *project) else {
@@ -6320,16 +6378,16 @@ impl App {
                     let accent = accent_for(project.location.is_remote());
                     let dot_color = match entry.status {
                         Status::Running => accent,
-                        Status::Stopped => STOPPED,
+                        Status::Stopped => pal().stopped,
                         Status::Crashed(_) => CRASHED,
-                        Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+                        Status::Restarting(_) | Status::Reconnecting(_) => pal().restarting,
                     };
                     (
                         accent,
                         row![
                             text("\u{25cf}").size(10).color(dot_color),
-                            text(&project.name).size(12).color(DIM),
-                            text(&entry.config.name).size(13).color(TEXT),
+                            text(&project.name).size(12).color(pal().dim),
+                            text(&entry.config.name).size(13).color(pal().text),
                         ]
                         .spacing(9)
                         .align_y(iced::Alignment::Center)
@@ -6344,12 +6402,18 @@ impl App {
                         .is_some_and(|p| p.location.is_remote());
                     (
                         accent_for(remote),
-                        text(palette_row.label.clone()).size(13).color(TEXT).into(),
+                        text(palette_row.label.clone())
+                            .size(13)
+                            .color(pal().text)
+                            .into(),
                     )
                 }
                 PaletteEntry::Action(_) => (
                     LOCAL_ACCENT,
-                    text(palette_row.label.clone()).size(13).color(TEXT).into(),
+                    text(palette_row.label.clone())
+                        .size(13)
+                        .color(pal().text)
+                        .into(),
                 ),
             };
             list = list.push(
@@ -6365,13 +6429,14 @@ impl App {
             );
         }
         if matches.is_empty() {
-            list = list.push(container(text("No matches").size(12).color(DIM)).padding([6, 12]));
+            list =
+                list.push(container(text("No matches").size(12).color(pal().dim)).padding([6, 12]));
         }
 
         let hint = |key: &'static str, what: &'static str| {
             row![
-                text(key).size(11).color(TEXT_SECONDARY),
-                text(what).size(11).color(DIM),
+                text(key).size(11).color(pal().text_secondary),
+                text(what).size(11).color(pal().dim),
             ]
             .spacing(5)
         };
@@ -6441,7 +6506,7 @@ impl App {
         };
         let btn = |icon: &'static [u8], active: bool, tip: String, event: Event| {
             iced::widget::tooltip(
-                button(symbolic(icon, 16.0, TEXT))
+                button(symbolic(icon, 16.0, pal().text))
                     .padding(7)
                     .style(theme::toolbar_icon(active))
                     .on_press(event),
@@ -6659,7 +6724,7 @@ impl App {
         let hovered = pointed && !dragging;
         let slot = self.drop_slot(row_id);
         let lifted = self.drag_source() == Some(row_id);
-        let title_ink = if running { accent } else { TEXT };
+        let title_ink = if running { accent } else { pal().text };
         let title_ink = if lifted {
             theme::alpha(title_ink, theme::LIFTED_ALPHA)
         } else {
@@ -6699,7 +6764,7 @@ impl App {
                 ),
                 row_action(
                     ICON_RESTART,
-                    theme::alpha(TEXT_SECONDARY, p),
+                    theme::alpha(pal().text_secondary, p),
                     String::from("Restart all running processes"),
                     Event::RestartAll(project.id),
                 ),
@@ -6752,7 +6817,8 @@ impl App {
             match &project.phase {
                 Phase::Loading => {
                     block = block.push(
-                        container(text("Connecting\u{2026}").size(11).color(DIM)).padding([3, 10]),
+                        container(text("Connecting\u{2026}").size(11).color(pal().dim))
+                            .padding([3, 10]),
                     );
                 }
                 Phase::Failed(_, retryable) => {
@@ -6852,7 +6918,11 @@ impl App {
         let label_text = || {
             let t = text(name).size(12.5);
             if lifted {
-                t.color(fade(if selected { TEXT } else { TEXT_SECONDARY }))
+                t.color(fade(if selected {
+                    pal().text
+                } else {
+                    pal().text_secondary
+                }))
             } else {
                 t
             }
@@ -6922,14 +6992,14 @@ impl App {
                         processes::MAX_RESTART_ATTEMPTS
                     ))
                     .size(9)
-                    .color(RESTARTING),
+                    .color(pal().restarting),
                 );
             }
             Status::Reconnecting(attempt) => {
                 content = content.push(
                     text(format!("Reconnect {attempt}"))
                         .size(9)
-                        .color(RESTARTING),
+                        .color(pal().restarting),
                 );
             }
             _ => {}
@@ -6957,7 +7027,7 @@ impl App {
                     cluster = cluster
                         .push(row_action(
                             ICON_RESTART,
-                            theme::alpha(TEXT_SECONDARY, p),
+                            theme::alpha(pal().text_secondary, p),
                             String::from("Restart"),
                             Event::Restart {
                                 project: project.id,
@@ -7091,7 +7161,7 @@ impl App {
             None => (
                 row![
                     widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0),
-                    clipped_label(text(&project.name).size(13).font(bold()).color(TEXT)),
+                    clipped_label(text(&project.name).size(13).font(bold()).color(pal().text)),
                 ]
                 .spacing(9)
                 .align_y(iced::Alignment::Center)
@@ -7110,7 +7180,7 @@ impl App {
                 (
                     row![
                         status_dot(dot_color(&entry.status, accent), None),
-                        clipped_label(text(name).size(12.5).color(TEXT)),
+                        clipped_label(text(name).size(12.5).color(pal().text)),
                     ]
                     .spacing(8)
                     .height(17)
@@ -7223,7 +7293,7 @@ impl App {
         let Some(project) = self.active_project() else {
             return container(
                 column![
-                    text("No projects yet").size(14).color(DIM),
+                    text("No projects yet").size(14).color(pal().dim),
                     button(text("+ Add Project").size(13))
                         .padding([7, 16])
                         .style(theme::primary(LOCAL_ACCENT))
@@ -7245,7 +7315,7 @@ impl App {
                 return container(
                     text(format!("Connecting to {}\u{2026}", project.key()))
                         .size(14)
-                        .color(DIM),
+                        .color(pal().dim),
                 )
                 .center_x(Length::Fill)
                 .center_y(Length::Fill)
@@ -7276,7 +7346,7 @@ impl App {
         let Some(entry) = project.entries.get(project.selected) else {
             return container(
                 column![
-                    text("No processes").size(14).color(DIM),
+                    text("No processes").size(14).color(pal().dim),
                     row![
                         button(text("+ Command").size(12))
                             .padding([6, 14])
@@ -7311,20 +7381,27 @@ impl App {
             // The widget marks its own focus state (dim, a line, a ring —
             // Settings → Appearance) — the cursor can't say so under an
             // agent TUI, which hides it. See `theme::focus_mark`.
-            Some(term) => container(
-                TerminalView::show_marked(
-                    term,
-                    theme::focus_mark(
-                        &self.settings.appearance.focus_indicator,
-                        accent,
-                        &self.settings.appearance.terminal_theme,
-                    ),
+            // The press sensor is `dnd::DragArea`, which peeks at the press
+            // BEFORE delegating: the terminal captures every press, and a
+            // stock mouse_area returns before its own handlers on a
+            // captured event — it would never see the click.
+            Some(term) => dnd::DragArea::new(
+                container(
+                    TerminalView::show_marked(
+                        term,
+                        theme::focus_mark(
+                            &self.settings.appearance.focus_indicator,
+                            accent,
+                            &self.settings.appearance.terminal_theme,
+                        ),
+                    )
+                    .map(Event::Terminal),
                 )
-                .map(Event::Terminal),
+                .style(theme::terminal_pane(
+                    &self.settings.appearance.terminal_theme,
+                )),
             )
-            .style(theme::terminal_pane(
-                &self.settings.appearance.terminal_theme,
-            ))
+            .on_press(|_| Event::TerminalPressed)
             .into(),
             // Only before a process's FIRST run: from then on its terminal
             // stays for good, showing what the last run printed — and its
@@ -7336,7 +7413,7 @@ impl App {
                     }
                     _ => String::from("Not running"),
                 };
-                container(text(label).size(13).color(DIM))
+                container(text(label).size(13).color(pal().dim))
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
                     .style(theme::pane)
@@ -7445,8 +7522,12 @@ impl App {
         // GTK's EntryRows carry their titles ("Name", "Command") inside the
         // field; iced's text_input has only a placeholder, which vanishes
         // the moment the field holds a value — on the edit form, always.
-        let caption =
-            |label: &'static str| text(label).size(11.5).font(bold()).color(TEXT_SECONDARY);
+        let caption = |label: &'static str| {
+            text(label)
+                .size(11.5)
+                .font(bold())
+                .color(pal().text_secondary)
+        };
         let labeled = |label: &'static str, input: Element<'a, Event>| -> Element<'a, Event> {
             column![caption(label), input].spacing(6).into()
         };
@@ -7477,9 +7558,9 @@ impl App {
                 list = list.push(
                     button(
                         row![
-                            text(preset.label).size(12.5).color(TEXT),
+                            text(preset.label).size(12.5).color(pal().text),
                             iced::widget::space::horizontal(),
-                            text(preset.command).size(11).color(DIM),
+                            text(preset.command).size(11).color(pal().dim),
                         ]
                         .align_y(iced::Alignment::Center),
                     )
@@ -7612,7 +7693,7 @@ impl App {
         // ── Left: where and how much is running ─────────────────────────
         if let Some(hint) = project.and_then(|p| remote_hint(&p.location)) {
             bar = bar.push(tip(
-                symbolic(ICON_REMOTE, 13.0, DIM).into(),
+                symbolic(ICON_REMOTE, 13.0, pal().dim).into(),
                 hint,
                 iced::widget::tooltip::Position::Top,
             ));
@@ -7623,7 +7704,7 @@ impl App {
             } else {
                 format!("{} {}/{}", p.name, p.running(), p.entries.len())
             };
-            bar = bar.push(text(label).size(11).color(TEXT_SECONDARY));
+            bar = bar.push(text(label).size(11).color(pal().text_secondary));
         }
 
         // Across every open project — the counter that says something is
@@ -7632,9 +7713,11 @@ impl App {
         if total > 0 {
             let running: usize = self.projects.iter().map(|p| p.running()).sum();
             if project.is_some() {
-                bar = bar.push(text("\u{00b7}").size(11).color(DIM));
+                bar = bar.push(text("\u{00b7}").size(11).color(pal().dim));
             }
-            let counter = text(format!("Total {running}/{total}")).size(11).color(DIM);
+            let counter = text(format!("Total {running}/{total}"))
+                .size(11)
+                .color(pal().dim);
             bar = match self.running_summary() {
                 Some(summary) => bar.push(tip(
                     counter.into(),
@@ -7661,9 +7744,9 @@ impl App {
         };
         if let Some((label, hint)) = chip {
             bar = bar.push(tip(
-                button(text(label).size(11).font(bold()).color(UPDATE_CHIP))
+                button(text(label).size(11).font(bold()).color(pal().update_chip))
                     .padding([2, 6])
-                    .style(theme::ghost(UPDATE_CHIP))
+                    .style(theme::ghost(pal().update_chip))
                     .on_press(Event::OpenUpdateCard)
                     .into(),
                 hint.to_string(),
@@ -7694,7 +7777,7 @@ impl App {
         });
         if let Some(url) = url {
             bar = bar.push(tip(
-                button(symbolic(ICON_EXTERNAL, 13.0, TEXT_SECONDARY))
+                button(symbolic(ICON_EXTERNAL, 13.0, pal().text_secondary))
                     .padding([3, 7])
                     .style(theme::toolbar_icon(false))
                     .on_press(Event::OpenBadge)
@@ -7705,7 +7788,7 @@ impl App {
         }
 
         bar = bar.push(tip(
-            button(symbolic(ICON_FOCUS, 13.0, TEXT_SECONDARY))
+            button(symbolic(ICON_FOCUS, 13.0, pal().text_secondary))
                 .padding([3, 7])
                 .style(theme::toolbar_icon(!self.sidebar_visible))
                 .on_press(Event::ToggleSidebar)
@@ -7724,7 +7807,7 @@ impl App {
         });
         if let Some((id, index, running)) = selected {
             bar = bar.push(tip(
-                button(symbolic(ICON_CLEAR, 13.0, TEXT_SECONDARY))
+                button(symbolic(ICON_CLEAR, 13.0, pal().text_secondary))
                     .padding([3, 7])
                     .style(theme::toolbar_icon(false))
                     .on_press(Event::ClearTerminal)
@@ -7744,7 +7827,7 @@ impl App {
                 ));
             }
             bar = bar.push(tip(
-                button(symbolic(ICON_RESTART, 13.0, TEXT_SECONDARY))
+                button(symbolic(ICON_RESTART, 13.0, pal().text_secondary))
                     .padding([3, 7])
                     .style(theme::toolbar_icon(false))
                     .on_press(Event::Restart { project: id, index })
@@ -7801,20 +7884,20 @@ impl App {
         // spinner holds through the settle window too (`GitSyncSettled`),
         // so it hands over to fresh numbers, never a stale flash.
         if syncing {
-            content = content.push(spinner(TEXT_SECONDARY, self.sync_spin.phase));
+            content = content.push(spinner(pal().text_secondary, self.sync_spin.phase));
         } else {
             if git.behind > 0 {
                 content = content.push(
                     text(format!("\u{2193}{}", git.behind))
                         .size(10.5)
-                        .color(GIT_BEHIND),
+                        .color(pal().git_behind),
                 );
             }
             if git.ahead > 0 {
                 content = content.push(
                     text(format!("\u{2191}{}", git.ahead))
                         .size(10.5)
-                        .color(GIT_ADDED),
+                        .color(pal().git_added),
                 );
             }
         }
@@ -7829,7 +7912,7 @@ impl App {
 
         let mut chip = button(content)
             .padding([3, 9])
-            .style(theme::pill_button(TEXT_SECONDARY));
+            .style(theme::pill_button(pal().text_secondary));
         if !syncing {
             chip = chip.on_press(Event::GitSync);
         }
@@ -7872,7 +7955,7 @@ impl App {
         Some(tip(
             button(content)
                 .padding([3, 9])
-                .style(theme::pill_button(TEXT_SECONDARY))
+                .style(theme::pill_button(pal().text_secondary))
                 .on_press(Event::OpenGitChanges)
                 .into(),
             hint,
@@ -7974,6 +8057,7 @@ impl App {
             }
             Msg::ColorScheme(label) => {
                 self.settings.appearance.theme = label.to_lowercase();
+                self.apply_scheme();
             }
             Msg::AccentApp(label) => {
                 self.settings.appearance.accent_color = accent_name_for_label(label);
@@ -8031,6 +8115,7 @@ impl App {
             }
             Msg::BoldWeight(v) => {
                 self.settings.appearance.bold_font_weight = v;
+                self.broadcast_font();
             }
             Msg::LineHeight(v) => {
                 self.settings.appearance.line_height = v;
@@ -8038,6 +8123,7 @@ impl App {
             }
             Msg::LetterSpacing(v) => {
                 self.settings.appearance.letter_spacing = v;
+                self.broadcast_font();
             }
             Msg::Scrollback(v) => {
                 self.settings.appearance.scrollback_lines = v;
@@ -8195,6 +8281,15 @@ impl App {
         }
         self.settings.save();
         Task::none()
+    }
+
+    /// Make the palette match Settings → Color Scheme (System follows the
+    /// portal). Live: every view helper reads `theme::pal()` per frame.
+    fn apply_scheme(&mut self) {
+        theme::set_scheme(effective_light(
+            &self.settings.appearance.theme,
+            self.system_light,
+        ));
     }
 
     fn apply_accents(&mut self) {
@@ -8589,6 +8684,33 @@ impl App {
     }
 }
 
+/// Which palette Settings → Color Scheme asks for: "light", "dark", or
+/// "system" resolved through the portal's answer (no answer = dark, the
+/// shell's native scheme).
+fn effective_light(setting: &str, system_light: Option<bool>) -> bool {
+    match setting {
+        "light" => true,
+        "system" => system_light.unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// A CSS-style numeric weight (the settings file's unit, GTK's Pango
+/// scale) to the nearest of iced's nine named weights.
+fn font_weight(weight: u32) -> iced::font::Weight {
+    match weight {
+        0..=149 => iced::font::Weight::Thin,
+        150..=249 => iced::font::Weight::ExtraLight,
+        250..=349 => iced::font::Weight::Light,
+        350..=449 => iced::font::Weight::Normal,
+        450..=549 => iced::font::Weight::Medium,
+        550..=649 => iced::font::Weight::Semibold,
+        650..=749 => iced::font::Weight::Bold,
+        750..=849 => iced::font::Weight::ExtraBold,
+        _ => iced::font::Weight::Black,
+    }
+}
+
 /// RGBA8 (what arboard hands over) → PNG bytes.
 fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
@@ -8797,9 +8919,9 @@ fn hline() -> Element<'static, Event> {
 fn dot_color(status: &Status, accent: iced::Color) -> iced::Color {
     match status {
         Status::Running => accent,
-        Status::Stopped => STOPPED,
+        Status::Stopped => pal().stopped,
         Status::Crashed(_) => CRASHED,
-        Status::Restarting(_) | Status::Reconnecting(_) => RESTARTING,
+        Status::Restarting(_) | Status::Reconnecting(_) => pal().restarting,
     }
 }
 
@@ -8894,13 +9016,13 @@ fn changes_chip_parts(
     if stat.added > 0 {
         parts.push((
             format!("+{}", git_view::compact_count(stat.added)),
-            GIT_ADDED,
+            pal().git_added,
         ));
     }
     if stat.removed > 0 {
         parts.push((
             format!("\u{2212}{}", git_view::compact_count(stat.removed)),
-            GIT_REMOVED,
+            pal().git_removed,
         ));
     }
     if parts.is_empty() {
@@ -8909,7 +9031,7 @@ fn changes_chip_parts(
             return None;
         }
         let noun = if files == 1 { "file" } else { "files" };
-        parts.push((format!("{files} {noun}"), TEXT_SECONDARY));
+        parts.push((format!("{files} {noun}"), pal().text_secondary));
     }
     Some(parts)
 }

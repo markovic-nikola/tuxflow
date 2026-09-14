@@ -16,10 +16,7 @@ use iced::{Element, Length};
 use tuxflow_core::remote::ProjectLocation;
 use tuxflow_core::remote::git::{ChangedFile, DiffResult, FileStatus};
 
-use crate::theme::{
-    self, DIM, GIT_ADDED, GIT_BEHIND, GIT_MODIFIED, GIT_REMOVED, GIT_UNTRACKED, TEXT,
-    TEXT_SECONDARY, bold,
-};
+use crate::theme::{self, bold, pal};
 
 /// A write action in flight. The buttons go quiet while one runs, and the
 /// poll leaves the counter it owns alone — a stale ↑2 painted over a push
@@ -170,10 +167,10 @@ pub enum Msg {
 
 fn status_color(status: FileStatus) -> iced::Color {
     match status {
-        FileStatus::Modified | FileStatus::Renamed => GIT_MODIFIED,
-        FileStatus::Added => GIT_ADDED,
-        FileStatus::Deleted => GIT_REMOVED,
-        FileStatus::Untracked => GIT_UNTRACKED,
+        FileStatus::Modified | FileStatus::Renamed => pal().git_modified,
+        FileStatus::Added => pal().git_added,
+        FileStatus::Deleted => pal().git_removed,
+        FileStatus::Untracked => pal().git_untracked,
     }
 }
 
@@ -181,7 +178,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
     let header = row![
         button(text("Close").size(12))
             .padding([5, 14])
-            .style(theme::pill_button(TEXT_SECONDARY))
+            .style(theme::pill_button(pal().text_secondary))
             .on_press(Msg::Close),
         text(match &state.branch {
             Some(b) => format!("\u{2387} {b}"),
@@ -192,7 +189,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
         iced::widget::space::horizontal(),
         button(text("Refresh").size(12))
             .padding([5, 14])
-            .style(theme::pill_button(TEXT_SECONDARY))
+            .style(theme::pill_button(pal().text_secondary))
             .on_press(Msg::Refresh),
     ]
     .spacing(10)
@@ -239,7 +236,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
 }
 
 fn centered(label: &str) -> Element<'_, Msg> {
-    container(text(label).size(15).color(DIM))
+    container(text(label).size(15).color(pal().dim))
         .center_x(Length::Fill)
         .center_y(Length::Fill)
         .into()
@@ -249,14 +246,14 @@ fn error_banner<'a>(heading: &'a str, detail: &'a str) -> Element<'a, Msg> {
     container(
         row![
             column![
-                text(heading).size(12).font(bold()).color(GIT_REMOVED),
-                text(detail).size(11).color(TEXT_SECONDARY),
+                text(heading).size(12).font(bold()).color(pal().git_removed),
+                text(detail).size(11).color(pal().text_secondary),
             ]
             .spacing(2)
             .width(Length::Fill),
             button(text("\u{2715}").size(12))
                 .padding([2, 6])
-                .style(theme::ghost(TEXT))
+                .style(theme::ghost(pal().text))
                 .on_press(Msg::DismissError),
         ]
         .align_y(iced::Alignment::Center),
@@ -281,7 +278,7 @@ fn file_list(state: &'_ State) -> Element<'_, Msg> {
                         .width(16),
                     // Long paths are elided from the START: the tail
                     // (the filename) is what tells two of them apart.
-                    text(elide_start(&file.path, 34)).size(12).color(TEXT),
+                    text(elide_start(&file.path, 34)).size(12).color(pal().text),
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
@@ -416,9 +413,9 @@ fn diff_line<'a>(
             .align_x(iced::widget::text::Alignment::Center)
             .width(MARKER_W)
             .color(match kind {
-                LineKind::Add => theme::alpha(GIT_ADDED, 0.9),
-                LineKind::Del => theme::alpha(GIT_REMOVED, 0.75),
-                LineKind::Ctx => DIM,
+                LineKind::Add => theme::alpha(pal().git_added, 0.9),
+                LineKind::Del => theme::alpha(pal().git_removed, 0.75),
+                LineKind::Ctx => pal().dim,
             }),
         iced::widget::rich_text(line_spans(line, kind, marks, words))
             .size(DIFF_SIZE)
@@ -431,8 +428,8 @@ fn diff_line<'a>(
 
     let cell = container(body).width(Length::Fill).padding([0, 8]);
     match kind {
-        LineKind::Add => cell.style(theme::diff_band(GIT_ADDED)),
-        LineKind::Del => cell.style(theme::diff_band(GIT_REMOVED)),
+        LineKind::Add => cell.style(theme::diff_band(pal().git_added)),
+        LineKind::Del => cell.style(theme::diff_band(pal().git_removed)),
         LineKind::Ctx => cell,
     }
     .into()
@@ -456,8 +453,8 @@ fn line_spans<'a>(
 ) -> Vec<iced::widget::text::Span<'a, ()>> {
     let dim = kind == LineKind::Del;
     let emphasis = match kind {
-        LineKind::Add => Some(theme::alpha(GIT_ADDED, 0.34)),
-        LineKind::Del => Some(theme::alpha(GIT_REMOVED, 0.30)),
+        LineKind::Add => Some(theme::alpha(pal().git_added, 0.34)),
+        LineKind::Del => Some(theme::alpha(pal().git_removed, 0.30)),
         LineKind::Ctx => None,
     };
 
@@ -482,7 +479,7 @@ fn line_spans<'a>(
                 line,
                 cursor,
                 offset,
-                tint(TEXT_SECONDARY, dim),
+                tint(pal().text_secondary, dim),
                 words,
                 emphasis,
             );
@@ -499,7 +496,7 @@ fn line_spans<'a>(
         cursor = end;
     }
     if cursor < line.len() {
-        let plain = tint(TEXT_SECONDARY, dim);
+        let plain = tint(pal().text_secondary, dim);
         push_run(&mut spans, line, cursor, line.len(), plain, words, emphasis);
     }
 
@@ -584,7 +581,7 @@ fn commit_bar(state: &'_ State) -> Element<'_, Msg> {
             None => String::new(),
         })
         .size(11)
-        .color(DIM),
+        .color(pal().dim),
         iced::widget::space::horizontal(),
     ]
     .spacing(10)
@@ -601,7 +598,7 @@ fn commit_bar(state: &'_ State) -> Element<'_, Msg> {
             .size(12),
         )
         .padding([6, 16])
-        .style(theme::pill_button(GIT_BEHIND));
+        .style(theme::pill_button(pal().git_behind));
         if idle {
             pull = pull.on_press(Msg::Pull);
         }
@@ -617,7 +614,7 @@ fn commit_bar(state: &'_ State) -> Element<'_, Msg> {
         .size(12),
     )
     .padding([6, 16])
-    .style(theme::pill_button(GIT_ADDED));
+    .style(theme::pill_button(pal().git_added));
     if idle && state.ahead > 0 {
         push = push.on_press(Msg::Push);
     }

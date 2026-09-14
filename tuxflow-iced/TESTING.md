@@ -286,3 +286,19 @@ every process started from TuxFlow carries `TUXFLOW_MCP_SOCKET`.
    "No TuxFlow MCP socket".
 5. Toggle the setting off: the sockets disappear at once; on: they come
    back (remote forwards too), no restart needed.
+
+## Color scheme, auto-hide, bold weight, letter spacing, default terminal
+
+1. Settings → Appearance → Color Scheme: Light repaints the whole shell at
+   once (sidebar, cards, status bar, settings) while the terminal keeps its
+   own scheme; System follows the desktop — flip the desktop's dark mode
+   and the shell should follow without a restart.
+2. Settings → Sidebar → Auto-Hide Sidebar on: click into a terminal and
+   the sidebar collapses to the rail; Ctrl+\ or the rail's toggle brings
+   it back. Clicks while the palette or search bar is open do not hide it.
+3. Bold Font Weight and Letter Spacing apply to every open terminal as
+   you step them (run `ls --color` or print a bold line to see the weight).
+4. Edit Project → Open Terminal Here opens Settings → Tools → Default
+   Terminal in the project directory; for a remote project the terminal
+   opens an ssh shell on the host in that directory.
+

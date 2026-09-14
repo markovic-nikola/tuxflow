@@ -19,27 +19,131 @@ use iced::widget::{button, container, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Gradient, Radians, Shadow, Theme, Vector};
 use tuxflow_core::config::palette;
 
-// ── Surfaces ────────────────────────────────────────────────────────────
-/// Sidebar ground the cards float on.
-pub const BG_GROUND: Color = Color::from_rgb(0.071, 0.071, 0.090);
-/// Project card.
-pub const BG_CARD: Color = Color::from_rgb(0.090, 0.090, 0.114);
-/// Window chrome: toolbar, status bar, composer bar.
-pub const BG_CHROME: Color = Color::from_rgb(0.090, 0.090, 0.110);
-/// Main-pane ground: full-pane views (settings, git, add forms) and the
-/// placeholder states. A design surface of the dark shell — NOT the
-/// terminal's background, which follows the user's terminal scheme via
-/// `terminal_pane` (GTK's dialogs sit on the window background, never the
-/// VTE palette).
-pub const BG_PANE: Color = Color::from_rgb(0.118, 0.118, 0.180);
-/// Input field fill.
-pub const BG_FIELD: Color = Color::from_rgb(0.114, 0.114, 0.141);
-pub const HAIRLINE: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.05);
+// ── Scheme palette ──────────────────────────────────────────────────────
+/// Every color that changes between the dark and light shells: surfaces,
+/// text, and the semantic hues whose dark-tuned values fall below contrast
+/// on white (core's `palette.rs` carries the same rule for the ambers).
+/// `light` says which one is current, for the few places that need to
+/// know rather than a color (the iced base theme, the shipped shadows).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub light: bool,
+    /// Sidebar ground the cards float on.
+    pub ground: Color,
+    /// Project card.
+    pub card: Color,
+    /// Window chrome: toolbar, status bar, composer bar.
+    pub chrome: Color,
+    /// Main-pane ground: full-pane views (settings, git, add forms) and
+    /// the placeholder states. A design surface of the shell — NOT the
+    /// terminal's background, which follows the user's terminal scheme
+    /// via `terminal_pane` (GTK's dialogs sit on the window background,
+    /// never the VTE palette).
+    pub pane: Color,
+    /// Input field fill.
+    pub field: Color,
+    pub hairline: Color,
+    pub text: Color,
+    pub text_secondary: Color,
+    pub dim: Color,
+    /// Stopped dot on the card surface.
+    pub stopped: Color,
+    /// The ink every translucent wash is mixed from — hover, pills,
+    /// keycaps, thin borders: white over the dark shell, black over the
+    /// light one, where a white wash on a white card is simply invisible.
+    pub wash: Color,
+    /// #cca700 / its dark twin — the restart-pending amber.
+    pub restarting: Color,
+    /// The status bar's update chip — style.css's `.update-label`.
+    /// Semantic like the git colours: not the accent, which the user sets.
+    pub update_chip: Color,
+    /// Insertions, and commits waiting to be pushed. Same hue as the
+    /// default local accent by coincidence of the palette, not by
+    /// reference: the accent is user-settable and this must not move
+    /// with it.
+    pub git_added: Color,
+    /// Deletions.
+    pub git_removed: Color,
+    /// Commits waiting to be pulled. Amber reads as "incoming, not yours
+    /// yet" against the green of what you already have.
+    pub git_behind: Color,
+    /// A modified file's badge in the changes list.
+    pub git_modified: Color,
+    /// An untracked file's badge: present, but not git's business yet.
+    pub git_untracked: Color,
+    /// Multiplier on every drop shadow's alpha. The dark shell's shadows
+    /// are tuned against near-black surfaces, where a 0.25 black barely
+    /// registers; the same value on a white card reads as a heavy grey
+    /// halo (Nikola, on the light card), so the light palette scales
+    /// them down rather than carrying a second set of shadow constants.
+    pub shadow_scale: f32,
+}
 
-// ── Text ────────────────────────────────────────────────────────────────
-pub const TEXT: Color = Color::from_rgb(0.925, 0.925, 0.945);
-pub const TEXT_SECONDARY: Color = Color::from_rgb(0.651, 0.651, 0.690);
-pub const DIM: Color = Color::from_rgb(0.561, 0.561, 0.604);
+/// The shipped dark shell — direction C's values, matching style.css
+/// where the two shells share a hue.
+pub const DARK: Palette = Palette {
+    light: false,
+    ground: Color::from_rgb(0.071, 0.071, 0.090),
+    card: Color::from_rgb(0.090, 0.090, 0.114),
+    chrome: Color::from_rgb(0.090, 0.090, 0.110),
+    pane: Color::from_rgb(0.118, 0.118, 0.180),
+    field: Color::from_rgb(0.114, 0.114, 0.141),
+    hairline: Color::from_rgba(1.0, 1.0, 1.0, 0.05),
+    text: Color::from_rgb(0.925, 0.925, 0.945),
+    text_secondary: Color::from_rgb(0.651, 0.651, 0.690),
+    dim: Color::from_rgb(0.561, 0.561, 0.604),
+    stopped: Color::from_rgb(0.290, 0.290, 0.322),
+    wash: Color::WHITE,
+    restarting: Color::from_rgb(0.8, 0.655, 0.0),
+    update_chip: Color::from_rgb(0.800, 0.655, 0.0),
+    git_added: Color::from_rgb(0.451, 0.788, 0.569),
+    git_removed: Color::from_rgb(0.945, 0.298, 0.298),
+    git_behind: Color::from_rgb(0.824, 0.600, 0.133),
+    git_modified: Color::from_rgb(0.863, 0.863, 0.667),
+    git_untracked: Color::from_rgb(0.424, 0.424, 0.424),
+    shadow_scale: 1.0,
+};
+
+/// The light shell: libadwaita's light surfaces (window #fafafa, cards
+/// white, header #ebebeb, text #2e3436), the same structure as DARK. The
+/// semantic hues are darkened twins — every dark value measured under
+/// 3:1 on white (#73c991 green 1.9:1, #dcdcaa 1.4:1, the ambers ~2.2:1).
+pub const LIGHT: Palette = Palette {
+    light: true,
+    ground: Color::from_rgb(0.941, 0.941, 0.945),
+    card: Color::WHITE,
+    chrome: Color::from_rgb(0.922, 0.922, 0.922),
+    pane: Color::from_rgb(0.980, 0.980, 0.980),
+    field: Color::from_rgb(0.965, 0.965, 0.970),
+    hairline: Color::from_rgba(0.0, 0.0, 0.0, 0.10),
+    text: Color::from_rgb(0.180, 0.204, 0.212),
+    text_secondary: Color::from_rgb(0.369, 0.361, 0.392),
+    dim: Color::from_rgb(0.545, 0.541, 0.561),
+    stopped: Color::from_rgb(0.663, 0.659, 0.678),
+    wash: Color::BLACK,
+    restarting: Color::from_rgb(0.541, 0.435, 0.0),
+    update_chip: Color::from_rgb(0.541, 0.435, 0.0),
+    git_added: Color::from_rgb(0.184, 0.541, 0.333),
+    git_removed: Color::from_rgb(0.776, 0.157, 0.157),
+    git_behind: Color::from_rgb(0.604, 0.404, 0.0),
+    git_modified: Color::from_rgb(0.478, 0.478, 0.102),
+    git_untracked: Color::from_rgb(0.424, 0.424, 0.424),
+    shadow_scale: 0.3,
+};
+
+/// A drop shadow's colour: black at `dark_alpha`, scaled by the scheme.
+pub fn shadow(dark_alpha: f32) -> Color {
+    alpha(Color::BLACK, dark_alpha * pal().shadow_scale)
+}
+
+/// The current palette. A process-wide slot like ACCENTS below: `pal()`
+/// is read from every view helper, and threading a palette through every
+/// call site buys nothing. Written at boot and on a scheme change.
+static PALETTE: RwLock<Palette> = RwLock::new(DARK);
+
+pub fn pal() -> Palette {
+    *PALETTE.read().expect("palette slot")
+}
 
 // ── Accents: where a project lives ──────────────────────────────────────
 /// #73c991
@@ -48,30 +152,9 @@ pub const LOCAL_ACCENT: Color = Color::from_rgb(0.451, 0.788, 0.569);
 pub const REMOTE_ACCENT: Color = Color::from_rgb(1.0, 0.808, 0.361);
 
 // ── Status (semantic, fixed) ────────────────────────────────────────────
-/// #f14c4c
+/// #f14c4c — reads in both schemes as it is (core's STATUS_COLORS
+/// carries no twin for it either).
 pub const CRASHED: Color = Color::from_rgb(0.945, 0.298, 0.298);
-/// #cca700
-pub const RESTARTING: Color = Color::from_rgb(0.8, 0.655, 0.0);
-/// Stopped dot on the card surface.
-pub const STOPPED: Color = Color::from_rgb(0.290, 0.290, 0.322);
-
-// ── Git (semantic, fixed — matches style.css so the shells agree) ───────
-/// #73c991 — insertions, and commits waiting to be pushed. Same hue as
-/// LOCAL_ACCENT by coincidence of the palette, not by reference: the
-/// accent is user-settable and this must not move with it.
-pub const GIT_ADDED: Color = Color::from_rgb(0.451, 0.788, 0.569);
-/// #f14c4c — deletions.
-pub const GIT_REMOVED: Color = Color::from_rgb(0.945, 0.298, 0.298);
-/// #d29922 — commits waiting to be pulled. Amber reads as "incoming,
-/// not yours yet" against the green of what you already have.
-pub const GIT_BEHIND: Color = Color::from_rgb(0.824, 0.600, 0.133);
-/// The status bar's update chip — style.css's `.update-label` #cca700.
-/// Semantic like the git colours: not the accent, which the user sets.
-pub const UPDATE_CHIP: Color = Color::from_rgb(0.800, 0.655, 0.0);
-/// #dcdcaa — a modified file's badge in the changes list.
-pub const GIT_MODIFIED: Color = Color::from_rgb(0.863, 0.863, 0.667);
-/// #6c6c6c — an untracked file's badge: present, but not git's business yet.
-pub const GIT_UNTRACKED: Color = Color::from_rgb(0.424, 0.424, 0.424);
 
 pub fn alpha(color: Color, a: f32) -> Color {
     Color { a, ..color }
@@ -83,12 +166,29 @@ pub fn alpha(color: Color, a: f32) -> Color {
 /// Written once at boot and on a settings change, read on the view thread.
 static ACCENTS: RwLock<(Color, Color)> = RwLock::new((LOCAL_ACCENT, REMOTE_ACCENT));
 
-/// Resolve the two sidebar accents from their settings names (dark
-/// variants — this shell's chrome is dark) and make them current.
+/// The accent NAMES, kept so a scheme flip can re-resolve them: the same
+/// name is a different hex on each scheme (core's `accent` vs
+/// `accent_light`, the sidebar reads these as text and thin borders).
+static ACCENT_NAMES: RwLock<(String, String)> = RwLock::new((String::new(), String::new()));
+
+/// Resolve the two sidebar accents from their settings names, in the
+/// current scheme's variant, and make them current.
 pub fn set_accents(local_name: &str, remote_name: &str) {
+    *ACCENT_NAMES.write().expect("accent names") =
+        (local_name.to_string(), remote_name.to_string());
     let local = palette::accent_by_name(local_name, palette::FALLBACK_LOCAL);
     let remote = palette::accent_by_name(remote_name, palette::FALLBACK_REMOTE);
-    *ACCENTS.write().expect("accent slot") = (hex(local.accent), hex(remote.accent));
+    let light = pal().light;
+    let pick = |c: &palette::AccentColor| hex(if light { c.accent_light } else { c.accent });
+    *ACCENTS.write().expect("accent slot") = (pick(local), pick(remote));
+}
+
+/// Switch the shell between its dark and light palettes. Re-resolves the
+/// accents, since their light twins are part of the scheme.
+pub fn set_scheme(light: bool) {
+    *PALETTE.write().expect("palette slot") = if light { LIGHT } else { DARK };
+    let (local, remote) = ACCENT_NAMES.read().expect("accent names").clone();
+    set_accents(&local, &remote);
 }
 
 pub fn accent_for(remote: bool) -> Color {
@@ -127,9 +227,9 @@ pub fn bold() -> iced::Font {
 /// (a settings page stacks several; shadows would stripe it).
 pub fn settings_card(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_CARD)),
+        background: Some(Background::Color(pal().card)),
         border: Border {
-            color: alpha(Color::WHITE, 0.06),
+            color: alpha(pal().wash, 0.06),
             width: 1.0,
             radius: 10.0.into(),
         },
@@ -168,28 +268,28 @@ pub fn terminal_palette(name: &str) -> iced_term::ColorPalette {
 
 pub fn ground(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_GROUND)),
+        background: Some(Background::Color(pal().ground)),
         ..Default::default()
     }
 }
 
 pub fn chrome(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_CHROME)),
+        background: Some(Background::Color(pal().chrome)),
         ..Default::default()
     }
 }
 
 pub fn hairline(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(HAIRLINE)),
+        background: Some(Background::Color(pal().hairline)),
         ..Default::default()
     }
 }
 
 pub fn pane(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_PANE)),
+        background: Some(Background::Color(pal().pane)),
         ..Default::default()
     }
 }
@@ -300,7 +400,11 @@ pub fn terminal_pane(scheme: &str) -> impl Fn(&Theme) -> container::Style {
 /// half (see `DEL_ALPHA` in git_view), and red reads heavier than green
 /// at equal alpha.
 pub fn diff_band(color: Color) -> impl Fn(&Theme) -> container::Style {
-    let a = if color == GIT_REMOVED { 0.11 } else { 0.13 };
+    let a = if color == pal().git_removed {
+        0.11
+    } else {
+        0.13
+    };
     move |_| container::Style {
         background: Some(Background::Color(alpha(color, a))),
         ..Default::default()
@@ -369,7 +473,7 @@ pub fn project_card(
     move |_| {
         let background = match card_gradient(accent, active, sweep) {
             Some(gradient) => Background::Gradient(gradient),
-            None => Background::Color(BG_CARD),
+            None => Background::Color(pal().card),
         };
         container::Style {
             background: Some(background),
@@ -377,13 +481,13 @@ pub fn project_card(
                 color: if running {
                     alpha(accent, ring_alpha(sweep))
                 } else {
-                    alpha(Color::WHITE, 0.05)
+                    alpha(pal().wash, 0.05)
                 },
                 width: 1.0,
                 radius: 10.0.into(),
             },
             shadow: Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, 0.25),
+                color: shadow(0.25),
                 offset: Vector::new(0.0, 2.0),
                 blur_radius: 8.0,
             },
@@ -474,7 +578,7 @@ fn card_gradient(accent: Color, active: bool, sweep: Option<f32>) -> Option<Grad
     let mut gradient = Linear::new(CARD_DIAGONAL);
     for t in offsets {
         let amount = wash_at(t) + center.map_or(0.0, |c| band_at(t, c));
-        gradient = gradient.add_stop(t, mix(BG_CARD, accent, amount));
+        gradient = gradient.add_stop(t, mix(pal().card, accent, amount));
     }
     Some(Gradient::Linear(gradient))
 }
@@ -497,12 +601,12 @@ pub fn icon_square(accent: Color, remote: bool) -> impl Fn(&Theme) -> container:
 /// Neutral pill: counters, ports.
 pub fn pill(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(alpha(Color::WHITE, 0.06))),
+        background: Some(Background::Color(alpha(pal().wash, 0.06))),
         border: Border {
             radius: 99.0.into(),
             ..Default::default()
         },
-        text_color: Some(TEXT_SECONDARY),
+        text_color: Some(pal().text_secondary),
         ..Default::default()
     }
 }
@@ -518,18 +622,18 @@ pub fn pill(_: &Theme) -> container::Style {
 /// that edge and nothing else.
 pub fn keycap(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(alpha(Color::WHITE, 0.055))),
+        background: Some(Background::Color(alpha(pal().wash, 0.055))),
         border: Border {
-            color: alpha(Color::WHITE, 0.12),
+            color: alpha(pal().wash, 0.12),
             width: 1.0,
             radius: 3.0.into(),
         },
         shadow: Shadow {
-            color: alpha(Color::BLACK, 0.5),
+            color: shadow(0.5),
             offset: Vector::new(0.0, 1.0),
             blur_radius: 0.0,
         },
-        text_color: Some(TEXT_SECONDARY),
+        text_color: Some(pal().text_secondary),
         ..Default::default()
     }
 }
@@ -545,8 +649,8 @@ pub fn overlay_scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::S
             is_vertical_scrollbar_hovered: true,
             ..
         }
-        | scrollable::Status::Dragged { .. } => alpha(Color::WHITE, 0.45),
-        scrollable::Status::Hovered { .. } => alpha(Color::WHITE, 0.22),
+        | scrollable::Status::Dragged { .. } => alpha(pal().wash, 0.45),
+        scrollable::Status::Hovered { .. } => alpha(pal().wash, 0.22),
     };
     let rail = scrollable::Rail {
         background: None,
@@ -565,10 +669,10 @@ pub fn overlay_scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::S
         horizontal_rail: rail,
         gap: None,
         auto_scroll: scrollable::AutoScroll {
-            background: Background::Color(BG_CARD),
+            background: Background::Color(pal().card),
             border: Border::default(),
             shadow: Shadow::default(),
-            icon: TEXT_SECONDARY,
+            icon: pal().text_secondary,
         },
     }
 }
@@ -576,14 +680,14 @@ pub fn overlay_scrollbar(_: &Theme, status: scrollable::Status) -> scrollable::S
 /// Centered form card.
 pub fn form_card(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_CARD)),
+        background: Some(Background::Color(pal().card)),
         border: Border {
-            color: alpha(Color::WHITE, 0.06),
+            color: alpha(pal().wash, 0.06),
             width: 1.0,
             radius: 12.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            color: shadow(0.35),
             offset: Vector::new(0.0, 6.0),
             blur_radius: 24.0,
         },
@@ -618,7 +722,11 @@ pub fn process_row(
             (false, true) => 0.08,
             (false, false) => 0.0,
         };
-        let ink = if selected { TEXT } else { TEXT_SECONDARY };
+        let ink = if selected {
+            pal().text
+        } else {
+            pal().text_secondary
+        };
         flat(alpha(accent, a), ink, 8.0)
     }
 }
@@ -644,14 +752,14 @@ pub fn drop_line(color: Color) -> impl Fn(&Theme) -> container::Style {
 /// icon, done as a floating card in the row's own colours.
 pub fn drag_ghost(accent: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: Some(Background::Color(BG_FIELD)),
+        background: Some(Background::Color(pal().field)),
         border: Border {
             color: alpha(accent, 0.55),
             width: 1.0,
             radius: 8.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            color: shadow(0.45),
             offset: Vector::new(0.0, 4.0),
             blur_radius: 14.0,
         },
@@ -671,9 +779,9 @@ pub fn choice_card(accent: Color) -> impl Fn(&Theme, button::Status) -> button::
         button::Style {
             background: Some(Background::Color(match hovered {
                 true => alpha(accent, 0.10),
-                false => BG_CARD,
+                false => pal().card,
             })),
-            text_color: TEXT,
+            text_color: pal().text,
             border: Border {
                 radius: 10.0.into(),
                 width: 1.0,
@@ -703,8 +811,8 @@ pub fn toggler(
             background: Background::Color(match (on, hovered) {
                 (true, true) => alpha(accent, 0.85),
                 (true, false) => accent,
-                (false, true) => alpha(TEXT_SECONDARY, 0.45),
-                (false, false) => alpha(TEXT_SECONDARY, 0.30),
+                (false, true) => alpha(pal().text_secondary, 0.45),
+                (false, false) => alpha(pal().text_secondary, 0.30),
             }),
             background_border_width: 0.0,
             background_border_color: Color::TRANSPARENT,
@@ -712,7 +820,7 @@ pub fn toggler(
             // light on the grey one.
             foreground: Background::Color(match on {
                 true => ON_ACCENT,
-                false => alpha(TEXT, 0.85),
+                false => alpha(pal().text, 0.85),
             }),
             foreground_border_width: 0.0,
             foreground_border_color: Color::TRANSPARENT,
@@ -748,16 +856,16 @@ pub fn project_header(accent: Color, hovered: bool) -> impl Fn(&Theme) -> contai
 /// The header's title half: a hit target for expand/collapse only. The
 /// wash it used to paint is [`project_header`]'s job now.
 pub fn header_title(_: &Theme, _: button::Status) -> button::Style {
-    flat(Color::TRANSPARENT, TEXT, 8.0)
+    flat(Color::TRANSPARENT, pal().text, 8.0)
 }
 
 /// Neutral pill button: toolbar chips, "+ project", cancel.
 pub fn pill_button(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| match status {
-        button::Status::Hovered => flat(alpha(accent, 0.14), TEXT, 99.0),
-        button::Status::Pressed => flat(alpha(accent, 0.22), TEXT, 99.0),
-        button::Status::Disabled => flat(alpha(Color::WHITE, 0.03), DIM, 99.0),
-        _ => flat(alpha(Color::WHITE, 0.05), TEXT_SECONDARY, 99.0),
+        button::Status::Hovered => flat(alpha(accent, 0.14), pal().text, 99.0),
+        button::Status::Pressed => flat(alpha(accent, 0.22), pal().text, 99.0),
+        button::Status::Disabled => flat(alpha(pal().wash, 0.03), pal().dim, 99.0),
+        _ => flat(alpha(pal().wash, 0.05), pal().text_secondary, 99.0),
     }
 }
 
@@ -769,7 +877,7 @@ pub fn pill_intent(
     move |_, status| match status {
         button::Status::Hovered => flat(alpha(accent, 0.14), glyph, 99.0),
         button::Status::Pressed => flat(alpha(accent, 0.22), glyph, 99.0),
-        _ => flat(alpha(Color::WHITE, 0.05), TEXT_SECONDARY, 99.0),
+        _ => flat(alpha(pal().wash, 0.05), pal().text_secondary, 99.0),
     }
 }
 
@@ -808,7 +916,7 @@ pub fn toolbar_icon(active: bool) -> impl Fn(&Theme, button::Status) -> button::
             (false, button::Status::Hovered) => 0.08,
             (false, _) => 0.0,
         };
-        flat(alpha(Color::WHITE, wash), TEXT, 6.0)
+        flat(alpha(pal().wash, wash), pal().text, 6.0)
     }
 }
 
@@ -816,14 +924,14 @@ pub fn toolbar_icon(active: bool) -> impl Fn(&Theme, button::Status) -> button::
 /// radius, floating shadow.
 pub fn menu_card(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_FIELD)),
+        background: Some(Background::Color(pal().field)),
         border: Border {
-            color: alpha(Color::WHITE, 0.09),
+            color: alpha(pal().wash, 0.09),
             width: 1.0,
             radius: 10.0.into(),
         },
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            color: shadow(0.4),
             offset: Vector::new(0.0, 4.0),
             blur_radius: 16.0,
         },
@@ -838,13 +946,13 @@ pub fn menu_item(destructive: bool) -> impl Fn(&Theme, button::Status) -> button
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         let ink = match (destructive, hovered) {
             (true, _) => CRASHED,
-            (false, true) => TEXT,
-            (false, false) => TEXT_SECONDARY,
+            (false, true) => pal().text,
+            (false, false) => pal().text_secondary,
         };
         let bg = match (destructive, hovered) {
             (_, false) => Color::TRANSPARENT,
             (true, true) => alpha(CRASHED, 0.14),
-            (false, true) => alpha(Color::WHITE, 0.07),
+            (false, true) => alpha(pal().wash, 0.07),
         };
         flat(bg, ink, 7.0)
     }
@@ -871,15 +979,15 @@ pub fn danger() -> impl Fn(&Theme, button::Status) -> button::Style {
 /// Tooltip bubble under the header buttons.
 pub fn tooltip(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(BG_CARD)),
+        background: Some(Background::Color(pal().card)),
         border: Border {
-            color: alpha(Color::WHITE, 0.10),
+            color: alpha(pal().wash, 0.10),
             width: 1.0,
             radius: 6.0.into(),
         },
-        text_color: Some(TEXT_SECONDARY),
+        text_color: Some(pal().text_secondary),
         shadow: Shadow {
-            color: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            color: shadow(0.35),
             offset: Vector::new(0.0, 2.0),
             blur_radius: 8.0,
         },
@@ -890,9 +998,9 @@ pub fn tooltip(_: &Theme) -> container::Style {
 /// Quiet close/utility glyph (the card ✕): nearly invisible until hover.
 pub fn ghost(glyph_hover: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| match status {
-        button::Status::Hovered => flat(alpha(Color::WHITE, 0.06), glyph_hover, 99.0),
-        button::Status::Pressed => flat(alpha(Color::WHITE, 0.10), glyph_hover, 99.0),
-        _ => flat(Color::TRANSPARENT, DIM, 99.0),
+        button::Status::Hovered => flat(alpha(pal().wash, 0.06), glyph_hover, 99.0),
+        button::Status::Pressed => flat(alpha(pal().wash, 0.10), glyph_hover, 99.0),
+        _ => flat(Color::TRANSPARENT, pal().dim, 99.0),
     }
 }
 
@@ -903,19 +1011,19 @@ pub fn input(accent: Color) -> impl Fn(&Theme, text_input::Status) -> text_input
     move |_, status| {
         let focused = matches!(status, text_input::Status::Focused { .. });
         text_input::Style {
-            background: Background::Color(BG_FIELD),
+            background: Background::Color(pal().field),
             border: Border {
                 color: if focused {
                     alpha(accent, 0.55)
                 } else {
-                    alpha(Color::WHITE, 0.08)
+                    alpha(pal().wash, 0.08)
                 },
                 width: 1.0,
                 radius: 99.0.into(),
             },
-            icon: TEXT_SECONDARY,
-            placeholder: DIM,
-            value: TEXT,
+            icon: pal().text_secondary,
+            placeholder: pal().dim,
+            value: pal().text,
             selection: alpha(accent, 0.35),
         }
     }
@@ -928,18 +1036,18 @@ pub fn editor(accent: Color) -> impl Fn(&Theme, text_editor::Status) -> text_edi
     move |_, status| {
         let focused = matches!(status, text_editor::Status::Focused { .. });
         text_editor::Style {
-            background: Background::Color(BG_FIELD),
+            background: Background::Color(pal().field),
             border: Border {
                 color: if focused {
                     alpha(accent, 0.55)
                 } else {
-                    alpha(Color::WHITE, 0.08)
+                    alpha(pal().wash, 0.08)
                 },
                 width: 1.0,
                 radius: 8.0.into(),
             },
-            placeholder: DIM,
-            value: TEXT,
+            placeholder: pal().dim,
+            value: pal().text,
             selection: alpha(accent, 0.35),
         }
     }
@@ -987,7 +1095,7 @@ mod tests {
             .map(|s| {
                 (
                     s.offset,
-                    (s.color.r - BG_CARD.r) / (REMOTE_ACCENT.r - BG_CARD.r),
+                    (s.color.r - pal().card.r) / (REMOTE_ACCENT.r - pal().card.r),
                 )
             })
             .collect()

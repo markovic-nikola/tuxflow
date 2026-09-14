@@ -56,6 +56,15 @@ pub struct FontSettings {
     pub size: f32,
     pub scale_factor: f32,
     pub font_type: Font,
+    /// Weight drawn for cells flagged bold (patch 26). Upstream hardcoded
+    /// `Weight::Bold`; an embedder with a "bold weight" setting needs to
+    /// choose it.
+    pub bold_weight: iced::font::Weight,
+    /// Extra advance per cell in logical pixels, added to the measured
+    /// glyph width (patch 26). Non-zero disables text-run merging in the
+    /// view: a merged run lands glyphs by the font's own advance, which
+    /// then no longer matches the cell grid.
+    pub letter_spacing: f32,
 }
 
 impl Default for FontSettings {
@@ -64,6 +73,8 @@ impl Default for FontSettings {
             size: 14.0,
             scale_factor: 1.3,
             font_type: Font::MONOSPACE,
+            bold_weight: iced::font::Weight::Bold,
+            letter_spacing: 0.0,
         }
     }
 }

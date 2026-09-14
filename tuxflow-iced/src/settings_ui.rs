@@ -21,7 +21,7 @@ use tuxflow_core::config::settings::{
 use tuxflow_core::mcp::setup;
 use tuxflow_core::util::sounds::BUNDLED_SOUNDS;
 
-use crate::theme::{self, CRASHED, TEXT_SECONDARY, bold};
+use crate::theme::{self, CRASHED, bold, pal};
 use crate::widgets::{group, label_row, row_base, switch_row};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -214,7 +214,7 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
             vec![
                 pick_row(
                     "Color Scheme",
-                    "Application theme \u{2014} applies to the GTK shell (this one is dark)",
+                    "Dark, light, or follow the desktop's preference",
                     SCHEMES.to_vec(),
                     scheme,
                     Msg::ColorScheme,
@@ -283,7 +283,7 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
                 ),
                 spin_u32(
                     "Bold Font Weight",
-                    "GTK shell \u{2014} bold here is the toolkit's",
+                    "Weight drawn for bold text in terminals",
                     a.bold_font_weight,
                     100,
                     100,
@@ -301,7 +301,7 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
                 ),
                 spin_f64(
                     "Letter Spacing",
-                    "GTK shell \u{2014} not yet plumbed here",
+                    "Extra space between characters, in pixels",
                     a.letter_spacing,
                     0.5,
                     -2.0,
@@ -336,7 +336,7 @@ fn page_sidebar<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
             ),
             switch_row(
                 "Auto-Hide Sidebar",
-                "GTK shell \u{2014} this one has no sidebar hiding yet",
+                "Clicking into a terminal collapses the sidebar to its rail",
                 sb.auto_hide_sidebar,
                 Msg::AutoHide,
             ),
@@ -536,7 +536,7 @@ fn page_hotkeys<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Colum
         fixed_rows.push(row_base(
             name,
             "",
-            text(shortcut).size(12).color(TEXT_SECONDARY).into(),
+            text(shortcut).size(12).color(pal().text_secondary).into(),
         ));
     }
 
@@ -592,7 +592,7 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
                 ),
                 pick_row(
                     "Default Terminal",
-                    "Used when opening projects from the sidebar.",
+                    "Edit Project \u{2192} Open Terminal Here",
                     TERMINAL_CHOICES.iter().map(|(_, l)| *l).collect(),
                     choice_label(TERMINAL_CHOICES, &t.default_terminal),
                     Msg::TerminalApp,

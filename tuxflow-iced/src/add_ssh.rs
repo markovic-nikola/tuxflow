@@ -11,7 +11,7 @@ use iced::Element;
 use iced::widget::{button, checkbox, column, pick_list, row, text, text_input};
 use tuxflow_core::config::ssh::{SshConnectionFields, SshHost};
 
-use crate::theme::{self, CRASHED, TEXT_SECONDARY, bold};
+use crate::theme::{self, CRASHED, bold, pal};
 use crate::widgets::form_card;
 
 /// The picker's first row: no alias, fields start blank (GTK's label).
@@ -86,7 +86,12 @@ pub enum Msg {
 }
 
 pub fn view(state: &'_ State, accent: iced::Color) -> Element<'_, Msg> {
-    let caption = |label: &'static str| text(label).size(11.5).font(bold()).color(TEXT_SECONDARY);
+    let caption = |label: &'static str| {
+        text(label)
+            .size(11.5)
+            .font(bold())
+            .color(pal().text_secondary)
+    };
     let field = |label: &'static str,
                  placeholder: &'static str,
                  value: &str,

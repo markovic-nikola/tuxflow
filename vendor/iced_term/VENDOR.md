@@ -421,3 +421,16 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     the same extraction the clipboard uses), under a FAIR lock rather
     than `sync`'s try-lock: a one-off read that waits out a flood is
     fine, a per-repaint one is not.
+26. **Configurable bold weight and letter spacing** (`FontSettings::
+    bold_weight`, `FontSettings::letter_spacing`). Upstream hardcoded
+    `Weight::Bold` for bold cells and had no spacing knob at all; the
+    embedder's Settings → Appearance page had both rows saving into a
+    file nothing read. The weight is threaded to the two places a bold
+    cell picks its font (the merged run and the per-cell path). Spacing
+    is added to the measured advance in `font.rs`, so the cell grid, the
+    PTY's reported cell size and the mouse hit-test all move together —
+    and it DISABLES run merging in the view: a merged run is only valid
+    while the cell advance is the font's own advance, which is exactly
+    what spacing breaks. Costs the per-cell path (thousands of fill_text
+    calls a frame) only while spacing is non-zero.
+

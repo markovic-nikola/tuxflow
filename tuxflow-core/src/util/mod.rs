@@ -5,5 +5,6 @@ pub mod editor;
 pub mod icon_detector;
 pub mod port_detector;
 pub mod sounds;
+pub mod terminal_app;
 pub mod update;
 pub mod watch;

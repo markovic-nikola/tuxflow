@@ -24,7 +24,7 @@ use tuxflow_core::config::ssh::SshHost;
 use tuxflow_core::detect::detector::{self, DetectedStack};
 use tuxflow_core::remote::ProjectLocation;
 
-use crate::theme::{self, CRASHED, DIM, TEXT, TEXT_SECONDARY, bold};
+use crate::theme::{self, CRASHED, bold, pal};
 use crate::widgets::{group, switch_row_owned};
 
 /// The label standing in for "no ~/.ssh/config host" in the picker —
@@ -263,7 +263,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
         iced::widget::space::horizontal(),
         button(text("\u{00d7} Close").size(12))
             .padding([5, 12])
-            .style(theme::pill_button(TEXT_SECONDARY))
+            .style(theme::pill_button(pal().text_secondary))
             .on_press(Msg::Close),
     ]
     .align_y(iced::Alignment::Center);
@@ -306,8 +306,8 @@ fn view_choose<'a>() -> Element<'a, Msg> {
         button(
             container(
                 column![
-                    text(title).size(14).font(bold()).color(TEXT),
-                    text(subtitle).size(11).color(DIM),
+                    text(title).size(14).font(bold()).color(pal().text),
+                    text(subtitle).size(11).color(pal().dim),
                 ]
                 .spacing(5),
             )
@@ -408,7 +408,7 @@ fn view_locate<'a>(state: &'a State, accent: iced::Color) -> Element<'a, Msg> {
         row![
             button(text("Back").size(12))
                 .padding([7, 16])
-                .style(theme::pill_button(TEXT_SECONDARY))
+                .style(theme::pill_button(pal().text_secondary))
                 .on_press(Msg::Back),
             iced::widget::space::horizontal(),
             commit_button(
@@ -452,17 +452,17 @@ fn view_configure<'a>(state: &'a State, c: &'a Configure, accent: iced::Color) -
                 c.total()
             ))
             .size(12)
-            .color(DIM),
+            .color(pal().dim),
         );
         content = content.push(
             row![
                 button(text("Select All").size(12))
                     .padding([5, 12])
-                    .style(theme::pill_button(TEXT_SECONDARY))
+                    .style(theme::pill_button(pal().text_secondary))
                     .on_press(Msg::SetAll(true)),
                 button(text("Deselect All").size(12))
                     .padding([5, 12])
-                    .style(theme::pill_button(TEXT_SECONDARY))
+                    .style(theme::pill_button(pal().text_secondary))
                     .on_press(Msg::SetAll(false)),
             ]
             .spacing(8),
@@ -500,7 +500,7 @@ fn view_configure<'a>(state: &'a State, c: &'a Configure, accent: iced::Color) -
         row![
             button(text("Back").size(12))
                 .padding([7, 16])
-                .style(theme::pill_button(TEXT_SECONDARY))
+                .style(theme::pill_button(pal().text_secondary))
                 .on_press(Msg::Back),
             iced::widget::space::horizontal(),
             commit_button_owned(
@@ -519,7 +519,12 @@ fn view_configure<'a>(state: &'a State, c: &'a Configure, accent: iced::Color) -
 /// check is in flight the previous failure is stale.
 fn status_line<'a>(state: &'a State) -> Option<Element<'a, Msg>> {
     match (&state.busy, &state.error) {
-        (Some(msg), _) => Some(text(msg.as_str()).size(11.5).color(TEXT_SECONDARY).into()),
+        (Some(msg), _) => Some(
+            text(msg.as_str())
+                .size(11.5)
+                .color(pal().text_secondary)
+                .into(),
+        ),
         (None, Some(err)) => Some(text(err.as_str()).size(11.5).color(CRASHED).into()),
         _ => None,
     }

@@ -12,7 +12,7 @@ use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length};
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 
-use crate::theme::{self, CRASHED, DIM, TEXT, TEXT_SECONDARY, bold};
+use crate::theme::{self, CRASHED, bold, pal};
 use crate::widgets::{avatar, group, group_described, row_base, suggestion_list, switch_row_owned};
 
 /// Which group renders a toggle row — GTK's `source_label`.
@@ -84,6 +84,7 @@ pub enum Msg {
     IconClear,
     CopyPath,
     OpenEditor,
+    OpenTerminal,
     Save,
     RemoveProject,
 }
@@ -200,6 +201,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
         .width(260);
     let dir_actions = row![
         pill("Copy Path", Some(Msg::CopyPath)),
+        pill("Open Terminal Here", Some(Msg::OpenTerminal)),
         pill("Open in Editor", Some(Msg::OpenEditor)),
     ]
     .spacing(6);
@@ -228,8 +230,8 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
         row![
             preview,
             column![
-                text("Icon").size(13).color(TEXT),
-                text(icon_state).size(10.5).color(DIM),
+                text("Icon").size(13).color(pal().text),
+                text(icon_state).size(10.5).color(pal().dim),
             ]
             .spacing(3)
             .width(Length::Fill),
@@ -320,7 +322,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
     // Busy wins over a stale error, as in add_project.
     match (&state.busy, &state.error) {
         (Some(msg), _) => {
-            content = content.push(text(msg.as_str()).size(11.5).color(TEXT_SECONDARY));
+            content = content.push(text(msg.as_str()).size(11.5).color(pal().text_secondary));
         }
         (None, Some(err)) => {
             content = content.push(text(err.as_str()).size(11.5).color(CRASHED));
@@ -353,7 +355,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
         iced::widget::space::horizontal(),
         button(text("\u{00d7} Close").size(12))
             .padding([5, 12])
-            .style(theme::pill_button(TEXT_SECONDARY))
+            .style(theme::pill_button(pal().text_secondary))
             .on_press(Msg::Close),
     ]
     .align_y(iced::Alignment::Center);
@@ -383,7 +385,7 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
 fn pill(label: &str, msg: Option<Msg>) -> Element<'_, Msg> {
     let mut b = button(text(label).size(11.5))
         .padding([4, 10])
-        .style(theme::pill_button(TEXT_SECONDARY));
+        .style(theme::pill_button(pal().text_secondary));
     if let Some(msg) = msg {
         b = b.on_press(msg);
     }

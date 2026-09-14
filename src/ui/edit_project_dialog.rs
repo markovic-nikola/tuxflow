@@ -363,36 +363,9 @@ impl EditProjectDialog {
 
         let dir_for_terminal = project_dir.to_string();
         terminal_btn.connect_clicked(move |_| {
-            let settings = AppSettings::load();
-            let terminal = &settings.tools.default_terminal;
-            if terminal == "xdg-open" {
-                for candidate in [
-                    "gnome-terminal",
-                    "konsole",
-                    "xfce4-terminal",
-                    "alacritty",
-                    "kitty",
-                    "foot",
-                    "wezterm",
-                    "xterm",
-                ] {
-                    if std::process::Command::new("which")
-                        .arg(candidate)
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false)
-                    {
-                        let _ = std::process::Command::new(candidate)
-                            .current_dir(&dir_for_terminal)
-                            .spawn();
-                        return;
-                    }
-                }
-            } else {
-                let _ = std::process::Command::new(terminal)
-                    .current_dir(&dir_for_terminal)
-                    .spawn();
-            }
+            tuxflow_core::util::terminal_app::open_terminal(
+                &crate::remote::ProjectLocation::parse(&dir_for_terminal),
+            );
         });
 
         let dir_for_editor = project_dir.to_string();

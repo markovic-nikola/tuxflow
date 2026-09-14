@@ -702,6 +702,11 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         let cell_height = term_size.cell_height;
         let font_size = self.term.font.size;
         let font_scale_factor = self.term.font.scale_factor;
+        let bold_weight = self.term.font.bold_weight;
+        // Runs are only valid while the cell advance IS the font's advance
+        // (see the merging comment below); any letter spacing means every
+        // glyph is placed by hand.
+        let can_merge = self.term.font.letter_spacing == 0.0;
         // with_clip only MASKS to `bounds` — the child frame keeps the
         // parent's coordinate space (identity transform, no translation to
         // the region origin), so cells must keep their absolute positions.
@@ -898,7 +903,10 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                         let italic =
                             indexed.cell.flags.contains(cell::Flags::ITALIC);
 
-                        if indexed.c.is_ascii_graphic() && !is_cursor_cell {
+                        if can_merge
+                            && indexed.c.is_ascii_graphic()
+                            && !is_cursor_cell
+                        {
                             let col = indexed.point.column.0;
                             let extended = match &mut text_run {
                                 Some(run)
@@ -916,6 +924,7 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                                     run.fill(
                                         frame,
                                         base_font,
+                                        bold_weight,
                                         font_size,
                                         font_scale_factor,
                                     );
@@ -936,13 +945,14 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                                 run.fill(
                                     frame,
                                     base_font,
+                                    bold_weight,
                                     font_size,
                                     font_scale_factor,
                                 );
                             }
                             let mut font = base_font;
                             if bold {
-                                font.weight = FontWeight::Bold;
+                                font.weight = bold_weight;
                             }
                             if italic {
                                 font.style = FontStyle::Italic;
@@ -974,6 +984,7 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                             run.fill(
                                 frame,
                                 base_font,
+                                bold_weight,
                                 font_size,
                                 font_scale_factor,
                             );
@@ -982,7 +993,13 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                 }
 
                 if let Some(run) = text_run.take() {
-                    run.fill(frame, base_font, font_size, font_scale_factor);
+                    run.fill(
+                        frame,
+                        base_font,
+                        bold_weight,
+                        font_size,
+                        font_scale_factor,
+                    );
                 }
 
                 // Flush any remaining background run at the end
@@ -1328,11 +1345,12 @@ impl TextRun {
         self,
         frame: &mut iced::widget::canvas::Frame,
         mut font: iced::Font,
+        bold_weight: FontWeight,
         font_size: f32,
         scale_factor: f32,
     ) {
         if self.bold {
-            font.weight = FontWeight::Bold;
+            font.weight = bold_weight;
         }
         if self.italic {
             font.style = FontStyle::Italic;

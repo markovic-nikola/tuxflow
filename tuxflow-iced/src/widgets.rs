@@ -12,7 +12,7 @@ use std::path::Path;
 use iced::widget::{button, column, container, row, scrollable, text, toggler};
 use iced::{Element, Length};
 
-use crate::theme::{self, DIM, TEXT, TEXT_SECONDARY, bold};
+use crate::theme::{self, bold, pal};
 
 /// An `AdwPreferencesGroup`: an optional title over a card of rows.
 /// Rows carry their own padding and butt against each other, as Adwaita's do.
@@ -21,7 +21,7 @@ pub fn group<'a, M: 'a>(title: &'a str, rows: Vec<Element<'a, M>>) -> Element<'a
         text(title)
             .size(11.5)
             .font(bold())
-            .color(TEXT_SECONDARY)
+            .color(pal().text_secondary)
             .into()
     });
     grouped(header, rows)
@@ -35,9 +35,15 @@ pub fn group_described<'a, M: 'a>(
     description: &'a str,
     rows: Vec<Element<'a, M>>,
 ) -> Element<'a, M> {
-    let mut header = column![text(title).size(11.5).font(bold()).color(TEXT_SECONDARY)].spacing(3);
+    let mut header = column![
+        text(title)
+            .size(11.5)
+            .font(bold())
+            .color(pal().text_secondary)
+    ]
+    .spacing(3);
     if !description.is_empty() {
-        header = header.push(text(description).size(10.5).color(DIM));
+        header = header.push(text(description).size(10.5).color(pal().dim));
     }
     grouped(Some(header.into()), rows)
 }
@@ -68,9 +74,9 @@ pub fn row_base<'a, M: 'a>(
     subtitle: &'a str,
     control: Element<'a, M>,
 ) -> Element<'a, M> {
-    let mut left = column![text(title).size(13).color(TEXT)].spacing(3);
+    let mut left = column![text(title).size(13).color(pal().text)].spacing(3);
     if !subtitle.is_empty() {
-        left = left.push(text(subtitle).size(10.5).color(DIM));
+        left = left.push(text(subtitle).size(10.5).color(pal().dim));
     }
     container(
         row![left.width(Length::Fill), control]
@@ -88,9 +94,9 @@ pub fn row_owned<'a, M: 'a>(
     subtitle: String,
     control: Element<'a, M>,
 ) -> Element<'a, M> {
-    let mut left = column![text(title).size(13).color(TEXT)].spacing(3);
+    let mut left = column![text(title).size(13).color(pal().text)].spacing(3);
     if !subtitle.is_empty() {
-        left = left.push(text(subtitle).size(10.5).color(DIM));
+        left = left.push(text(subtitle).size(10.5).color(pal().dim));
     }
     container(
         row![left.width(Length::Fill), control]
@@ -215,7 +221,7 @@ pub fn suggestion_list<'a, M: Clone + 'a>(
     let mut rows = column![].spacing(0);
     for path in paths {
         rows = rows.push(
-            button(text(shorten_path(path)).size(12).color(TEXT))
+            button(text(shorten_path(path)).size(12).color(pal().text))
                 .width(Length::Fill)
                 .padding([6, 12])
                 .style(theme::menu_item(false))

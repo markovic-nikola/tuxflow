@@ -2,26 +2,22 @@ use std::path::PathBuf;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tuxflow_core::mcp::server;
 
 fn find_socket(project: Option<&str>) -> Result<PathBuf, String> {
+    // A process TuxFlow spawned is told its own socket — no guessing from
+    // the working directory, which two open projects with nested paths
+    // (or a working_dir outside the project root) would get wrong. The
+    // remote shim honours the same variable; see mcp/remote.rs in core.
+    if let Some(path) = std::env::var_os(server::SOCKET_ENV).filter(|p| !p.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
 
     // If a project name was given, use it directly
     if let Some(name) = project {
-        let sanitized: String = name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect();
-        return Ok(PathBuf::from(format!(
-            "{}/tuxflow-{}.sock",
-            base, sanitized
-        )));
+        return Ok(PathBuf::from(server::socket_path(name)));
     }
 
     // Auto-discover: scan for tuxflow-*.sock files
@@ -49,7 +45,7 @@ fn find_socket(project: Option<&str>) -> Result<PathBuf, String> {
             let cwd = std::env::current_dir().ok();
             if let Some(ref cwd) = cwd {
                 for sock in &sockets {
-                    let dir_file = format!("{}.dir", sock.display());
+                    let dir_file = server::sidecar_path(&sock.display().to_string());
                     if let Ok(project_dir) = std::fs::read_to_string(&dir_file) {
                         let project_path = PathBuf::from(project_dir.trim());
                         if cwd.starts_with(&project_path) {

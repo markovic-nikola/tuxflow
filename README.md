@@ -176,26 +176,27 @@ Configurable via Settings > Hotkeys, except `Ctrl+1-9` and `Alt+1-9`, which are 
 
 ## MCP Server
 
-TuxFlow exposes an MCP server over a Unix socket at `/tmp/tuxflow-<project>.sock`. AI agents can use it to:
+TuxFlow exposes an MCP server per open project over a Unix socket at `$XDG_RUNTIME_DIR/tuxflow-<project>.sock`, so an AI coding agent can see what is already running before it starts its own copy. Agents can:
 
-- List and monitor running processes
-- Read terminal output / logs
-- Start, stop, and restart processes
+- List the project's processes with status and the URL each one serves (`list_processes`)
+- Read a process's recent terminal output (`get_process_logs`)
+- Start, stop, and restart the project's defined processes
 
-To connect from Claude Code, add to your MCP config:
+Every process TuxFlow spawns carries `TUXFLOW_MCP_SOCKET` in its environment, so an agent started from a TuxFlow terminal resolves its own project with no arguments. To connect from Claude Code, add to your MCP config:
 
 ```json
 {
   "mcpServers": {
     "tuxflow": {
-      "command": "tuxflow-mcp",
-      "args": ["my-project"]
+      "command": "tuxflow-mcp"
     }
   }
 }
 ```
 
-The argument is the project name (as shown in TuxFlow). If omitted, `tuxflow-mcp` auto-discovers the socket when run from within the project directory.
+Outside a TuxFlow terminal, `tuxflow-mcp` auto-discovers the socket when run from within the project directory, or takes the project name (as shown in TuxFlow) as its argument.
+
+**Remote projects** get the same thing on the host: TuxFlow installs a `tuxflow-mcp` shim into the host's `~/.local/bin` and reverse-forwards the project's socket to `~/.cache/tuxflow/mcp/<project>.sock` there, so an agent running on the host uses the identical config. The forward lives only while TuxFlow runs; nothing on the host serves anything on its own.
 
 ## License
 

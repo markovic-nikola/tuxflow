@@ -410,3 +410,14 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     the given colour) while UNfocused — the embedder ships `Dim`, chosen
     off a live bench of all four; the others stay because the next
     design round is a one-word change, not a patch.
+25. **`Backend::recent_text(max_lines)`** (and the `Terminal` passthrough):
+    the last N lines of the grid, history included, as text. The MCP
+    server's `get_process_logs` needs "what did this process print
+    lately", and nothing in the public surface answered it — `sync`'s
+    `RenderableContent` is the VIEWPORT (a user scrolled into history
+    would hand the agent stale rows), and `selectable_content` needs a
+    selection. Measured up from the cursor line with alacritty's own
+    `bounds_to_string` (soft wraps rejoined, wide-char spacers skipped —
+    the same extraction the clipboard uses), under a FAIR lock rather
+    than `sync`'s try-lock: a one-off read that waits out a flood is
+    fine, a per-repaint one is not.

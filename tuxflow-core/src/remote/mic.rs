@@ -222,17 +222,13 @@ fn provision(host: &str) -> Result<String, String> {
     ssh_stream_stdin(host, &script, &[])
 }
 
-/// One `ssh -N -R` reverse forward: remote socket → this machine's listener.
+/// One reverse forward (see [`super::spawn_reverse_forward`]): remote
+/// socket → this machine's listener.
 struct Bridge {
     child: Child,
 }
 
 /// Microphone bridges for remote hosts, keyed by host.
-///
-/// Like [`super::tunnel::TunnelManager`], each forward is a dedicated ssh
-/// connection rather than a mux client: a forward requested over the shared
-/// ControlMaster lives in the *master* and survives the client being killed,
-/// so it would keep the microphone reachable after the bridge was closed.
 #[derive(Default)]
 pub struct MicBridgeManager {
     bridges: HashMap<String, Bridge>,
@@ -256,63 +252,11 @@ impl MicBridgeManager {
         }
         ensure_listener()?;
         let remote_socket = provision(host)?;
-        let local_socket = local_socket_path();
-        let mut cmd = Command::new("ssh");
-        cmd.args([
-            "-N",
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            "ControlPath=none",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ExitOnForwardFailure=yes",
-            "-o",
-            "ServerAliveInterval=15",
-            // Belt and braces: the host's sshd default leaves a stale socket
-            // behind, which is why provision() removes it first.
-            "-o",
-            "StreamLocalBindUnlink=yes",
-            "-R",
-            &format!("{remote_socket}:{}", local_socket.display()),
-        ])
-        .arg(host)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        // Captured, not discarded: `ExitOnForwardFailure` makes ssh exit
-        // silently on a refused forward, and without this the bridge just
-        // fails to exist with nothing to explain why.
-        .stderr(Stdio::piped());
-        // Die with TuxFlow: an exit path that skips Drop must not leave the
-        // microphone reachable from the host.
-        unsafe {
-            use std::os::unix::process::CommandExt;
-            cmd.pre_exec(|| {
-                nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGTERM, 0, 0, 0);
-                Ok(())
-            });
-        }
-        match cmd.spawn() {
-            Ok(mut child) => {
-                if let Some(stderr) = child.stderr.take() {
-                    let host = host.to_string();
-                    std::thread::spawn(move || {
-                        use std::io::BufRead;
-                        for line in std::io::BufReader::new(stderr)
-                            .lines()
-                            .map_while(Result::ok)
-                        {
-                            log::error!("Mic bridge {host}: {line}");
-                        }
-                    });
-                }
-                log::info!("Mic bridge up: {host} -> {remote_socket}");
-                self.bridges.insert(host.to_string(), Bridge { child });
-                Ok(())
-            }
-            Err(e) => Err(format!("failed to spawn mic forward: {e}")),
-        }
+        let child =
+            super::spawn_reverse_forward(host, &remote_socket, &local_socket_path(), "Mic bridge")?;
+        log::info!("Mic bridge up: {host} -> {remote_socket}");
+        self.bridges.insert(host.to_string(), Bridge { child });
+        Ok(())
     }
 
     pub fn close(&mut self, host: &str) {

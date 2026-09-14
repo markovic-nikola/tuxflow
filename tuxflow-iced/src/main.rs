@@ -13,6 +13,7 @@ mod dnd;
 mod edit_project;
 mod git_view;
 mod keys;
+mod mcp;
 mod notify;
 mod processes;
 mod settings_ui;
@@ -362,6 +363,21 @@ struct ProjectState {
     /// on the host). The bridge's hash gate — see
     /// [`remote::tmux_buffer_publishable`].
     clip_seen: u64,
+    /// The project's MCP server while Settings → Integrations has it on:
+    /// started at boot (before the first spawn, so every process is born
+    /// knowing its socket), stopped with the project or the setting.
+    mcp: Option<McpLink>,
+}
+
+/// One project's live MCP server: the socket, the bridge its snapshots
+/// are written through, and the command stream's abort handle.
+struct McpLink {
+    handle: tuxflow_core::mcp::server::McpServerHandle,
+    bridge: tuxflow_core::mcp::bridge::McpBridge,
+    commands: iced::task::Handle,
+    /// What the snapshot table was last built from — see
+    /// [`App::sync_mcp_snapshots`].
+    fingerprint: u64,
 }
 
 impl ProjectState {
@@ -736,6 +752,12 @@ enum Event {
         project: u64,
         live_sessions: Vec<String>,
         result: Result<(), String>,
+    },
+    /// An agent's tool call on a project's MCP socket (start / stop /
+    /// restart / read logs). The reply travels back inside the request.
+    McpCommand {
+        project: u64,
+        request: mcp::Request,
     },
     /// Settings → Remote Microphone switched on: one (host, reason) per
     /// bridge that could not be brought up.
@@ -1195,6 +1217,7 @@ impl App {
             sweeping: false,
             was_running: false,
             clip_seen: 0,
+            mcp: None,
             location,
         };
 
@@ -1572,7 +1595,10 @@ impl App {
     /// start_with_project ones (those count as user-initiated).
     fn boot_processes(&mut self, pidx: usize, live_sessions: &[String]) -> Task<Event> {
         let key = self.projects[pidx].key();
-        let mut tasks = Vec::new();
+        // Before the first spawn: the socket path goes into each process's
+        // environment, and the server should be answering by the time an
+        // agent's first tool call arrives.
+        let mut tasks = vec![self.start_mcp(pidx)];
         for i in 0..self.projects[pidx].entries.len() {
             let name = self.projects[pidx].entries[i].config.name.clone();
             let live = live_sessions.contains(&remote::remote_session_name(&key, &name));
@@ -1623,6 +1649,7 @@ impl App {
         let font = self.term_font();
         let scrollback = self.settings.appearance.scrollback_lines as usize;
         let palette = theme::terminal_palette(&self.settings.appearance.terminal_theme);
+        let mcp_socket = self.mcp_socket_for(pidx);
         let project = &mut self.projects[pidx];
         let settings = processes::spawn_settings(
             &project.location,
@@ -1630,6 +1657,7 @@ impl App {
             font,
             scrollback,
             palette,
+            mcp_socket.as_deref(),
         );
         let remote_agent = project.location.host().is_some()
             && project.entries[index].config.category == ProcessCategory::Agent;
@@ -1927,6 +1955,7 @@ impl App {
     /// sessions DETACH (kill only happens on explicit per-process stop) —
     /// the same contract as quitting the app.
     fn close_project(&mut self, pidx: usize) {
+        self.stop_mcp(pidx);
         let held: Vec<u64> = self.projects[pidx]
             .entries
             .iter()
@@ -4006,6 +4035,10 @@ impl App {
         // checked here for the same reason as the git view above: the
         // statuses move from many places (clicks, async exits, reattach).
         self.refresh_recent_order();
+        // And the MCP snapshot tables, for the same reason: a status or a
+        // detected URL moves from as many places, and the agent asking
+        // must see the state the sidebar shows.
+        self.sync_mcp_snapshots();
         match event {
             Event::WindowResized(size) => {
                 self.window_size = size;
@@ -4107,6 +4140,12 @@ impl App {
                 // pointed at this machine's hardware. PDEATHSIG covers the
                 // exits that skip this (crash, SIGKILL, cargo watch).
                 remote::mic::shutdown();
+                // The MCP sockets go too — a socket file nothing answers on
+                // would have `tuxflow-mcp` connecting to a dead server.
+                for pidx in 0..self.projects.len() {
+                    self.stop_mcp(pidx);
+                }
+                tuxflow_core::mcp::remote::shutdown();
                 iced::window::close(id)
             }
             Event::Probed { project, result } => {
@@ -4274,6 +4313,7 @@ impl App {
                 }
                 Task::none()
             }
+            Event::McpCommand { project, request } => self.handle_mcp_command(project, request),
             Event::StartAll(project) => {
                 // GTK's spawn_project_group: the marked processes only.
                 let Some(pidx) = self.project_index(project) else {
@@ -8110,7 +8150,25 @@ impl App {
                     self.settings.tools.default_terminal = cmd.to_string();
                 }
             }
-            Msg::McpEnabled(v) => self.settings.integrations.mcp_enabled = v,
+            Msg::McpEnabled(v) => {
+                self.settings.integrations.mcp_enabled = v;
+                // Live, both ways, on every Ready project — GTK's switch
+                // needs a restart to rebind. Processes already running keep
+                // the socket path they were born with (a deterministic path,
+                // so it is right again the moment the server is back).
+                self.settings.save();
+                let tasks: Vec<Task<Event>> = (0..self.projects.len())
+                    .map(|pidx| {
+                        if v {
+                            self.start_mcp(pidx)
+                        } else {
+                            self.stop_mcp(pidx);
+                            Task::none()
+                        }
+                    })
+                    .collect();
+                return Task::batch(tasks);
+            }
             Msg::ToggleSetup(idx) => {
                 if let Some(state) = &mut self.settings_ui {
                     state.setup_open = if state.setup_open == Some(idx) {
@@ -8228,6 +8286,193 @@ impl App {
     /// eight call sites. The event AFTER the mutating one applies the
     /// order (a release always follows a press), which is also GTK's
     /// deferred-to-idle timing.
+    /// The socket a process of this project should be told about — the
+    /// host-side one for a remote project (where the agent runs), the local
+    /// one otherwise; `None` while the server is switched off.
+    fn mcp_socket_for(&self, pidx: usize) -> Option<String> {
+        if !self.settings.integrations.mcp_enabled {
+            return None;
+        }
+        let project = &self.projects[pidx];
+        Some(if project.location.is_remote() {
+            tuxflow_core::mcp::remote::remote_socket_path(&project.name)
+        } else {
+            tuxflow_core::mcp::server::socket_path(&project.name)
+        })
+    }
+
+    /// Bring the project's MCP server up (setting on, not already up):
+    /// its own bridge and socket, and for a remote project the reverse
+    /// forward that puts that socket on the host. Returns the task that
+    /// turns the agent's commands into events; it ends when the server's
+    /// last sender is dropped and is aborted by [`Self::stop_mcp`].
+    fn start_mcp(&mut self, pidx: usize) -> Task<Event> {
+        use tuxflow_core::mcp::{bridge::McpBridge, remote as mcp_remote, server};
+        if !self.settings.integrations.mcp_enabled || self.projects[pidx].mcp.is_some() {
+            return Task::none();
+        }
+        let (bridge, rx) = McpBridge::isolated();
+        let project = &self.projects[pidx];
+        let handle =
+            server::start_mcp_server(&project.name, &project.location.dir_str(), bridge.clone());
+        if let ProjectLocation::Ssh { host, dir } = &project.location {
+            mcp_remote::ensure(
+                &project.key(),
+                mcp_remote::ForwardSpec {
+                    host: host.clone(),
+                    project_name: project.name.clone(),
+                    remote_dir: dir.clone(),
+                    local_socket: handle.socket_path().to_string(),
+                },
+            );
+        }
+        let id = project.id;
+        let stream = iced::futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|cmd| (mcp::Request::new(cmd), rx))
+        });
+        let (task, commands) = Task::run(stream, move |request| Event::McpCommand {
+            project: id,
+            request,
+        })
+        .abortable();
+        self.projects[pidx].mcp = Some(McpLink {
+            handle,
+            bridge,
+            commands,
+            // Force the first sync to write the table.
+            fingerprint: 0,
+        });
+        self.sync_mcp_snapshots();
+        task
+    }
+
+    /// Stop the project's server: socket files removed, command stream
+    /// aborted, and a remote project's forward torn down (its host-side
+    /// socket files with it).
+    fn stop_mcp(&mut self, pidx: usize) {
+        let Some(link) = self.projects[pidx].mcp.take() else {
+            return;
+        };
+        link.handle.stop();
+        link.commands.abort();
+        let project = &self.projects[pidx];
+        if let Some(host) = project.location.host() {
+            tuxflow_core::mcp::remote::close(&project.key(), host, &project.name);
+        }
+    }
+
+    /// Rewrite each live server's snapshot table when what it is built
+    /// from has moved (status, detected URL, a new run). Runs on every
+    /// event; the fingerprint is hashed without allocating, the rebuild
+    /// clones strings only when it fires.
+    fn sync_mcp_snapshots(&mut self) {
+        let now = Instant::now();
+        for project in &mut self.projects {
+            let Some(link) = project.mcp.as_mut() else {
+                continue;
+            };
+            let ports = &project.ports;
+            let fingerprint = mcp::fingerprint(
+                project
+                    .entries
+                    .iter()
+                    .map(|e| (e, ports.get_url(&e.config.name))),
+            );
+            if fingerprint == link.fingerprint {
+                continue;
+            }
+            link.fingerprint = fingerprint;
+            let dir = project.location.dir_str();
+            let snapshots = project
+                .entries
+                .iter()
+                .map(|e| mcp::snapshot(e, ports.get_url(&e.config.name), &dir, now))
+                .collect();
+            link.bridge.replace_snapshots(snapshots);
+        }
+    }
+
+    /// An agent's tool call, answered through the oneshot it carries. The
+    /// lifecycle half goes through the same paths as the sidebar's
+    /// buttons; logs come straight off the grid (fork patch 25).
+    fn handle_mcp_command(&mut self, project: u64, request: mcp::Request) -> Task<Event> {
+        use tuxflow_core::mcp::bridge::{CommandResult, McpCommand};
+        let Some(command) = request.take() else {
+            return Task::none();
+        };
+        let (name, reply, action) = match command {
+            McpCommand::StartProcess { name, reply } => (name, reply, "start"),
+            McpCommand::StopProcess { name, reply } => (name, reply, "stop"),
+            McpCommand::RestartProcess { name, reply } => (name, reply, "restart"),
+            McpCommand::ReadLogs { name, lines, reply } => {
+                let result = match self.entry_by_name(project, &name) {
+                    Some((pidx, index)) => match &self.projects[pidx].entries[index].terminal {
+                        Some(term) => CommandResult::Ok(term.recent_text(lines)),
+                        None => CommandResult::Error(format!("Process '{name}' has not run yet")),
+                    },
+                    None => CommandResult::Error(format!("Process '{name}' not found")),
+                };
+                let _ = reply.send(result);
+                return Task::none();
+            }
+        };
+        let Some((pidx, index)) = self.entry_by_name(project, &name) else {
+            let _ = reply.send(CommandResult::Error(format!("Process '{name}' not found")));
+            return Task::none();
+        };
+        let running = self.projects[pidx].entries[index].is_running();
+        let (result, task) = match action {
+            "start" if running => (
+                CommandResult::Error(format!("Process '{name}' is already running")),
+                Task::none(),
+            ),
+            "stop" if !running => (
+                CommandResult::Error(format!("Process '{name}' is not running")),
+                Task::none(),
+            ),
+            "stop" => {
+                self.stop(pidx, index);
+                (
+                    CommandResult::Ok(format!("Process '{name}' stopped")),
+                    Task::none(),
+                )
+            }
+            _ => {
+                if running {
+                    self.stop(pidx, index);
+                }
+                let past = if action == "start" {
+                    "started"
+                } else {
+                    "restarted"
+                };
+                (
+                    CommandResult::Ok(format!("Process '{name}' {past}")),
+                    self.start_fresh(pidx, index),
+                )
+            }
+        };
+        log::info!(
+            "MCP: {action} '{name}' → {}",
+            match &result {
+                CommandResult::Ok(m) | CommandResult::Error(m) => m.as_str(),
+            }
+        );
+        let _ = reply.send(result);
+        task
+    }
+
+    /// The (project, entry) an MCP command names — the socket is per
+    /// project, so the name resolves inside that project only.
+    fn entry_by_name(&self, project: u64, name: &str) -> Option<(usize, usize)> {
+        let pidx = self.project_index(project)?;
+        let index = self.projects[pidx]
+            .entries
+            .iter()
+            .position(|e| e.config.name == name)?;
+        Some((pidx, index))
+    }
+
     fn refresh_recent_order(&mut self) {
         let mut flipped = false;
         let now = std::time::SystemTime::now()

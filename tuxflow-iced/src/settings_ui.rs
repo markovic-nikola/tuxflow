@@ -606,13 +606,15 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
 fn page_integrations<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
     let mut rows = vec![switch_row(
         "Enable MCP Server",
-        "GTK shell \u{2014} this shell's MCP server is still pending. Expose process info via Unix socket.",
+        "Lets AI agents see what is already running here before starting their own. \
+         One socket per open project; remote projects get it on the host too.",
         s.integrations.mcp_enabled,
         Msg::McpEnabled,
     )];
     for (name, desc) in setup::EXPOSED_TOOLS {
         rows.push(label_row(name, desc));
     }
+    rows.push(label_row("Command", setup::COMMAND_NOTE));
 
     let mut col = column![group("MCP Server", rows)].spacing(20);
 

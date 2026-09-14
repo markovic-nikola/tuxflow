@@ -33,44 +33,80 @@ const MCP_CONFIG: &str = r#"{
   }
 }"#;
 
-/// CLI-tool setup rows, as (tool, where it goes, config to copy).
+/// The command an agent runs to reach TuxFlow: the shipped binary locally,
+/// the shim TuxFlow installs on a remote host (not on the pane's PATH, so
+/// spelled out). Both honour `TUXFLOW_MCP_SOCKET`, so no project argument.
+pub const LOCAL_COMMAND: &str = "tuxflow-mcp";
+pub const REMOTE_COMMAND: &str = "~/.local/bin/tuxflow-mcp";
+
+/// One line under the setup rows saying where the command lives.
+pub const COMMAND_NOTE: &str = "The command is tuxflow-mcp on this machine and ~/.local/bin/tuxflow-mcp on a remote host \
+     (TuxFlow installs it there). Agents started from a TuxFlow terminal find their project on \
+     their own; restart an agent after adding the server.";
+
+/// CLI-tool setup rows, as (tool, the one line shown under the name, text
+/// to copy). For a tool with an `mcp add` subcommand the copied text IS
+/// the shown line — a click on Copy must give exactly what the row says,
+/// nothing to trim — and the remote-host variant is its own row rather
+/// than a paragraph inside the copy. Tools without a subcommand show
+/// where the config goes and copy the config.
 pub const CLI_SETUP: &[(&str, &str, &str)] = &[
     (
         "Claude Code",
-        ".mcp.json or ~/.claude/settings.json",
-        r#"Per-project: add to .mcp.json
-Global: add to ~/.claude/settings.json
-
-{
-  "mcpServers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}
-
-Auto-detects which project you're in.
-If tuxflow-mcp is not in PATH, use the full path."#,
+        "claude mcp add --scope user tuxflow -- tuxflow-mcp",
+        "claude mcp add --scope user tuxflow -- tuxflow-mcp",
+    ),
+    (
+        "Claude Code on a remote host",
+        "claude mcp add --scope user tuxflow -- ~/.local/bin/tuxflow-mcp",
+        "claude mcp add --scope user tuxflow -- ~/.local/bin/tuxflow-mcp",
     ),
     (
         "Codex",
-        "CLI flag or ~/.codex/config.toml",
-        r#"codex --mcp-config '{"tuxflow":{"command":"tuxflow-mcp"}}'
-Or add to ~/.codex/config.toml under [mcp]"#,
+        "codex mcp add tuxflow -- tuxflow-mcp",
+        "codex mcp add tuxflow -- tuxflow-mcp",
     ),
-    ("OpenCode", ".opencode/mcp.json", MCP_CONFIG),
+    (
+        "Codex on a remote host",
+        "codex mcp add tuxflow -- ~/.local/bin/tuxflow-mcp",
+        "codex mcp add tuxflow -- ~/.local/bin/tuxflow-mcp",
+    ),
     (
         "Gemini CLI",
-        "CLI flag or ~/.gemini/settings.json",
-        r#"gemini --mcp '{"tuxflow":{"command":"tuxflow-mcp"}}'
-Or add to ~/.gemini/settings.json under mcpServers"#,
+        "gemini mcp add tuxflow tuxflow-mcp",
+        "gemini mcp add tuxflow tuxflow-mcp",
     ),
-    ("Amp", ".amp/mcp.json", MCP_CONFIG),
+    (
+        "Gemini CLI on a remote host",
+        "gemini mcp add tuxflow ~/.local/bin/tuxflow-mcp",
+        "gemini mcp add tuxflow ~/.local/bin/tuxflow-mcp",
+    ),
+    (
+        "Amp",
+        "amp mcp add tuxflow -- tuxflow-mcp",
+        "amp mcp add tuxflow -- tuxflow-mcp",
+    ),
+    (
+        "Amp on a remote host",
+        "amp mcp add tuxflow -- ~/.local/bin/tuxflow-mcp",
+        "amp mcp add tuxflow -- ~/.local/bin/tuxflow-mcp",
+    ),
+    (
+        "OpenCode",
+        "opencode.json (project or ~/.config/opencode/)",
+        r#"{
+  "mcp": {
+    "tuxflow": {
+      "type": "local",
+      "command": ["tuxflow-mcp"]
+    }
+  }
+}"#,
+    ),
     (
         "Aider",
         ".aider.conf.yml",
-        r#"Add to .aider.conf.yml:
-mcp-servers:
+        r#"mcp-servers:
   - command: tuxflow-mcp"#,
     ),
 ];

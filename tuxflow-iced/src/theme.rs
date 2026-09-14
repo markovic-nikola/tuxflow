@@ -199,9 +199,89 @@ pub fn pane(_: &Theme) -> container::Style {
 /// moment the user picks another scheme, and any full-screen program that
 /// paints its own background (BCE fills the grid, never the container)
 /// gets framed in the stale color.
-pub fn terminal_pane(scheme: &str) -> impl Fn(&Theme) -> container::Style {
+/// How much the terminal pane darkens while it is not where keys go, as a
+/// drop in CIE lightness (L*, 0–100). A drop rather than a wash alpha
+/// because the same alpha is not the same dim: 18 % black costs a
+/// Mocha pane ~3.5 L* and a Latte pane ~15 — measured on the light-scheme
+/// bench (2026-09-14), where it read as a grey slab. 3.5 is the Mocha
+/// value Nikola approved off the first bench, so dark schemes are
+/// unchanged by construction.
+pub const UNFOCUSED_DIM_LSTAR: f32 = 3.5;
+/// Alpha of the accent for the line/ring focus indicators.
+const FOCUS_LINE_ALPHA: f32 = 0.8;
+const FOCUS_RING_ALPHA: f32 = 0.45;
+
+/// Alpha of a black wash that lowers `bg` by `UNFOCUSED_DIM_LSTAR`. A black
+/// wash at alpha a scales sRGB by (1 − a), i.e. linear luminance by
+/// (1 − a)^2.2, so the alpha that lands on the target luminance is a
+/// closed form. Floors are only there for the degenerate ends (a pure
+/// black background cannot get darker).
+pub fn dim_alpha_for(bg: Color) -> f32 {
+    fn lin(c: f32) -> f32 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    fn lstar(y: f32) -> f32 {
+        if y <= 0.008856 {
+            903.3 * y
+        } else {
+            116.0 * y.cbrt() - 16.0
+        }
+    }
+    fn luminance(l: f32) -> f32 {
+        if l <= 8.0 {
+            l / 903.3
+        } else {
+            ((l + 16.0) / 116.0).powi(3)
+        }
+    }
+    let y = 0.2126 * lin(bg.r) + 0.7152 * lin(bg.g) + 0.0722 * lin(bg.b);
+    if y <= 0.0005 {
+        return 0.0;
+    }
+    let target = luminance((lstar(y) - UNFOCUSED_DIM_LSTAR).max(0.0));
+    let scale = (target / y).clamp(0.0, 1.0).powf(1.0 / 2.2);
+    (1.0 - scale).clamp(0.0, 0.5)
+}
+
+/// The terminal's focus indicator, painted by the widget from the same
+/// flag that shapes its cursor. `name` is the `focus_indicator` setting
+/// (see core's `FOCUS_INDICATOR_CHOICES`); an unknown name takes the
+/// default rather than no mark, so a hand-edited file can't silently
+/// switch the indicator off. `scheme` is the terminal theme, which the
+/// dim's strength follows.
+pub fn focus_mark(name: &str, accent: Color, scheme: &str) -> Option<iced_term::FocusMark> {
+    use iced_term::{FocusMark, FocusMarkStyle};
+    let (style, color) = match name {
+        "none" => return None,
+        "top" => (
+            FocusMarkStyle::TopLine(1.0),
+            alpha(accent, FOCUS_LINE_ALPHA),
+        ),
+        "left" => (
+            FocusMarkStyle::LeftLine(2.0),
+            alpha(accent, FOCUS_LINE_ALPHA),
+        ),
+        "ring" => (FocusMarkStyle::Ring(1.0), alpha(accent, FOCUS_RING_ALPHA)),
+        _ => (
+            FocusMarkStyle::Dim,
+            alpha(Color::BLACK, dim_alpha_for(terminal_background(scheme))),
+        ),
+    };
+    Some(FocusMark { color, style })
+}
+
+/// The terminal scheme's background as a colour.
+fn terminal_background(scheme: &str) -> Color {
     let (r, g, b) = palette::hex_rgb(palette::terminal_theme(scheme).background);
-    let bg = Color::from_rgb(r, g, b);
+    Color::from_rgb(r, g, b)
+}
+
+pub fn terminal_pane(scheme: &str) -> impl Fn(&Theme) -> container::Style {
+    let bg = terminal_background(scheme);
     move |_: &Theme| container::Style {
         background: Some(Background::Color(bg)),
         ..Default::default()
@@ -875,6 +955,22 @@ fn mix(base: Color, tint: Color, t: f32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dim is a constant drop in perceived lightness, not a constant
+    /// alpha: the wash that reads as a hint on a dark scheme reads as a
+    /// slab on a light one.
+    #[test]
+    fn dim_alpha_follows_the_scheme_background() {
+        let mocha = dim_alpha_for(terminal_background("catppuccin-mocha"));
+        let latte = dim_alpha_for(terminal_background("catppuccin-latte"));
+        assert!((0.15..=0.21).contains(&mocha), "mocha {mocha}");
+        assert!((0.03..=0.06).contains(&latte), "latte {latte}");
+        assert_eq!(dim_alpha_for(Color::BLACK), 0.0);
+        for t in palette::TERMINAL_THEMES {
+            let a = dim_alpha_for(terminal_background(t.name));
+            assert!((0.0..=0.3).contains(&a), "{}: {a}", t.name);
+        }
+    }
 
     fn stops(active: bool, sweep: Option<f32>) -> Vec<(f32, f32)> {
         let Some(Gradient::Linear(g)) = card_gradient(REMOTE_ACCENT, active, sweep) else {

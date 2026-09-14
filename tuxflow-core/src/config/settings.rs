@@ -47,6 +47,11 @@ pub struct AppearanceSettings {
     pub letter_spacing: f64,
     pub scrollback_lines: u32,
     pub terminal_theme: String,
+    /// How the terminal pane shows that keys go elsewhere (the composer,
+    /// a filter field, a modal, another window). A name from
+    /// `FOCUS_INDICATOR_CHOICES`; unknown names fall back to the default.
+    /// The cursor alone can't carry this: agent TUIs hide it.
+    pub focus_indicator: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +113,16 @@ pub struct IntegrationSettings {
 
 /// Editor choices shown in Settings → Tools, as (command, label). Shared
 /// by both shells so the dropdowns can't drift apart.
+/// Terminal focus indicator: `(name, label)`, first entry is the default.
+/// The names are what the widget's `FocusMarkStyle` offers.
+pub const FOCUS_INDICATOR_CHOICES: &[(&str, &str)] = &[
+    ("dim", "Dim the pane when unfocused"),
+    ("top", "Accent line along the top edge"),
+    ("left", "Accent line along the left edge"),
+    ("ring", "Accent ring around the pane"),
+    ("none", "None"),
+];
+
 pub const EDITOR_CHOICES: &[(&str, &str)] = &[
     ("xdg-open", "System Default (xdg-open)"),
     ("code", "VS Code (code)"),
@@ -159,6 +174,7 @@ impl Default for AppearanceSettings {
             letter_spacing: 0.0,
             scrollback_lines: 10000,
             terminal_theme: "catppuccin-mocha".to_string(),
+            focus_indicator: "dim".to_string(),
         }
     }
 }

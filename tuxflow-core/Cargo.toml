@@ -19,6 +19,8 @@ glob = "0.3"
 # both shells consume.
 notify = "7"
 notify-debouncer-mini = "0.5"
+# The release check + .deb download (util/update.rs), both shells.
+ureq = { version = "3", features = ["json"] }
 nix = { version = "0.29", features = ["signal", "process"] }
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
 # Diff syntax highlighting for the Git Changes view. Lives here, not in a

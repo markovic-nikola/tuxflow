@@ -5506,7 +5506,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tuxflow-core",
- "ureq",
  "uuid",
  "vte4",
  "x11",
@@ -5530,11 +5529,12 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 0.8.23",
+ "ureq",
 ]
 
 [[package]]
 name = "tuxflow-iced"
-version = "0.1.0"
+version = "0.1.70"
 dependencies = [
  "alacritty_terminal",
  "arboard",

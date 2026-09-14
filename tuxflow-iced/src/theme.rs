@@ -65,6 +65,9 @@ pub const GIT_REMOVED: Color = Color::from_rgb(0.945, 0.298, 0.298);
 /// #d29922 — commits waiting to be pulled. Amber reads as "incoming,
 /// not yours yet" against the green of what you already have.
 pub const GIT_BEHIND: Color = Color::from_rgb(0.824, 0.600, 0.133);
+/// The status bar's update chip — style.css's `.update-label` #cca700.
+/// Semantic like the git colours: not the accent, which the user sets.
+pub const UPDATE_CHIP: Color = Color::from_rgb(0.800, 0.655, 0.0);
 /// #dcdcaa — a modified file's badge in the changes list.
 pub const GIT_MODIFIED: Color = Color::from_rgb(0.863, 0.863, 0.667);
 /// #6c6c6c — an untracked file's badge: present, but not git's business yet.

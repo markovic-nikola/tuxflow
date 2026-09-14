@@ -78,13 +78,6 @@ fn build_form_fields(content: &gtk4::Box) -> FormFields {
     }
 }
 
-fn parse_watch_patterns(text: &str) -> Vec<String> {
-    text.split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 impl AddCommandDialog {
     pub fn show(
         parent: &impl IsA<gtk4::Widget>,
@@ -171,7 +164,9 @@ impl AddCommandDialog {
                 start_with_project: fields.start_with_project_row.is_active(),
                 auto_restart: fields.auto_restart_row.is_active(),
                 open_in_browser: fields.open_in_browser_row.is_active(),
-                restart_when_changed: parse_watch_patterns(&fields.watch_row.text()),
+                restart_when_changed: tuxflow_core::util::watch::parse_patterns(
+                    &fields.watch_row.text(),
+                ),
                 env: std::collections::BTreeMap::new(),
                 category: ProcessCategory::Command,
                 auto_named: false,
@@ -284,7 +279,9 @@ impl AddCommandDialog {
                 start_with_project: fields.start_with_project_row.is_active(),
                 auto_restart: fields.auto_restart_row.is_active(),
                 open_in_browser: fields.open_in_browser_row.is_active(),
-                restart_when_changed: parse_watch_patterns(&fields.watch_row.text()),
+                restart_when_changed: tuxflow_core::util::watch::parse_patterns(
+                    &fields.watch_row.text(),
+                ),
                 env: env.clone(),
                 category: category.clone(),
                 auto_named: false,

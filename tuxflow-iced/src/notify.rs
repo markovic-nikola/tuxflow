@@ -173,6 +173,23 @@ pub fn disconnect(ns: &NotificationSettings, project: &str, process: &str, icon:
     );
 }
 
+/// GTK's `notify_file_watch_restart`: a `restart_when_changed` pattern hit.
+pub fn file_watch_restart(
+    ns: &NotificationSettings,
+    project: &str,
+    process: &str,
+    icon: Option<&Path>,
+) {
+    send(
+        ns,
+        NotificationKind::FileWatchRestart,
+        project,
+        &format!("{process}: file change \u{2192} restart"),
+        icon,
+        None,
+    );
+}
+
 pub fn finish(ns: &NotificationSettings, project: &str, process: &str, icon: Option<&Path>) {
     send(
         ns,

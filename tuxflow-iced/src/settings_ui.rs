@@ -453,7 +453,7 @@ fn page_notifications<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget:
                 ),
                 switch_row(
                     "File Watch Restart",
-                    "GTK shell \u{2014} the file watcher isn't ported yet",
+                    "Notify when a watched file change restarts a process",
                     n.on_file_watch_restart,
                     Msg::NotifyFileWatch,
                 ),

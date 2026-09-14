@@ -5,3 +5,4 @@ pub mod editor;
 pub mod icon_detector;
 pub mod port_detector;
 pub mod sounds;
+pub mod watch;

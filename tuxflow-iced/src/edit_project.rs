@@ -90,10 +90,23 @@ pub enum Msg {
 
 /// The union GTK's `list_toggleable_commands` builds: active processes
 /// (ON), hidden ones resolved from the custom commands or the detection
-/// pool (OFF), then the pool's leftovers as newly detected (OFF). Deduped
-/// by name with active > hidden > new priority; Terminal and SSH
-/// categories are excluded throughout — those are created, not detected,
-/// and a "terminal 2" switch row would read as a way to close one.
+/// pool (OFF), then the pool's leftovers as newly detected (OFF). Terminal
+/// and SSH categories are excluded throughout — those are created, not
+/// detected, and a "terminal 2" switch row would read as a way to close
+/// one.
+///
+/// Identity is the COMMAND LINE, not the name — a deliberate step past
+/// GTK, which dedupes by name. A name is a label the user renames at will;
+/// what a row *is* is what it runs. Two things go wrong by name: a
+/// renamed process (`make deploy` → `deploy`) is offered back under its
+/// old name as if it were hidden, and enabling it would run the same
+/// command twice; and a rename ONTO a detected name (`deploy`, the
+/// package script) makes that script vanish from every group, because
+/// the custom command overrides same-named detection on load and the
+/// form saw one name where there are two processes. Here `deploy`
+/// (`make deploy`) is active and `deploy` (`bun run deploy`) is offered
+/// as Detected — Save gives it a free name (`deploy-2`), since names
+/// still have to be unique in the sidebar and the saved file.
 pub fn toggle_entries(
     active: &[ProcessConfig],
     deleted: &[String],
@@ -102,14 +115,15 @@ pub fn toggle_entries(
 ) -> Vec<ToggleEntry> {
     let excluded =
         |c: &ProcessConfig| matches!(c.category, ProcessCategory::Terminal | ProcessCategory::SSH);
-    let mut seen: Vec<&str> = Vec::new();
-    let mut entries = Vec::new();
+    let mut entries: Vec<ToggleEntry> = Vec::new();
+    let listed = |entries: &[ToggleEntry], c: &ProcessConfig| {
+        entries.iter().any(|e| e.config.command == c.command)
+    };
 
     for config in active {
-        if excluded(config) || seen.contains(&config.name.as_str()) {
+        if excluded(config) || listed(&entries, config) {
             continue;
         }
-        seen.push(&config.name);
         entries.push(ToggleEntry {
             config: config.clone(),
             on: true,
@@ -120,10 +134,9 @@ pub fn toggle_entries(
 
     // A hidden name resolves to a config or it can't be offered back: the
     // user's own copy first (their edit of the process), detection second.
+    // Names are how deletions are RECORDED, so the lookup is by name; what
+    // it resolves to is then judged by command like everything else.
     for name in deleted {
-        if seen.contains(&name.as_str()) {
-            continue;
-        }
         let Some(config) = custom
             .iter()
             .find(|c| &c.name == name)
@@ -131,10 +144,9 @@ pub fn toggle_entries(
         else {
             continue;
         };
-        if excluded(config) {
+        if excluded(config) || listed(&entries, config) {
             continue;
         }
-        seen.push(name);
         entries.push(ToggleEntry {
             config: config.clone(),
             on: false,
@@ -144,10 +156,9 @@ pub fn toggle_entries(
     }
 
     for config in pool {
-        if excluded(config) || seen.contains(&config.name.as_str()) {
+        if excluded(config) || listed(&entries, config) {
             continue;
         }
-        seen.push(&config.name);
         entries.push(ToggleEntry {
             config: config.clone(),
             on: false,
@@ -408,7 +419,7 @@ mod tests {
     }
 
     /// The GTK union: active rows ON, deleted names resolved into Hidden,
-    /// the detection pool's leftovers as Detected — deduped by name with
+    /// the detection pool's leftovers as Detected — deduped by command with
     /// active > hidden > new priority.
     #[test]
     fn union_groups_active_hidden_and_new() {
@@ -420,22 +431,49 @@ mod tests {
         let entries = toggle_entries(&active, &deleted, &custom, &pool);
         assert_eq!(names_by_source(&entries, Source::Active), ["web", "api"]);
         // "api" is deleted-listed but active in the running project — the
-        // active row wins, exactly one row per name.
+        // active row wins, exactly one row per command.
         assert_eq!(names_by_source(&entries, Source::Hidden), ["worker"]);
         assert_eq!(names_by_source(&entries, Source::New), ["lint"]);
         assert!(entries.iter().all(|e| e.on == (e.source == Source::Active)));
     }
 
+    /// Identity is the command line. A rename ONTO a detected name leaves
+    /// two processes under one name: the active custom `deploy` (`make
+    /// deploy`) and the detected `deploy` (`bun run deploy`), which is
+    /// offered as Detected rather than swallowed. A rename AWAY from a
+    /// detected name leaves the old name in the deleted list, but what it
+    /// resolves to is what the renamed row already runs — not hidden.
+    #[test]
+    fn identity_is_the_command_not_the_name() {
+        let mut make_deploy = pc("deploy");
+        make_deploy.command = "make deploy".into();
+        let active = [pc("web"), make_deploy];
+        let deleted = [String::from("make deploy")];
+        let mut make_deploy_detected = pc("make deploy");
+        make_deploy_detected.command = "make deploy".into();
+        let pool = [pc("web"), pc("deploy"), make_deploy_detected];
+
+        let entries = toggle_entries(&active, &deleted, &[], &pool);
+        assert_eq!(names_by_source(&entries, Source::Active), ["web", "deploy"]);
+        assert!(names_by_source(&entries, Source::Hidden).is_empty());
+        assert_eq!(names_by_source(&entries, Source::New), ["deploy"]);
+        let detected = entries.iter().find(|e| e.source == Source::New).unwrap();
+        assert_eq!(detected.config.command, "run deploy");
+    }
+
     /// A hidden name resolves from the user's custom copy FIRST — their
-    /// edit of the process, not detection's idea of it.
+    /// edit of the process, not detection's idea of it. Detection's own
+    /// version runs something else, so it stays on offer as Detected.
     #[test]
     fn hidden_prefers_the_custom_copy() {
         let mut edited = pc("worker");
         edited.command = String::from("bun run worker --queue high");
         let deleted = [String::from("worker")];
         let entries = toggle_entries(&[], &deleted, &[edited], &[pc("worker")]);
-        assert_eq!(entries.len(), 1);
+        assert_eq!(names_by_source(&entries, Source::Hidden), ["worker"]);
         assert_eq!(entries[0].config.command, "bun run worker --queue high");
+        assert_eq!(names_by_source(&entries, Source::New), ["worker"]);
+        assert_eq!(entries[1].config.command, "run worker");
     }
 
     /// A deleted name nothing can resolve (its stack left the project) is

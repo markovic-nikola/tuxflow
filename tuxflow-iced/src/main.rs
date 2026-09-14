@@ -42,6 +42,7 @@ use tuxflow_core::util::agents::{self, resume_command_for};
 use tuxflow_core::util::banner;
 use tuxflow_core::util::icon_detector;
 use tuxflow_core::util::port_detector::{self, PortDetector, remap_url_port, rewrite_clicked_url};
+use tuxflow_core::util::watch::{self, WatchSet};
 
 use keys::{AppAction, AppKeys};
 use processes::{ProcessEntry, Status, plan_after_exit};
@@ -333,6 +334,14 @@ struct ProjectState {
     /// same job, because re-detecting a REMOTE project live would be an ssh
     /// round trip mid-dialog (local projects re-detect live on top of it).
     detected_configs: Vec<ProcessConfig>,
+    /// Everything the load-time detection found BEFORE the conservative
+    /// trim — remote only (a local project re-detects live when the edit
+    /// form opens). The add flow offers this full list, so a process
+    /// deselected there is in `deleted_processes` with no copy anywhere
+    /// else; without this pool Edit Project's Hidden group could not show
+    /// it, and the user's "hidden" list came up shorter than what they
+    /// had deselected.
+    detected_full: Vec<ProcessConfig>,
     /// The card is riding the working-agent sweep. Set when an agent here
     /// starts producing output, cleared only at a pass boundary — see
     /// [`Sweep::tick`].
@@ -393,6 +402,9 @@ struct ProcessForm {
     start_with_project: bool,
     auto_restart: bool,
     open_in_browser: bool,
+    /// Comma-separated `restart_when_changed` globs, as typed; parsed on
+    /// submit by core's `parse_patterns` (GTK's Watch Patterns row).
+    watch: String,
     /// Some((project id, entry index)) when editing an existing process.
     editing: Option<(u64, usize)>,
     original_category: ProcessCategory,
@@ -588,7 +600,12 @@ type ProbeResult = Result<ProbeOk, (String, bool)>;
 #[derive(Debug, Clone)]
 struct ProbeOk {
     name: Option<String>,
+    /// What the project loads with: an authored `tuxflow.toml`'s processes,
+    /// or the CONSERVATIVE detection subset.
     configs: Vec<ProcessConfig>,
+    /// Everything detection found, conservative or not — the pool Edit
+    /// Project resolves the Hidden group from (see `detected_full`).
+    detected_full: Vec<ProcessConfig>,
     live_sessions: Vec<String>,
     /// Icon pulled into `~/.cache/tuxflow/icons/`, when the project had none
     /// saved and the host had one to give.
@@ -678,6 +695,12 @@ enum Event {
     /// Settings → Remote Microphone switched on: one (host, reason) per
     /// bridge that could not be brought up.
     MicBridgeReport(Vec<(String, String)>),
+    /// A debounced batch of paths changed under a local project that has
+    /// `restart_when_changed` patterns (the watcher subscription).
+    FilesChanged {
+        project: u64,
+        paths: Vec<PathBuf>,
+    },
     RetryProbe(u64),
     SelectProcess {
         project: u64,
@@ -886,6 +909,7 @@ enum Event {
     /// Index into `agents::AGENT_PRESETS`.
     AgentPreset(usize),
     FormWorkingDir(String),
+    FormWatch(String),
     FormToggleStartWith(bool),
     FormToggleAutoRestart(bool),
     FormToggleOpenBrowser(bool),
@@ -1058,6 +1082,7 @@ impl App {
             diffstat: tuxflow_core::remote::git::DiffStat::default(),
             icon: None,
             detected_configs: Vec::new(),
+            detected_full: Vec::new(),
             sweeping: false,
             was_running: false,
             clip_seen: 0,
@@ -1296,16 +1321,26 @@ impl App {
             !icon_detector::has_usable_saved_icon(&self.saved, &self.projects[pidx].key());
         Task::perform(
             tokio::task::spawn_blocking(move || {
-                remote::probe::probe_remote(&host, &dir, true)
+                // Full detection, filtered here: the load list stays the
+                // conservative subset, but the whole list is what the
+                // add flow offered, so a process deselected THERE has a
+                // source to resolve from in Edit Project's Hidden group.
+                // Probing conservatively lost exactly those rows.
+                remote::probe::probe_remote(&host, &dir, false)
                     .map(|p| {
                         let name = p.config.as_ref().map(|c| c.project.name.clone());
-                        let configs = match p.config {
-                            Some(c) => c.process,
-                            None => p
-                                .stacks
+                        let flatten = |stacks: Vec<detector::DetectedStack>| -> Vec<ProcessConfig> {
+                            stacks
                                 .into_iter()
                                 .flat_map(|s| s.suggested_processes)
-                                .collect(),
+                                .collect()
+                        };
+                        let mut conservative = p.stacks.clone();
+                        detector::apply_conservative_filter(&mut conservative);
+                        let detected_full = flatten(p.stacks);
+                        let configs = match p.config {
+                            Some(c) => c.process,
+                            None => flatten(conservative),
                         };
                         // Own ssh permit inside: the probe released its own
                         // on return and the fetch opens channels of its own.
@@ -1318,6 +1353,7 @@ impl App {
                         ProbeOk {
                             name,
                             configs,
+                            detected_full,
                             live_sessions: p.live_sessions,
                             icon,
                         }
@@ -1664,6 +1700,7 @@ impl App {
             start_with_project: entry.config.start_with_project,
             auto_restart: entry.config.auto_restart,
             open_in_browser: entry.config.open_in_browser,
+            watch: entry.config.restart_when_changed.join(", "),
             editing: Some((project.id, index)),
             original_category: entry.config.category.clone(),
             error: None,
@@ -2435,18 +2472,21 @@ impl App {
         let key = p.key();
 
         // The pool the Hidden/Detected groups resolve from: the load-time
-        // config list, plus — locally — a LIVE full detection, so commands
-        // added to the project since load appear (GTK's dialog behavior;
-        // its remote fallback to load-time stacks is this same trade).
+        // config list, plus the FULL detection — live for a local project,
+        // so commands added since load appear (GTK's dialog behavior), and
+        // the probe's own full list for a remote one, where a live rerun
+        // would be an ssh round trip mid-form (GTK's staleness trade).
         let mut pool = p.detected_configs.clone();
-        if let ProjectLocation::Local(dir) = &p.location {
-            for config in detector::detect_stacks(dir)
+        let full: Vec<ProcessConfig> = match &p.location {
+            ProjectLocation::Local(dir) => detector::detect_stacks(dir)
                 .into_iter()
                 .flat_map(|s| s.suggested_processes)
-            {
-                if !pool.iter().any(|c| c.name == config.name) {
-                    pool.push(config);
-                }
+                .collect(),
+            ProjectLocation::Ssh { .. } => p.detected_full.clone(),
+        };
+        for config in full {
+            if !pool.iter().any(|c| c.name == config.name) {
+                pool.push(config);
             }
         }
         let active: Vec<ProcessConfig> = p.entries.iter().map(|e| e.config.clone()).collect();
@@ -2766,20 +2806,26 @@ impl App {
         // Enables: unmark the deletion, persist as the custom command that
         // overrides same-named detection on every future load (GTK saves
         // every enable), and join the sidebar STOPPED — enabling is not
-        // starting.
+        // starting. The form lists by COMMAND, so an enabled row may carry
+        // a name the project already uses for something else (the
+        // detected `deploy` script beside a custom `deploy` that runs
+        // `make deploy`); it takes the next free one (`deploy-2`) — names
+        // stay unique, and the row is not silently dropped as it was.
         let default_dir = self.projects[pidx].location.dir_str();
         for mut config in enabled {
-            if self.projects[pidx]
+            let taken: Vec<String> = self.projects[pidx]
                 .entries
                 .iter()
-                .any(|e| e.config.name == config.name)
-            {
-                continue;
+                .map(|e| e.config.name.clone())
+                .collect();
+            let name = agents::unique_agent_name(&taken, &config.name);
+            if name == config.name {
+                self.saved.unmark_process_deleted(&key, &name);
             }
+            config.name = name;
             if config.working_dir.is_none() {
                 config.working_dir = Some(default_dir.clone());
             }
-            self.saved.unmark_process_deleted(&key, &config.name);
             self.saved.add_custom_command(&key, config.clone());
             self.projects[pidx].entries.push(ProcessEntry::new(config));
         }
@@ -3881,6 +3927,7 @@ impl App {
                     Ok(ProbeOk {
                         name,
                         configs,
+                        detected_full,
                         live_sessions,
                         icon,
                     }) => {
@@ -3899,6 +3946,7 @@ impl App {
                             icon,
                         ));
                         self.projects[pidx].detected_configs = configs.clone();
+                        self.projects[pidx].detected_full = detected_full;
                         let merged = processes::merge_saved(configs, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
@@ -3945,6 +3993,59 @@ impl App {
                     notify::mic_bridge_failed(&self.settings.notifications, &host, &reason);
                 }
                 Task::none()
+            }
+            Event::FilesChanged { project, paths } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let ProjectLocation::Local(dir) = &self.projects[pidx].location else {
+                    return Task::none();
+                };
+                let set =
+                    WatchSet::from_configs(self.projects[pidx].entries.iter().map(|e| &e.config));
+                let names: Vec<String> = set
+                    .matches_any(dir, &paths)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let mut tasks = Vec::new();
+                for name in names {
+                    let Some(index) = self.projects[pidx]
+                        .entries
+                        .iter()
+                        .position(|e| e.config.name == name)
+                    else {
+                        continue;
+                    };
+                    // GTK's watcher restarts the process whatever its state,
+                    // a stopped one included. Deliberately narrower here: a
+                    // process the user STOPPED stays stopped — a save must
+                    // not undo an explicit stop — while a crashed one comes
+                    // back (the save is usually the fix), and a running,
+                    // restarting or reconnecting one restarts.
+                    if matches!(self.projects[pidx].entries[index].status, Status::Stopped) {
+                        log::debug!(
+                            "file change matched '{name}', stopped by the user — left alone"
+                        );
+                        continue;
+                    }
+                    log::info!("file change matched '{name}', restarting");
+                    let allowed = self.should_notify(pidx, index);
+                    let ns = &self.settings.notifications;
+                    if ns.on_file_watch_restart && allowed {
+                        notify::file_watch_restart(
+                            ns,
+                            &self.projects[pidx].name,
+                            &name,
+                            self.projects[pidx].icon.as_deref(),
+                        );
+                    }
+                    if self.projects[pidx].entries[index].is_running() {
+                        self.stop(pidx, index);
+                    }
+                    tasks.push(self.start_fresh(pidx, index));
+                }
+                Task::batch(tasks)
             }
             Event::SelectProcess { project, index } => {
                 let Some(pidx) = self.project_index(project) else {
@@ -4944,6 +5045,7 @@ impl App {
                     start_with_project: false,
                     auto_restart: false,
                     open_in_browser: false,
+                    watch: String::new(),
                     editing: None,
                     original_category: if agent {
                         ProcessCategory::Agent
@@ -4972,6 +5074,12 @@ impl App {
             Event::FormWorkingDir(v) => {
                 if let Some(form) = &mut self.add_command {
                     form.working_dir = v;
+                }
+                Task::none()
+            }
+            Event::FormWatch(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.watch = v;
                 }
                 Task::none()
             }
@@ -5112,6 +5220,10 @@ impl App {
                     config.start_with_project = form.start_with_project;
                     config.auto_restart = form.auto_restart;
                     config.open_in_browser = form.open_in_browser;
+                    // A pattern edit needs no respawn: the watcher
+                    // subscription is keyed on the patterns and rebuilds
+                    // itself on the next frame.
+                    config.restart_when_changed = watch::parse_patterns(&form.watch);
                     let key = self.projects[pidx].key();
                     if name_changed {
                         // GTK's mark_process_deleted + save_custom_command:
@@ -5171,7 +5283,7 @@ impl App {
                     start_with_project: form.start_with_project,
                     auto_restart: form.auto_restart,
                     open_in_browser: form.open_in_browser,
-                    restart_when_changed: Vec::new(),
+                    restart_when_changed: watch::parse_patterns(&form.watch),
                     env: Default::default(),
                     category: if form.agent {
                         ProcessCategory::Agent
@@ -6823,38 +6935,41 @@ impl App {
             .map(|p| accent_for(p.location.is_remote()))
             .unwrap_or(LOCAL_ACCENT);
         let editing = form.editing.is_some();
-        let title = match (editing, form.agent) {
-            (true, _) => "Edit Process",
-            (false, true) => "Add Agent",
-            (false, false) => "Add Command",
+        // The category rides the TITLE while editing — it is the one thing
+        // the form cannot change. It used to sit as a bare "Command" label
+        // beside the Name field, where it read as that field's caption:
+        // a Makefile target is detected with its name EQUAL to its command,
+        // so both inputs showed "make deploy" and the only word in sight
+        // said the first one was the command. A rename typed into the
+        // second field then rewrote the command and left the name alone.
+        let title = match (editing, form.agent, &form.original_category) {
+            (true, _, ProcessCategory::Agent) => "Edit Agent",
+            (true, _, ProcessCategory::Terminal) => "Edit Terminal",
+            (true, _, ProcessCategory::SSH) => "Edit SSH Connection",
+            (true, _, ProcessCategory::Command) => "Edit Command",
+            (false, true, _) => "Add Agent",
+            (false, false, _) => "Add Command",
+        };
+        // GTK's EntryRows carry their titles ("Name", "Command") inside the
+        // field; iced's text_input has only a placeholder, which vanishes
+        // the moment the field holds a value — on the edit form, always.
+        let caption =
+            |label: &'static str| text(label).size(11.5).font(bold()).color(TEXT_SECONDARY);
+        let labeled = |label: &'static str, input: Element<'a, Event>| -> Element<'a, Event> {
+            column![caption(label), input].spacing(6).into()
         };
 
         // GTK's edit dialog is the add form pre-filled, Name row included
-        // — a rename is an edit like any other. Editing adds the category
-        // beside it, since that is the one thing the form cannot change.
-        let name_input = text_input("Name \u{2014} e.g. web", &form.name)
-            .on_input(Event::AddCommandName)
-            .style(theme::input(accent))
-            .padding([8, 14])
-            .size(13);
-        let name_row: Element<'_, Event> = if editing {
-            row![
-                name_input,
-                text(match form.original_category {
-                    ProcessCategory::Agent => "Agent",
-                    ProcessCategory::Command => "Command",
-                    ProcessCategory::Terminal => "Terminal",
-                    ProcessCategory::SSH => "SSH",
-                })
-                .size(11)
-                .color(DIM),
-            ]
-            .spacing(10)
-            .align_y(iced::Alignment::Center)
-            .into()
-        } else {
-            name_input.into()
-        };
+        // — a rename is an edit like any other.
+        let name_row = labeled(
+            "Name",
+            text_input("e.g. web", &form.name)
+                .on_input(Event::AddCommandName)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into(),
+        );
 
         let mut col = column![text(title).size(16).font(bold())].spacing(14);
 
@@ -6884,7 +6999,7 @@ impl App {
             }
             col = col.push(
                 column![
-                    text("Agent").size(11.5).font(bold()).color(TEXT_SECONDARY),
+                    caption("Agent"),
                     container(list)
                         .padding([4, 0])
                         .style(theme::settings_card)
@@ -6894,11 +7009,12 @@ impl App {
             );
         }
 
-        col = col.push(name_row).push(
+        col = col.push(name_row).push(labeled(
+            "Command",
             text_input(
                 match form.agent {
-                    true => "Command \u{2014} e.g. claude --model opus",
-                    false => "Command \u{2014} e.g. npm run dev",
+                    true => "e.g. claude --model opus",
+                    false => "e.g. npm run dev",
                 },
                 &form.command,
             )
@@ -6906,18 +7022,18 @@ impl App {
             .on_submit(Event::AddCommandSubmit)
             .style(theme::input(accent))
             .padding([8, 14])
-            .size(13),
-        );
-        col = col.push(
-            text_input(
-                "Working directory \u{2014} optional, defaults to the project",
-                &form.working_dir,
-            )
-            .on_input(Event::FormWorkingDir)
-            .style(theme::input(accent))
-            .padding([8, 14])
-            .size(13),
-        );
+            .size(13)
+            .into(),
+        ));
+        col = col.push(labeled(
+            "Working directory",
+            text_input("Optional, defaults to the project", &form.working_dir)
+                .on_input(Event::FormWorkingDir)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into(),
+        ));
         col = col
             .push(
                 iced::widget::checkbox(form.start_with_project)
@@ -6944,6 +7060,22 @@ impl App {
                     .size(16)
                     .text_size(12.5),
             );
+            // GTK's "Watch Patterns" row. Agents are left out like the
+            // browser flag: a file save killing an agent's session is
+            // never what anyone wants, and GTK's agent flow has no
+            // options at all.
+            col = col.push(labeled(
+                "Watch patterns",
+                text_input(
+                    "Comma-separated globs that restart it, e.g. src/**/*.rs, config/*.toml",
+                    &form.watch,
+                )
+                .on_input(Event::FormWatch)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into(),
+            ));
         }
         if let Some(error) = &form.error {
             col = col.push(text(error).size(12).color(CRASHED));
@@ -7673,8 +7805,29 @@ impl App {
             .filter_map(|e| e.terminal.as_ref())
             .map(|t| t.subscription())
             .collect();
+        // One recursive directory watch per LOCAL project with patterns.
+        // Keyed on the project id AND the pattern set, so an edit that adds
+        // or removes a pattern rebuilds the watch on the next frame and a
+        // project with none has no watcher at all (GTK's "No file watch
+        // patterns configured"). Remote projects never qualify: their
+        // files live on the host.
+        let watchers: Vec<_> = self
+            .projects
+            .iter()
+            .filter(|p| matches!(p.phase, Phase::Ready))
+            .filter_map(|p| match &p.location {
+                ProjectLocation::Local(dir) => Some((p, dir)),
+                ProjectLocation::Ssh { .. } => None,
+            })
+            .filter_map(|(p, dir)| {
+                let set = WatchSet::from_configs(p.entries.iter().map(|e| &e.config));
+                (!set.is_empty())
+                    .then(|| file_watch_subscription(p.id, dir.clone(), set.signature()))
+            })
+            .collect();
         Subscription::batch([
             Subscription::batch(subs).map(Event::Terminal),
+            Subscription::batch(watchers),
             // Ignored-status keys only — anything a focused widget consumed
             // never reaches the hotkeys.
             iced::keyboard::listen().map(Event::Hotkey),
@@ -8048,6 +8201,33 @@ fn changes_chip_parts(
         parts.push((format!("{files} {noun}"), TEXT_SECONDARY));
     }
     Some(parts)
+}
+
+/// The watcher stream for one local project: core's debounced recursive
+/// watch (`watch::start`) reporting every batch as `FilesChanged`. The
+/// pattern signature is part of the key only — matching happens in the
+/// handler against the LIVE entries, so a rename lands without a rebuild.
+/// The watcher lives inside the pending future: when iced drops the
+/// subscription (project closed, patterns changed) the future is
+/// cancelled and the watcher thread with it.
+fn file_watch_subscription(
+    project: u64,
+    dir: PathBuf,
+    signature: Vec<(String, Vec<String>)>,
+) -> Subscription<Event> {
+    Subscription::run_with((project, dir, signature), |(project, dir, _)| {
+        let project = *project;
+        let dir = dir.clone();
+        iced::stream::channel(16, async move |tx| {
+            let _watcher = watch::start(&dir, move |paths| {
+                let mut tx = tx.clone();
+                if tx.try_send(Event::FilesChanged { project, paths }).is_err() {
+                    log::warn!("file watcher: change report dropped (channel full)");
+                }
+            });
+            std::future::pending::<()>().await;
+        })
+    })
 }
 
 #[cfg(test)]

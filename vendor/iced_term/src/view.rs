@@ -23,13 +23,43 @@ use iced_graphics::core::widget::{tree, Tree};
 use iced_graphics::core::Widget;
 use iced_graphics::geometry::Stroke;
 
+/// A pane-level focus indicator the widget paints over its own bounds,
+/// from the same focus flag that decides the cursor's shape. Agent TUIs
+/// hide the terminal cursor and draw their own input box, so the cursor
+/// alone cannot say whether keys go to this pane — the mark can.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusMark {
+    pub color: iced::Color,
+    pub style: FocusMarkStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FocusMarkStyle {
+    /// A hairline along the top edge while focused.
+    TopLine(f32),
+    /// A hairline along the left edge while focused.
+    LeftLine(f32),
+    /// A ring around the pane while focused.
+    Ring(f32),
+    /// A wash of `color` over the pane while UNfocused (dim inactive).
+    Dim,
+}
+
 pub struct TerminalView<'a> {
     term: &'a Terminal,
+    focus_mark: Option<FocusMark>,
 }
 
 impl<'a> TerminalView<'a> {
     pub fn show(term: &'a Terminal) -> Element<'a, Event> {
-        container(Self { term })
+        Self::show_marked(term, None)
+    }
+
+    pub fn show_marked(
+        term: &'a Terminal,
+        focus_mark: Option<FocusMark>,
+    ) -> Element<'a, Event> {
+        container(Self { term, focus_mark })
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| term.theme.container_style())
@@ -658,6 +688,14 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
     ) {
         let draw_started = std::time::Instant::now();
         let state = tree.state.downcast_ref::<TerminalViewState>();
+        // Hollow cursor when the terminal is not where keys go — VTE's
+        // rule, on both edges: widget focus lost to another field or a
+        // modal, or the whole window deactivated.
+        let cursor_focused = state.focus && state.window_focused;
+        if state.cursor_drawn_focused.get() != Some(cursor_focused) {
+            self.term.cache.clear();
+            state.cursor_drawn_focused.set(Some(cursor_focused));
+        }
         let content = self.term.backend.renderable_content();
         let term_size = content.terminal_size;
         let cell_width = term_size.cell_width;
@@ -810,9 +848,29 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                     {
                         let cursor_color =
                             self.term.theme.get_color(content.cursor.fg);
-                        let cursor_rect =
-                            Path::rectangle(Point::new(x, y), cell_size);
-                        frame.fill(&cursor_rect, cursor_color);
+                        if cursor_focused {
+                            let cursor_rect =
+                                Path::rectangle(Point::new(x, y), cell_size);
+                            frame.fill(&cursor_rect, cursor_color);
+                        } else {
+                            // One-pixel outline inset by half a pixel so
+                            // the stroke lands on whole pixels and stays
+                            // inside the cell.
+                            let inset = HOLLOW_CURSOR_STROKE * 0.5;
+                            let outline = Path::rectangle(
+                                Point::new(x + inset, y + inset),
+                                Size::new(
+                                    cell_size.width - HOLLOW_CURSOR_STROKE,
+                                    cell_size.height - HOLLOW_CURSOR_STROKE,
+                                ),
+                            );
+                            frame.stroke(
+                                &outline,
+                                Stroke::default()
+                                    .with_width(HOLLOW_CURSOR_STROKE)
+                                    .with_color(cursor_color),
+                            );
+                        }
                     }
 
                     // Draw text: contiguous same-style ASCII cells
@@ -824,7 +882,10 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                     // a Left-aligned run lands every glyph on its cell.
                     let is_cursor_cell = content.cursor_point == indexed.point;
                     if indexed.c != ' ' && indexed.c != '\t' {
+                        // Inverted glyph only over a FILLED block; a
+                        // hollow cursor keeps the cell's own ink.
                         if is_cursor_cell
+                            && cursor_focused
                             && content
                                 .terminal_mode
                                 .contains(TermMode::APP_CURSOR)
@@ -937,6 +998,50 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
         use iced::advanced::graphics::geometry::Renderer as _;
         renderer.draw_geometry(geom);
 
+        if let Some(mark) = self.focus_mark {
+            use iced_core::renderer::{Quad, Renderer as _};
+            let quad = |b: Rectangle| Quad {
+                bounds: b,
+                border: iced_core::Border::default(),
+                shadow: iced_core::Shadow::default(),
+                snap: true,
+            };
+            let paint = |renderer: &mut iced::Renderer, b: Rectangle| {
+                renderer.fill_quad(quad(b), mark.color);
+            };
+            match (mark.style, cursor_focused) {
+                (FocusMarkStyle::TopLine(w), true) => {
+                    paint(
+                        renderer,
+                        Rectangle {
+                            height: w,
+                            ..bounds
+                        },
+                    );
+                },
+                (FocusMarkStyle::LeftLine(w), true) => {
+                    paint(renderer, Rectangle { width: w, ..bounds });
+                },
+                (FocusMarkStyle::Ring(w), true) => {
+                    renderer.fill_quad(
+                        Quad {
+                            bounds,
+                            border: iced_core::Border {
+                                color: mark.color,
+                                width: w,
+                                radius: 0.0.into(),
+                            },
+                            shadow: iced_core::Shadow::default(),
+                            snap: true,
+                        },
+                        iced::Color::TRANSPARENT,
+                    );
+                },
+                (FocusMarkStyle::Dim, false) => paint(renderer, bounds),
+                _ => {},
+            }
+        }
+
         let dt = draw_started.elapsed();
         if dt.as_millis() > 20 {
             eprintln!(
@@ -964,6 +1069,15 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
 
         let is_cursor_in_layout = self.is_cursor_in_layout(cursor, layout);
         self.handle_focus(event, state, is_cursor_in_layout);
+        match event {
+            iced::Event::Window(iced_core::window::Event::Focused) => {
+                state.window_focused = true;
+            },
+            iced::Event::Window(iced_core::window::Event::Unfocused) => {
+                state.window_focused = false;
+            },
+            _ => {},
+        }
 
         // A drag that leaves the widget must still see its release —
         // otherwise the drag state sticks and a selection finished outside
@@ -1041,9 +1155,22 @@ impl<'a> From<TerminalView<'a>> for Element<'a, Event, Theme, iced::Renderer> {
     }
 }
 
+/// Stroke of the unfocused cursor's outline, in pixels.
+const HOLLOW_CURSOR_STROKE: f32 = 1.0;
+
 #[derive(Debug, Clone)]
 struct TerminalViewState {
     focus: bool,
+    /// The WINDOW has keyboard focus, from the window Focused/Unfocused
+    /// events. Starts true: winit reports the first focus-in after the
+    /// map, and a fresh launch must not open with a hollow cursor.
+    window_focused: bool,
+    /// The focus the cursor was last painted with. The grid geometry is
+    /// cached and cleared only on a backend sync, but a focus change
+    /// touches no backend state — `draw` compares against this and drops
+    /// the cache itself, which also covers `operation::focus`/`unfocus`,
+    /// the path that never passes through `update`.
+    cursor_drawn_focused: std::cell::Cell<Option<bool>>,
     is_dragged: bool,
     drag_is_mouse_report: bool,
     last_click: Option<mouse::Click>,
@@ -1069,6 +1196,8 @@ impl TerminalViewState {
     fn new() -> Self {
         Self {
             focus: false,
+            window_focused: true,
+            cursor_drawn_focused: std::cell::Cell::new(None),
             is_dragged: false,
             drag_is_mouse_report: false,
             last_click: None,

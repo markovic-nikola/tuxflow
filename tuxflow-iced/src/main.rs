@@ -6704,11 +6704,24 @@ impl App {
             // Flush, like VTE in the GTK shell — padding here frames any
             // program that repaints its own background (the grid carries
             // the color, the padding keeps the pane's) in a visible band.
-            Some(term) => container(TerminalView::show(term).map(Event::Terminal))
-                .style(theme::terminal_pane(
-                    &self.settings.appearance.terminal_theme,
-                ))
-                .into(),
+            // The widget marks its own focus state (dim, a line, a ring —
+            // Settings → Appearance) — the cursor can't say so under an
+            // agent TUI, which hides it. See `theme::focus_mark`.
+            Some(term) => container(
+                TerminalView::show_marked(
+                    term,
+                    theme::focus_mark(
+                        &self.settings.appearance.focus_indicator,
+                        accent,
+                        &self.settings.appearance.terminal_theme,
+                    ),
+                )
+                .map(Event::Terminal),
+            )
+            .style(theme::terminal_pane(
+                &self.settings.appearance.terminal_theme,
+            ))
+            .into(),
             // Only before a process's FIRST run: from then on its terminal
             // stays for good, showing what the last run printed — and its
             // exit banner, which is where the status is spelled out.
@@ -7322,6 +7335,15 @@ impl App {
             Msg::AccentRemote(label) => {
                 self.settings.appearance.remote_accent_color = accent_name_for_label(label);
                 self.apply_accents();
+            }
+            Msg::FocusIndicator(label) => {
+                // Read by the view each frame — nothing to broadcast.
+                if let Some((name, _)) = tuxflow_core::config::settings::FOCUS_INDICATOR_CHOICES
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                {
+                    self.settings.appearance.focus_indicator = name.to_string();
+                }
             }
             Msg::TermTheme(label) => {
                 let idx = tuxflow_core::config::palette::theme_choices()

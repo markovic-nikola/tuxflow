@@ -15,7 +15,9 @@ use iced::widget::{button, column, container, pick_list, row, scrollable, text, 
 use iced::{Element, Length};
 use tuxflow_core::config::keybindings::{ShortcutAction, action_metadata};
 use tuxflow_core::config::palette;
-use tuxflow_core::config::settings::{AppSettings, EDITOR_CHOICES, TERMINAL_CHOICES};
+use tuxflow_core::config::settings::{
+    AppSettings, EDITOR_CHOICES, FOCUS_INDICATOR_CHOICES, TERMINAL_CHOICES,
+};
 use tuxflow_core::mcp::setup;
 use tuxflow_core::util::sounds::BUNDLED_SOUNDS;
 
@@ -85,6 +87,7 @@ pub enum Msg {
     AccentLocal(&'static str),
     AccentRemote(&'static str),
     TermTheme(&'static str),
+    FocusIndicator(&'static str),
     FontFamilyDraft(String),
     FontFamilyApply,
     FontSize(u32),
@@ -248,6 +251,13 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
                     palette::theme_choices(),
                     palette::terminal_theme(&a.terminal_theme).label,
                     Msg::TermTheme,
+                ),
+                pick_row(
+                    "Focus Indicator",
+                    "How the terminal shows that typing goes elsewhere \u{2014} agent UIs hide the cursor",
+                    FOCUS_INDICATOR_CHOICES.iter().map(|(_, l)| *l).collect(),
+                    choice_label(FOCUS_INDICATOR_CHOICES, &a.focus_indicator),
+                    Msg::FocusIndicator,
                 ),
                 row_base(
                     "Font Family",
@@ -546,13 +556,6 @@ fn page_hotkeys<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Colum
 
 fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
     let t = &s.tools;
-    let choice_label = |choices: &'static [(&'static str, &'static str)], cmd: &str| {
-        choices
-            .iter()
-            .find(|(c, _)| *c == cmd)
-            .map(|(_, l)| *l)
-            .unwrap_or(choices[0].1)
-    };
     column![
         group(
             "Agents",
@@ -661,6 +664,16 @@ fn page_about<'a>() -> iced::widget::Column<'a, Msg> {
         ],
     )]
     .spacing(20)
+}
+
+/// Label for a `(name, label)` choice table entry; the first entry stands
+/// in for an unknown name (a hand-edited settings file).
+fn choice_label(choices: &'static [(&'static str, &'static str)], name: &str) -> &'static str {
+    choices
+        .iter()
+        .find(|(c, _)| *c == name)
+        .map(|(_, l)| *l)
+        .unwrap_or(choices[0].1)
 }
 
 // ── Row builders ────────────────────────────────────────────────────────

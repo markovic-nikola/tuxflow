@@ -378,3 +378,35 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     this path. Off (the default, and every local terminal) nothing changes.
     The diverted events are captured like any key the widget handles, so
     no app chord sees a phantom Space.
+23. **Hollow cursor when the terminal is not where keys go** — VTE's rule,
+    ported: the cursor is a filled block only while the widget has focus
+    AND the window is active; otherwise a one-pixel outline in the cursor
+    colour (`HOLLOW_CURSOR_STROKE`), with the cell's own glyph in its
+    normal ink rather than the inverted one a filled block gets. Upstream
+    painted the filled block unconditionally, so nothing told the user
+    whether typing would land in the terminal, the composer under it, a
+    filter field, or nowhere (a modal up). Both edges live in the widget:
+    `TerminalViewState.window_focused` follows the window
+    Focused/Unfocused events (starts true — a fresh launch must not open
+    hollow), and widget focus is the existing `focus` flag, whichever
+    path set it. The part that would otherwise ship silently broken is
+    the CACHE: the grid geometry is cached and cleared only on a backend
+    sync, and a focus change touches no backend state, so the stale
+    cursor would persist until the next byte arrived. `draw` compares the
+    focus it is about to paint with `cursor_drawn_focused` (a `Cell`,
+    since `draw` holds the state immutably) and clears the cache itself
+    on a change — which also covers `operation::focus`/`unfocus`, the
+    path that never passes through `update`.
+24. **`FocusMark`: a pane-level focus indicator painted by the widget**
+    (`TerminalView::show_marked`). Patch 23's hollow cursor is invisible
+    in the panes that matter most: agent TUIs (Claude Code and the rest)
+    hide the terminal cursor and draw their own input box, so nothing in
+    the grid can say whether keys go to this pane, the composer under it,
+    a filter field, or nowhere. The mark is drawn AFTER the cached grid
+    geometry as immediate quads from the same `cursor_focused` flag, so it
+    tracks widget focus and window focus alike and never touches the
+    cache or the layout (no resize, no SIGWINCH on a focus change).
+    Styles: `TopLine`/`LeftLine`/`Ring` while focused, `Dim` (a wash of
+    the given colour) while UNfocused — the embedder ships `Dim`, chosen
+    off a live bench of all four; the others stay because the next
+    design round is a one-word change, not a patch.

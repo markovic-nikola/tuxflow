@@ -2,8 +2,8 @@ use adw::prelude::*;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-use crate::config::schema::{ProcessCategory, ProcessConfig};
-use crate::config::ssh::{SshHost, parse_ssh_config};
+use crate::config::schema::ProcessConfig;
+use crate::config::ssh::{SshConnectionFields, parse_ssh_config};
 
 pub struct AddSshDialog;
 
@@ -136,20 +136,16 @@ impl AddSshDialog {
         let ssh_hosts_ref = ssh_hosts.clone();
         host_picker_row.connect_selected_notify(move |picker| {
             let idx = picker.selected() as usize;
-            if idx == 0 {
+            let fields = match idx.checked_sub(1).and_then(|i| ssh_hosts_ref.get(i)) {
                 // Custom — clear fields
-                name_row_ref.set_text("");
-                host_row_ref.set_text("");
-                user_row_ref.set_text("");
-                port_row_ref.set_text("22");
-                identity_row_ref.set_text("");
-            } else if let Some(ssh_host) = ssh_hosts_ref.get(idx - 1) {
-                name_row_ref.set_text(&ssh_host.name);
-                host_row_ref.set_text(ssh_host.hostname.as_deref().unwrap_or(&ssh_host.name));
-                user_row_ref.set_text(ssh_host.user.as_deref().unwrap_or(""));
-                port_row_ref.set_text(&ssh_host.port.unwrap_or(22).to_string());
-                identity_row_ref.set_text(ssh_host.identity_file.as_deref().unwrap_or(""));
-            }
+                None => SshConnectionFields::default(),
+                Some(ssh_host) => SshConnectionFields::from_host(ssh_host),
+            };
+            name_row_ref.set_text(&fields.name);
+            host_row_ref.set_text(&fields.host);
+            user_row_ref.set_text(&fields.user);
+            port_row_ref.set_text(&fields.port);
+            identity_row_ref.set_text(&fields.identity_file);
         });
 
         toolbar_view.set_content(Some(&content));
@@ -163,39 +159,13 @@ impl AddSshDialog {
         let dialog_ref = dialog.clone();
         let names = project_names.to_vec();
         add_btn.connect_clicked(move |_| {
-            let host = host_row.text().to_string().trim().to_string();
-            if host.is_empty() {
-                return;
-            }
-
-            let display_name = name_row.text().to_string().trim().to_string();
-            let user = user_row.text().to_string().trim().to_string();
-            let port: u16 = port_row.text().to_string().trim().parse().unwrap_or(22);
-            let identity = identity_row.text().to_string().trim().to_string();
-
-            // Build the ssh command
-            let ssh_host = SshHost {
-                name: host.clone(),
-                hostname: Some(host.clone()),
-                user: if user.is_empty() {
-                    None
-                } else {
-                    Some(user.clone())
-                },
-                port: if port == 22 { None } else { Some(port) },
-                identity_file: if identity.is_empty() {
-                    None
-                } else {
-                    Some(identity)
-                },
+            let fields = SshConnectionFields {
+                name: name_row.text().to_string(),
+                host: host_row.text().to_string(),
+                user: user_row.text().to_string(),
+                port: port_row.text().to_string(),
+                identity_file: identity_row.text().to_string(),
             };
-            let command = ssh_host.to_ssh_command();
-
-            let selected_project = names
-                .get(project_row.selected() as usize)
-                .cloned()
-                .unwrap_or_default();
-
             let conn_name = format!(
                 "ssh-{}",
                 uuid::Uuid::new_v4()
@@ -204,29 +174,22 @@ impl AddSshDialog {
                     .next()
                     .unwrap_or("0")
             );
-
-            // Use user-provided name, fall back to user@host or just host
-            let display = if !display_name.is_empty() {
-                display_name
-            } else if user.is_empty() {
-                host.clone()
-            } else {
-                format!("{user}@{host}")
+            // Shared with the iced form (core's `SshConnectionFields`):
+            // the command, the `user@host` label fallback and the port
+            // rule live once. None = empty host, which the button's
+            // sensitivity already refuses.
+            let Some(config) = fields.to_process_config(
+                conn_name,
+                auto_connect_row.is_active(),
+                auto_reconnect_row.is_active(),
+            ) else {
+                return;
             };
 
-            let config = ProcessConfig {
-                name: conn_name,
-                command,
-                working_dir: None,
-                start_with_project: auto_connect_row.is_active(),
-                auto_restart: auto_reconnect_row.is_active(),
-                open_in_browser: false,
-                restart_when_changed: Vec::new(),
-                env: std::collections::BTreeMap::new(),
-                category: ProcessCategory::SSH,
-                auto_named: false,
-                display_name: Some(display),
-            };
+            let selected_project = names
+                .get(project_row.selected() as usize)
+                .cloned()
+                .unwrap_or_default();
 
             on_add(&selected_project, config);
             dialog_ref.close();

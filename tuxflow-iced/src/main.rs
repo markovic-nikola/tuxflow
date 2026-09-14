@@ -8,6 +8,7 @@
 //! run as inline forms; closing a project detaches its remote sessions.
 
 mod add_project;
+mod add_ssh;
 mod dnd;
 mod edit_project;
 mod git_view;
@@ -53,6 +54,7 @@ use theme::{
     TEXT_SECONDARY, UPDATE_CHIP, accent_for,
 };
 use tuxflow_core::config::settings::AppSettings;
+use widgets::form_card;
 
 /// Ports-poll cadence: fast while a run is settling (a new forward just
 /// opened), backed off once nothing new appears (GTK behavior).
@@ -539,6 +541,8 @@ struct App {
     palette_scroll: iced::widget::Id,
     add_project: Option<add_project::State>,
     add_command: Option<ProcessForm>,
+    /// The Add SSH Connection form; `Some` = the main pane shows it.
+    add_ssh: Option<add_ssh::State>,
     /// Edit Project form; `Some` = the main pane shows it. Mutually
     /// exclusive with the two add forms, like the GTK dialogs they port.
     edit_project: Option<edit_project::State>,
@@ -670,6 +674,7 @@ enum PaletteAction {
     NewCustomAgent,
     NewCommand,
     NewTerminal,
+    NewSsh,
     NewProject(add_project::Kind),
     /// Every project's running processes, not the active card's.
     StopAll,
@@ -958,6 +963,10 @@ enum Event {
         agent: bool,
     },
     OpenEditProcess,
+    /// GTK's "New SSH connection" — the form is raised on a project like
+    /// the other creators, so it names one.
+    OpenAddSsh(u64),
+    AddSshMsg(add_ssh::Msg),
     AddCommandName(String),
     AddCommandCommand(String),
     /// Index into `agents::AGENT_PRESETS`.
@@ -1045,6 +1054,7 @@ impl App {
             palette_scroll: iced::widget::Id::unique(),
             add_project: None,
             add_command: None,
+            add_ssh: None,
             edit_project: None,
             window_size: Size {
                 width: settings.window.width.max(1) as f32,
@@ -1090,6 +1100,11 @@ impl App {
         }
         if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("settings") {
             tasks.push(Task::done(Event::OpenSettings));
+        }
+        if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("ssh")
+            && let Some(id) = app.projects.first().map(|p| p.id)
+        {
+            tasks.push(Task::done(Event::OpenAddSsh(id)));
         }
         // Placement correction after the WM settles (see RestoreSettle).
         if app.settings.window.x.is_some() && !app.settings.window.maximized {
@@ -1322,6 +1337,7 @@ impl App {
         self.settings_ui.is_some()
             || self.git_ui.is_some()
             || self.add_command.is_some()
+            || self.add_ssh.is_some()
             || self.add_project.is_some()
             || self.edit_project.is_some()
     }
@@ -1778,6 +1794,83 @@ impl App {
         self.projects[pidx].entries.push(ProcessEntry::new(config));
         let index = self.projects[pidx].entries.len() - 1;
         self.start(pidx, index)
+    }
+
+    /// Raise the Add SSH Connection form on `project`. Submit adds to the
+    /// ACTIVE project (as the command form does), so raising it on another
+    /// card switches there first.
+    fn open_add_ssh(&mut self, project: u64) -> Task<Event> {
+        let Some(pidx) = self.project_index(project) else {
+            return Task::none();
+        };
+        let switched = self.active != pidx;
+        self.active = pidx;
+        self.add_ssh = Some(add_ssh::State::new(project, ssh::parse_ssh_config()));
+        // Mutually exclusive with the other form panes.
+        self.add_command = None;
+        self.add_project = None;
+        self.edit_project = None;
+        if switched {
+            self.poll_git_fetch()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// GTK's add handler for the SSH dialog: persist as a custom command,
+    /// add the row (a plain `ssh` process on THIS machine, whatever the
+    /// project's location — `spawn_settings` never wraps the SSH category
+    /// in the remote tmux path), select it, and connect only when
+    /// Auto-connect is on. The name is the identifier the saved file keys
+    /// on — `ssh`, `ssh-2`, … like the agent names rather than GTK's uuid
+    /// suffix — while the sidebar shows `display_name`.
+    fn update_add_ssh(&mut self, msg: add_ssh::Msg) -> Task<Event> {
+        match msg {
+            add_ssh::Msg::Cancel => {
+                self.add_ssh = None;
+                self.focus_selected_terminal()
+            }
+            add_ssh::Msg::Submit => {
+                let Some(mut form) = self.add_ssh.take() else {
+                    return Task::none();
+                };
+                let Some(pidx) = self.project_index(form.project) else {
+                    return Task::none();
+                };
+                let taken: Vec<String> = self.projects[pidx]
+                    .entries
+                    .iter()
+                    .map(|e| e.config.name.clone())
+                    .collect();
+                let name = agents::unique_agent_name(&taken, "ssh");
+                let Some(config) =
+                    form.fields
+                        .to_process_config(name, form.auto_connect, form.auto_reconnect)
+                else {
+                    // Refuse, but KEEP the form with the reason on it.
+                    form.error = Some(String::from("A host is required."));
+                    self.add_ssh = Some(form);
+                    return Task::none();
+                };
+                let key = self.projects[pidx].key();
+                self.saved.add_custom_command(&key, config.clone());
+                let auto_connect = config.start_with_project;
+                self.projects[pidx].entries.push(ProcessEntry::new(config));
+                let index = self.projects[pidx].entries.len() - 1;
+                if auto_connect {
+                    self.start_fresh(pidx, index)
+                } else {
+                    self.projects[pidx].selected = index;
+                    Task::none()
+                }
+            }
+            other => {
+                if let Some(form) = &mut self.add_ssh {
+                    form.edit(&other);
+                }
+                Task::none()
+            }
+        }
     }
 
     fn open_edit_form(&mut self, pidx: usize, index: usize) {
@@ -2618,6 +2711,7 @@ impl App {
             error: None,
         });
         self.add_command = None;
+        self.add_ssh = None;
         self.add_project = None;
         // Symmetric with OpenSettings: a hidden Git view would keep its
         // 2 s (possibly ssh) poll running blind underneath.
@@ -3675,6 +3769,9 @@ impl App {
                     (PaletteAction::NewTerminal, Some(project)) => {
                         self.update(Event::AddTerminal(project))
                     }
+                    (PaletteAction::NewSsh, Some(project)) => {
+                        self.update(Event::OpenAddSsh(project))
+                    }
                     (PaletteAction::NewProject(kind), _) => {
                         let open = self.update(Event::OpenAddProject);
                         let pick = self.update(Event::AddProjectMsg(add_project::Msg::Pick(kind)));
@@ -3725,9 +3822,7 @@ impl App {
     /// one agent row per preset, then custom agent, command, terminal, the
     /// two project kinds — Stop/Restart all, NAVIGATION (a "Switch to"
     /// row per process, sidebar order), GO TO (one per project). The rows
-    /// that add to or act on a project are left out while none is open;
-    /// GTK's "New SSH connection" is not ported (this shell has no add-SSH
-    /// form yet).
+    /// that add to or act on a project are left out while none is open.
     fn palette_rows(&self) -> Vec<PaletteRow> {
         let action = |category: &'static str, label: &str, action: PaletteAction| PaletteRow {
             category,
@@ -3755,6 +3850,7 @@ impl App {
                 "New terminal tab",
                 PaletteAction::NewTerminal,
             ));
+            rows.push(action("SSH", "New SSH connection", PaletteAction::NewSsh));
         }
         rows.push(action(
             "PROJECT",
@@ -5011,6 +5107,10 @@ impl App {
                         self.add_command = None;
                         return self.focus_selected_terminal();
                     }
+                    if self.add_ssh.is_some() {
+                        self.add_ssh = None;
+                        return self.focus_selected_terminal();
+                    }
                     if self.edit_project.is_some() {
                         self.edit_project = None;
                         return self.focus_selected_terminal();
@@ -5247,6 +5347,7 @@ impl App {
                     self.add_form_epoch,
                 ));
                 self.add_command = None;
+                self.add_ssh = None;
                 self.edit_project = None;
                 Task::none()
             }
@@ -5281,6 +5382,7 @@ impl App {
                 // Mutually exclusive with the other form panes (see
                 // `open_edit_form`).
                 self.add_project = None;
+                self.add_ssh = None;
                 self.edit_project = None;
                 if switched {
                     self.poll_git_fetch()
@@ -5374,6 +5476,8 @@ impl App {
                 self.add_command = None;
                 Task::none()
             }
+            Event::OpenAddSsh(project) => self.open_add_ssh(project),
+            Event::AddSshMsg(msg) => self.update_add_ssh(msg),
             Event::OpenEditProject(project) => self.open_edit_project(project),
             Event::EditProjectMsg(msg) => self.update_edit_project(msg),
             Event::AddCommandSubmit => {
@@ -5757,6 +5861,11 @@ impl App {
                             project: project.id,
                             agent: true,
                         },
+                        false,
+                    )));
+                    items.push(Some((
+                        "New SSH Connection",
+                        Event::OpenAddSsh(project.id),
                         false,
                     )));
                     items.push(Some((
@@ -7057,6 +7166,13 @@ impl App {
         if let Some(form) = &self.add_command {
             return self.view_add_command(form);
         }
+        if let Some(state) = &self.add_ssh {
+            let accent = self
+                .active_project()
+                .map(|p| accent_for(p.location.is_remote()))
+                .unwrap_or(LOCAL_ACCENT);
+            return add_ssh::view(state, accent).map(Event::AddSshMsg);
+        }
         if let Some(state) = &self.add_project {
             return add_project::view(state).map(Event::AddProjectMsg);
         }
@@ -8244,18 +8360,6 @@ fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
 }
 
 /// Centered elevated card on the main-pane surface.
-fn form_card(content: iced::widget::Column<'_, Event>) -> Element<'_, Event> {
-    container(
-        container(content.width(420))
-            .padding(24)
-            .style(theme::form_card),
-    )
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
-    .style(theme::pane)
-    .into()
-}
-
 /// Debounce before a remote path completion goes out — long enough to skip
 /// probing on every keystroke, short enough to feel live over a warm
 /// ControlMaster connection. GTK's `SUGGEST_DEBOUNCE_MS`.

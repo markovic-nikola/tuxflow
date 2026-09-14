@@ -237,6 +237,21 @@ pub fn suggestion_list<'a, M: Clone + 'a>(
     .into()
 }
 
+/// The centered card every full-pane FORM sits in (add command/agent,
+/// add SSH) — generic over the message so the forms that live in their
+/// own modules share it.
+pub fn form_card<'a, M: 'a>(content: iced::widget::Column<'a, M>) -> Element<'a, M> {
+    container(
+        container(content.width(420))
+            .padding(24)
+            .style(theme::form_card),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .style(theme::pane)
+    .into()
+}
+
 /// Suggestions are absolute paths and the tail is the part being completed,
 /// so a long one drops its middle rather than its end (GTK ellipsizes at the
 /// START for the same reason).

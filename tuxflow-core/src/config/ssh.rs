@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::config::schema::{ProcessCategory, ProcessConfig};
+
 #[derive(Debug, Clone)]
 pub struct SshHost {
     pub name: String,
@@ -35,6 +37,98 @@ impl SshHost {
         }
 
         parts.join(" ")
+    }
+}
+
+/// The Add SSH Connection form as typed: one string per field, so a shell
+/// can bind text boxes to it directly. `port` stays text because the field
+/// is editable — a parse failure falls back to 22 on submit, GTK's rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshConnectionFields {
+    pub name: String,
+    pub host: String,
+    pub user: String,
+    pub port: String,
+    pub identity_file: String,
+}
+
+impl Default for SshConnectionFields {
+    /// The "Custom..." pick: everything empty but the port.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            host: String::new(),
+            user: String::new(),
+            port: String::from("22"),
+            identity_file: String::new(),
+        }
+    }
+}
+
+impl SshConnectionFields {
+    /// What picking a `~/.ssh/config` alias fills in. The host is the
+    /// RESOLVED hostname, so the command works with the alias' resolved
+    /// address even outside this machine's config (the add-project flow
+    /// keeps the alias instead, since it needs ProxyJump to keep working).
+    pub fn from_host(host: &SshHost) -> Self {
+        Self {
+            name: host.name.clone(),
+            host: host.hostname.clone().unwrap_or_else(|| host.name.clone()),
+            user: host.user.clone().unwrap_or_default(),
+            port: host.port.unwrap_or(22).to_string(),
+            identity_file: host.identity_file.clone().unwrap_or_default(),
+        }
+    }
+
+    pub fn host_given(&self) -> bool {
+        !self.host.trim().is_empty()
+    }
+
+    /// The process this form describes under `name`, or `None` while the
+    /// host is empty (the one required field). The sidebar shows
+    /// `display_name` — the typed name, else `user@host`, else the host —
+    /// while `name` stays the identifier the saved file is keyed on.
+    pub fn to_process_config(
+        &self,
+        name: String,
+        auto_connect: bool,
+        auto_reconnect: bool,
+    ) -> Option<ProcessConfig> {
+        let host = self.host.trim();
+        if host.is_empty() {
+            return None;
+        }
+        let user = self.user.trim();
+        let identity = self.identity_file.trim();
+        let port: u16 = self.port.trim().parse().unwrap_or(22);
+        let ssh_host = SshHost {
+            name: host.to_string(),
+            hostname: Some(host.to_string()),
+            user: (!user.is_empty()).then(|| user.to_string()),
+            port: (port != 22).then_some(port),
+            identity_file: (!identity.is_empty()).then(|| identity.to_string()),
+        };
+        let typed = self.name.trim();
+        let display = if !typed.is_empty() {
+            typed.to_string()
+        } else if user.is_empty() {
+            host.to_string()
+        } else {
+            format!("{user}@{host}")
+        };
+        Some(ProcessConfig {
+            name,
+            command: ssh_host.to_ssh_command(),
+            working_dir: None,
+            start_with_project: auto_connect,
+            auto_restart: auto_reconnect,
+            open_in_browser: false,
+            restart_when_changed: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            category: ProcessCategory::SSH,
+            auto_named: false,
+            display_name: Some(display),
+        })
     }
 }
 
@@ -206,5 +300,62 @@ Host *.internal
             identity_file: None,
         };
         assert_eq!(host.to_ssh_command(), "ssh root@example.com");
+    }
+    #[test]
+    fn fields_from_host_and_blank() {
+        let host = SshHost {
+            name: "dev".into(),
+            hostname: Some("10.0.1.50".into()),
+            user: Some("devuser".into()),
+            port: Some(2222),
+            identity_file: None,
+        };
+        let f = SshConnectionFields::from_host(&host);
+        assert_eq!(f.name, "dev");
+        assert_eq!(f.host, "10.0.1.50");
+        assert_eq!(f.user, "devuser");
+        assert_eq!(f.port, "2222");
+        assert_eq!(f.identity_file, "");
+        // No HostName: the alias itself is the host.
+        let bare = SshHost {
+            name: "box".into(),
+            hostname: None,
+            user: None,
+            port: None,
+            identity_file: None,
+        };
+        let f = SshConnectionFields::from_host(&bare);
+        assert_eq!(f.host, "box");
+        assert_eq!(f.port, "22");
+        assert_eq!(SshConnectionFields::default().port, "22");
+        assert!(!SshConnectionFields::default().host_given());
+    }
+
+    #[test]
+    fn process_config_from_fields() {
+        let mut f = SshConnectionFields::default();
+        assert!(f.to_process_config("ssh".into(), false, false).is_none());
+        f.host = " example.com ".into();
+        f.user = "me".into();
+        f.port = "2222".into();
+        f.identity_file = "~/.ssh/k".into();
+        let c = f.to_process_config("ssh".into(), true, false).unwrap();
+        assert_eq!(c.command, "ssh -p 2222 -i ~/.ssh/k me@example.com");
+        assert_eq!(c.display_name.as_deref(), Some("me@example.com"));
+        assert_eq!(c.name, "ssh");
+        assert!(c.start_with_project && !c.auto_restart);
+        assert_eq!(c.category, ProcessCategory::SSH);
+        // A typed name wins the label; a bad port falls back to 22; no user
+        // means the bare host is the label.
+        f.name = "prod".into();
+        f.port = "abc".into();
+        f.user.clear();
+        let c = f.to_process_config("ssh-2".into(), false, true).unwrap();
+        assert_eq!(c.command, "ssh -i ~/.ssh/k example.com");
+        assert_eq!(c.display_name.as_deref(), Some("prod"));
+        assert!(c.auto_restart);
+        f.name.clear();
+        let c = f.to_process_config("ssh-3".into(), false, false).unwrap();
+        assert_eq!(c.display_name.as_deref(), Some("example.com"));
     }
 }

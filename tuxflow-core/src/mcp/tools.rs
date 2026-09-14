@@ -15,16 +15,36 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::mcp::bridge::{CommandResult, McpBridge, McpCommand};
+use crate::mcp::bridge::{CommandResult, McpBridge, McpCommand, ProcessSnapshot};
 
 // --- Output types ---
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct ProcessInfo {
     pub name: String,
+    /// Running, Stopped, Crashed, Restarting or Reconnecting.
     pub status: String,
     pub command: String,
+    /// Command, Agent, Terminal or SSH.
     pub category: String,
+    /// The URL this process serves, once its output announced one. If a
+    /// dev server is Running with a url, use that url instead of starting
+    /// another server.
+    pub url: Option<String>,
+    pub working_dir: Option<String>,
+}
+
+impl From<&ProcessSnapshot> for ProcessInfo {
+    fn from(p: &ProcessSnapshot) -> Self {
+        ProcessInfo {
+            name: p.name.clone(),
+            status: p.status.clone(),
+            command: p.command.clone(),
+            category: p.category.clone(),
+            url: p.url.clone(),
+            working_dir: p.working_dir.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -45,6 +65,8 @@ pub struct ProcessStatusOutput {
     pub status: String,
     pub command: String,
     pub category: String,
+    pub url: Option<String>,
+    pub working_dir: Option<String>,
     pub pid: Option<i32>,
     pub restart_count: u32,
     pub uptime_secs: Option<u64>,
@@ -95,18 +117,16 @@ impl TuxFlowMcpServer {
         }
     }
 
-    #[tool(description = "List all managed processes with their current status")]
+    #[tool(
+        description = "List every process TuxFlow manages for this project, with status, command \
+                       and the URL it serves. Call this BEFORE starting any dev server, watcher, \
+                       test runner or other long-running command: if the user already runs it \
+                       here, use that one (its url and get_process_logs) instead of starting \
+                       your own, and do not stop or restart it unless asked to."
+    )]
     fn list_processes(&self) -> Json<ProcessListOutput> {
         let state = self.bridge.process_state.lock().unwrap();
-        let processes = state
-            .values()
-            .map(|p| ProcessInfo {
-                name: p.name.clone(),
-                status: p.status.clone(),
-                command: p.command.clone(),
-                category: p.category.clone(),
-            })
-            .collect();
+        let processes = state.values().map(ProcessInfo::from).collect();
         Json(ProcessListOutput { processes })
     }
 
@@ -115,15 +135,7 @@ impl TuxFlowMcpServer {
         let state = self.bridge.process_state.lock().unwrap();
         let total = state.len();
         let running = state.values().filter(|p| p.status == "Running").count();
-        let processes = state
-            .values()
-            .map(|p| ProcessInfo {
-                name: p.name.clone(),
-                status: p.status.clone(),
-                command: p.command.clone(),
-                category: p.category.clone(),
-            })
-            .collect();
+        let processes = state.values().map(ProcessInfo::from).collect();
         Json(ProjectInfoOutput {
             total,
             running,
@@ -147,9 +159,11 @@ impl TuxFlowMcpServer {
                     status: s.status.clone(),
                     command: s.command.clone(),
                     category: s.category.clone(),
+                    url: s.url.clone(),
+                    working_dir: s.working_dir.clone(),
                     pid: s.pid,
                     restart_count: s.restart_count,
-                    uptime_secs: s.uptime_secs,
+                    uptime_secs: s.uptime_secs(),
                 })
             })
             .ok_or_else(|| format!("Process '{}' not found", params.process_name))
@@ -199,7 +213,10 @@ impl TuxFlowMcpServer {
         }
     }
 
-    #[tool(description = "Restart a managed process")]
+    #[tool(
+        description = "Restart a managed process (e.g. after changing its config). Only for a \
+                       process the user asked you to restart, or that you started yourself."
+    )]
     async fn restart_process(
         &self,
         Parameters(params): Parameters<ProcessNameParam>,
@@ -226,7 +243,10 @@ impl TuxFlowMcpServer {
         }
     }
 
-    #[tool(description = "Stop a running process")]
+    #[tool(
+        description = "Stop a running process. Do not stop a process the user is running \
+                       unless they asked you to."
+    )]
     async fn stop_process(
         &self,
         Parameters(params): Parameters<ProcessNameParam>,
@@ -253,7 +273,10 @@ impl TuxFlowMcpServer {
         }
     }
 
-    #[tool(description = "Start a stopped process")]
+    #[tool(
+        description = "Start a stopped process by name — the way to bring up a dev server this \
+                       project already defines, rather than running your own copy."
+    )]
     async fn start_process(
         &self,
         Parameters(params): Parameters<ProcessNameParam>,
@@ -287,9 +310,14 @@ impl ServerHandler for TuxFlowMcpServer {
         let mut info = ServerInfo::default();
         info.capabilities.resources = Some(ResourcesCapability::default());
         info.instructions = Some(
-            "TuxFlow dev environment manager. Use list_processes to see all processes, \
-             get_process_logs to read terminal output, and restart/stop/start to control processes. \
-             Resources: tuxflow://processes, tuxflow://logs/{name}, tuxflow://config."
+            "TuxFlow manages this project's long-running processes (dev servers, watchers, \
+             test runners) in its own terminals, and the user is watching them. Before you \
+             start a dev server or any other long-running command, call list_processes: if it \
+             is already Running here, use it — its `url` is where it serves and \
+             get_process_logs shows its output — and do not start a second copy, and do not \
+             stop or restart it unless the user asked. If a defined process is Stopped and you \
+             need it, start_process brings it up under the user's eyes rather than in your own \
+             shell. Resources: tuxflow://processes, tuxflow://logs/{name}, tuxflow://config."
                 .into(),
         );
         info
@@ -359,15 +387,7 @@ impl ServerHandler for TuxFlowMcpServer {
 
         if uri == "tuxflow://processes" {
             let state = self.bridge.process_state.lock().unwrap();
-            let processes: Vec<ProcessInfo> = state
-                .values()
-                .map(|p| ProcessInfo {
-                    name: p.name.clone(),
-                    status: p.status.clone(),
-                    command: p.command.clone(),
-                    category: p.category.clone(),
-                })
-                .collect();
+            let processes: Vec<ProcessInfo> = state.values().map(ProcessInfo::from).collect();
             let json = serde_json::to_string_pretty(&processes).unwrap_or_default();
             return Ok(ReadResourceResult::new(vec![
                 ResourceContents::text(json, uri.clone()).with_mime_type("application/json"),
@@ -384,9 +404,11 @@ impl ServerHandler for TuxFlowMcpServer {
                         "command": p.command,
                         "category": p.category,
                         "status": p.status,
+                        "url": p.url,
+                        "working_dir": p.working_dir,
                         "pid": p.pid,
                         "restart_count": p.restart_count,
-                        "uptime_secs": p.uptime_secs,
+                        "uptime_secs": p.uptime_secs(),
                     })
                 })
                 .collect();

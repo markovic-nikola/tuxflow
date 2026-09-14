@@ -759,6 +759,25 @@ impl Backend {
         self.term.lock().selection_to_string().unwrap_or_default()
     }
 
+    /// The last `max_lines` lines of the grid, scrollback included, as
+    /// text — the process's recent output for an MCP `get_process_logs`
+    /// call. Measured up from the cursor's line (the bottom of what the
+    /// program has written), not from the viewport, so a user scrolled
+    /// back into history still hands the agent the newest output. Takes
+    /// the parse lock fairly: a one-off read that waits out a flood is
+    /// fine here, unlike `sync`, which runs on every repaint.
+    pub fn recent_text(&self, max_lines: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let end_line = grid.cursor.point.line;
+        let span = max_lines.saturating_sub(1) as i32;
+        let start_line = Line((end_line.0 - span).max(grid.topmost_line().0));
+        term.bounds_to_string(
+            Point::new(start_line, Column(0)),
+            Point::new(end_line, grid.last_column()),
+        )
+    }
+
     /// Snapshot the viewport. Returns false when the PTY thread holds the
     /// parse lock — never park the UI thread on it; a flood's next Wakeup
     /// retries, and the last Wakeup of any burst finds the lock free.

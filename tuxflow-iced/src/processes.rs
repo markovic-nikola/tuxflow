@@ -19,7 +19,7 @@ const MAX_BACKOFF_EXPONENT: u32 = 5;
 /// not accumulate into a give-up.
 const STABLE_RUN_SECS: u64 = 60;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Status {
     Stopped,
     Running,
@@ -264,8 +264,23 @@ pub fn spawn_settings(
     font: iced_term::settings::FontSettings,
     scrollback: usize,
     palette: iced_term::ColorPalette,
+    mcp_socket: Option<&str>,
 ) -> iced_term::settings::Settings {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    // The project's MCP socket, told to the process rather than left to
+    // `tuxflow-mcp`'s cwd guess (core `mcp::server::SOCKET_ENV`). On a
+    // remote project the value names the HOST-side socket the forward
+    // binds, and the SSH category is left alone — that shell is on another
+    // machine altogether.
+    let mut config_env = entry.config.env.clone();
+    if let Some(socket) = mcp_socket
+        && entry.config.category != ProcessCategory::SSH
+    {
+        config_env.insert(
+            tuxflow_core::mcp::server::SOCKET_ENV.to_string(),
+            socket.to_string(),
+        );
+    }
     let run_command = entry
         .command_override
         .take()
@@ -294,7 +309,7 @@ pub fn spawn_settings(
             let wrapped = remote::wrap_remote_command(
                 host,
                 &remote_dir,
-                &config.env,
+                &config_env,
                 &command,
                 Some(&pidfile),
                 &session,
@@ -319,8 +334,7 @@ pub fn spawn_settings(
                 .as_ref()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(location.dir_str()));
-            let env = config
-                .env
+            let env = config_env
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();

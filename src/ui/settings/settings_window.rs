@@ -1205,6 +1205,12 @@ impl SettingsWindow {
         }
         mcp_group.add(&mcp_tools);
 
+        let command_note = adw::ActionRow::builder()
+            .title("Command")
+            .subtitle(setup::COMMAND_NOTE)
+            .build();
+        mcp_group.add(&command_note);
+
         let cli_setup = adw::ExpanderRow::builder()
             .title("Setup: CLI tools")
             .subtitle("Claude Code, Codex, OpenCode, Gemini CLI, Amp, Aider")

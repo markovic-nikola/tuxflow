@@ -4650,9 +4650,13 @@ impl TuxFlowWindow {
                             status: format!("{:?}", proc.status),
                             command: proc.config.command.clone(),
                             category: format!("{:?}", proc.config.category),
+                            working_dir: proc.config.working_dir.clone(),
+                            url: None,
                             pid: proc.pid_cell.as_ref().and_then(|c| *c.borrow()),
                             restart_count: proc.restart_count,
-                            uptime_secs: proc.started_at.map(|t| t.elapsed().as_secs()),
+                            started_unix: proc
+                                .started_at
+                                .map(|t| bridge::now_unix().saturating_sub(t.elapsed().as_secs())),
                         },
                     );
                 }

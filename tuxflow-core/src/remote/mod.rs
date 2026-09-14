@@ -639,7 +639,11 @@ pub fn upload_temp_image(host: &str, png: &[u8], stamp: u128) -> Result<String, 
 
 /// Run `script` on `host` with `stdin_bytes` streamed to its stdin; returns
 /// trimmed stdout on success, trimmed stderr on failure.
-fn ssh_stream_stdin(host: &str, script: &str, stdin_bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn ssh_stream_stdin(
+    host: &str,
+    script: &str,
+    stdin_bytes: &[u8],
+) -> Result<String, String> {
     use std::io::Write;
     let mut child = std::process::Command::new("ssh")
         .args(ssh_mux_options())
@@ -666,6 +670,80 @@ fn ssh_stream_stdin(host: &str, script: &str, stdin_bytes: &[u8]) -> Result<Stri
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
+}
+
+/// One `ssh -N -R` reverse forward: a Unix socket on `host` → a listener on
+/// this machine. The shape both bridges that reach BACK into this machine
+/// share (the microphone in [`mic`], the MCP server in
+/// [`crate::mcp::remote`]).
+///
+/// A dedicated connection rather than a mux client, like
+/// [`tunnel::TunnelManager`]'s forwards: a forward requested over the shared
+/// ControlMaster lives in the *master* and survives the client being killed,
+/// so closing it would leave the socket reachable. `PR_SET_PDEATHSIG` ties
+/// it to the spawning THREAD, so call this from one that outlives the
+/// forward — never a transient worker.
+///
+/// `label` names the forward in the log lines its stderr produces.
+/// Captured, not discarded: `ExitOnForwardFailure` makes ssh exit silently
+/// on a refused forward, and without this a bridge just fails to exist
+/// with nothing to explain why.
+pub(crate) fn spawn_reverse_forward(
+    host: &str,
+    remote_socket: &str,
+    local_socket: &std::path::Path,
+    label: &'static str,
+) -> Result<std::process::Child, String> {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-N",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        // Belt and braces: the host's sshd default leaves a stale socket
+        // behind, which is why provisioning removes it first.
+        "-o",
+        "StreamLocalBindUnlink=yes",
+        "-R",
+        &format!("{remote_socket}:{}", local_socket.display()),
+    ])
+    .arg(host)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped());
+    // Die with TuxFlow: an exit path that skips Drop must not leave the
+    // socket reachable from the host.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            nix::libc::prctl(nix::libc::PR_SET_PDEATHSIG, nix::libc::SIGTERM, 0, 0, 0);
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn {label} forward: {e}"))?;
+    if let Some(stderr) = child.stderr.take() {
+        let host = host.to_string();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
+                log::error!("{label} {host}: {line}");
+            }
+        });
+    }
+    Ok(child)
 }
 
 /// The remote half of an explicit stop, as a shell script. Split out from

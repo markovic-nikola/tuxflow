@@ -136,6 +136,11 @@ impl Terminal {
         self.redraw();
     }
 
+    /// Recent output as text — see [`backend::Backend::recent_text`].
+    pub fn recent_text(&self, max_lines: usize) -> String {
+        self.backend.recent_text(max_lines)
+    }
+
     pub fn widget_id(&self) -> &iced::widget::Id {
         &self.widget_id
     }

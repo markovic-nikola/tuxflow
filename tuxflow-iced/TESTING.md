@@ -264,3 +264,25 @@ Anything that feels off — a paste that didn't land, a badge on the wrong
 port, a stutter — note the project, the process, and what the terminal
 showed. `RUST_LOG=info ./target/release/tuxflow-iced 2>tuxflow-iced.log`
 captures the app's own account.
+
+## MCP server (agents see what is running)
+
+Settings → Integrations → Enable MCP Server (on by default). Each open
+project gets a socket at `$XDG_RUNTIME_DIR/tuxflow-<project>.sock`, and
+every process started from TuxFlow carries `TUXFLOW_MCP_SOCKET`.
+
+1. Start a dev server in a project, wait for its port badge.
+2. In an agent terminal of the SAME project (local or remote), ask the
+   agent to list TuxFlow's processes — it needs `tuxflow-mcp` in its MCP
+   config (Settings → Integrations has the snippets). The list should
+   show the dev server `Running` with its `url`.
+3. Ask the agent to start the dev server anyway: it should refuse or use
+   the running one (the tool descriptions say so). Ask it to restart the
+   server: the sidebar row restarts and the pane shows the "restarted"
+   rule.
+4. Remote project: on the host, `~/.local/bin/tuxflow-mcp` exists and
+   `~/.cache/tuxflow/mcp/<project>.sock` is live while TuxFlow runs;
+   quitting TuxFlow leaves the tmux sessions alone but the shim reports
+   "No TuxFlow MCP socket".
+5. Toggle the setting off: the sockets disappear at once; on: they come
+   back (remote forwards too), no restart needed.

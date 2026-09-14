@@ -4,9 +4,16 @@ members = ["tuxflow-core", "tuxflow-iced", "vendor/iced_term"]
 # vendor/iced_term as an external path dep.
 exclude = ["spike"]
 
+# ONE version for the .deb and every binary in it: the update chip compares
+# the running binary's CARGO_PKG_VERSION against the latest release, and a
+# tuxflow-iced left at its own 0.1.0 would report an update forever.
+# scripts/release.sh bumps the first `version = ` line, which is this one.
+[workspace.package]
+version = "0.1.70"
+
 [package]
 name = "tuxflow"
-version = "0.1.70"
+version.workspace = true
 edition = "2024"
 license = "MIT"
 description = "A Linux-native dev environment manager"
@@ -44,7 +51,6 @@ uuid = { version = "1", features = ["v4"] }
 glob = "0.3"
 dirs = "6"
 nix = { version = "0.29", features = ["signal", "process"] }
-ureq = { version = "3", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3"

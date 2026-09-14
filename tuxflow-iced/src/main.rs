@@ -42,6 +42,7 @@ use tuxflow_core::util::agents::{self, resume_command_for};
 use tuxflow_core::util::banner;
 use tuxflow_core::util::icon_detector;
 use tuxflow_core::util::port_detector::{self, PortDetector, remap_url_port, rewrite_clicked_url};
+use tuxflow_core::util::update::{self, InstallKind, UpdateInfo};
 use tuxflow_core::util::watch::{self, WatchSet};
 
 use keys::{AppAction, AppKeys};
@@ -49,7 +50,7 @@ use processes::{ProcessEntry, Status, plan_after_exit};
 use status_dot::{spinner, status_dot};
 use theme::{
     CRASHED, DIM, GIT_ADDED, GIT_BEHIND, GIT_REMOVED, LOCAL_ACCENT, RESTARTING, STOPPED, TEXT,
-    TEXT_SECONDARY, accent_for,
+    TEXT_SECONDARY, UPDATE_CHIP, accent_for,
 };
 use tuxflow_core::config::settings::AppSettings;
 
@@ -474,6 +475,13 @@ struct App {
     /// A (heading, body) message awaiting an OK — GTK's AlertDialog for
     /// things that failed but need no decision.
     notice: Option<(String, String)>,
+    /// The status bar's update chip state.
+    update_badge: UpdateBadge,
+    /// The update card, when one of its stages is up.
+    update_card: Option<UpdateCard>,
+    /// A dpkg-owned binary with a .deb on the release: the card can
+    /// install in place. Probed with the check.
+    update_can_install: bool,
     composer: String,
     /// Header toggle (GTK: the AdwOverlaySplitView sidebar). Runtime-only,
     /// like GTK — a fresh launch always shows the sidebar.
@@ -588,6 +596,38 @@ struct MenuTarget {
 enum ConfirmAction {
     RemoveProject(u64),
     DeleteProcess { project: u64, index: usize },
+}
+
+/// The running binary's version — what the release check compares
+/// against. One workspace version, so this is the .deb's too.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the status bar's update chip means, and so what a click opens
+/// (GTK's `UpdateBadge`).
+#[derive(Clone)]
+enum UpdateBadge {
+    Hidden,
+    /// A newer release exists upstream; click to see notes and install.
+    Available(UpdateInfo),
+    /// The newer release is already installed — this window is just still
+    /// running the old code. Click goes straight to the restart prompt.
+    RestartRequired,
+}
+
+/// The update card's stages — GTK's `update_dialog` as one overlay card:
+/// notes + install, the blocking download/install, then the restart offer.
+#[derive(Clone)]
+enum UpdateCard {
+    /// Release notes with Later / View release / Install and restart —
+    /// the last only when `can_install` (a dpkg-owned binary and a .deb
+    /// on the release).
+    Available { info: UpdateInfo, can_install: bool },
+    /// Download + `pkexec apt-get install` running on a worker. No
+    /// buttons: nothing here can be cancelled from our side.
+    Installing,
+    /// The new version is on disk (our install, or the system's software
+    /// manager): Later / Restart now.
+    Installed,
 }
 
 /// Probe success: project name if configured, process configs, live tmux
@@ -839,6 +879,20 @@ enum Event {
     /// Status-bar Clear: empty the selected terminal's grid, child intact.
     ClearTerminal,
     NoticeDismiss,
+    /// The once-per-launch release check answered (a newer version, or
+    /// nothing). Carries whether this binary can be upgraded in place.
+    UpdateChecked(Option<(UpdateInfo, bool)>),
+    /// The 30 s readlink of /proc/self/exe (release builds only).
+    BinaryReplacedTick,
+    /// The status-bar chip was clicked.
+    OpenUpdateCard,
+    UpdateCardDismiss,
+    UpdateViewRelease,
+    UpdateInstall,
+    UpdateInstalled(Result<(), String>),
+    UpdateRestart,
+    /// The relauncher is armed; close the window through the normal path.
+    UpdateQuit(Option<iced::window::Id>),
     PortsPollTick(u64),
     PortsPolled {
         project: u64,
@@ -957,6 +1011,9 @@ impl App {
             git_tick_stamp: 0,
             add_form_epoch: 0,
             notice: None,
+            update_badge: UpdateBadge::Hidden,
+            update_card: None,
+            update_can_install: false,
             composer: String::new(),
             sidebar_visible: true,
             // Settled: a fresh launch shows the sidebar without a glide.
@@ -1051,6 +1108,43 @@ impl App {
             ));
         }
         tasks.push(Task::done(Event::GitTick));
+        // Check for updates in the background, once per launch (15-min
+        // cache in core). The install-kind probe (`dpkg -S`) rides the
+        // same worker so the card knows its buttons before it opens.
+        if std::env::var("TUXFLOW_ICED_UI").as_deref() == Ok("update") {
+            // Screenshot hook: a fake release, so the chip and the card can
+            // be exercised without a newer release existing.
+            tasks.push(Task::done(Event::UpdateChecked(Some((
+                UpdateInfo {
+                    latest_version: "9.9.9".into(),
+                    release_url: "https://github.com/markovic-nikola/tuxflow/releases".into(),
+                    notes: "## What's Changed\n* A fake release for the update card.\n* Nothing here is real.".into(),
+                    deb_url: None,
+                },
+                false,
+            )))));
+        } else {
+            tasks.push(Task::perform(
+                tokio::task::spawn_blocking(|| {
+                    let info = update::check_for_update(VERSION)?;
+                    let can_install = info.deb_url.is_some()
+                        && matches!(update::install_kind(), InstallKind::Deb);
+                    Some((info, can_install))
+                }),
+                |joined| Event::UpdateChecked(joined.ok().flatten()),
+            ));
+        }
+        // Watch for the binary being replaced underneath us (GTK's 30 s
+        // poll): a release installed by the system's software manager
+        // while this window is open would otherwise be invisible. Debug
+        // builds are exempt — `cargo run` replaces its own binary on every
+        // rebuild, which would leave the chip permanently lit.
+        if !cfg!(debug_assertions) {
+            tasks.push(Task::perform(
+                tokio::time::sleep(Duration::from_secs(30)),
+                |_| Event::BinaryReplacedTick,
+            ));
+        }
         tasks.push(Task::done(Event::ActivityTick));
 
         (app, Task::batch(tasks))
@@ -4590,6 +4684,129 @@ impl App {
                 self.notice = None;
                 self.focus_selected_terminal()
             }
+            Event::UpdateChecked(found) => {
+                // A pending restart already has the new version on disk;
+                // offering to download it again would be a step backwards.
+                if let Some((info, can_install)) = found
+                    && !matches!(self.update_badge, UpdateBadge::RestartRequired)
+                {
+                    log::info!("update available: v{}", info.latest_version);
+                    self.update_can_install = can_install;
+                    self.update_badge = UpdateBadge::Available(info);
+                }
+                Task::none()
+            }
+            Event::BinaryReplacedTick => {
+                if update::binary_replaced() {
+                    log::info!("binary replaced on disk; prompting for restart");
+                    self.update_badge = UpdateBadge::RestartRequired;
+                    // The poll stops on first hit: the answer can't change
+                    // back.
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(Duration::from_secs(30)), |_| {
+                    Event::BinaryReplacedTick
+                })
+            }
+            Event::OpenUpdateCard => {
+                let card = match &self.update_badge {
+                    UpdateBadge::Hidden => return Task::none(),
+                    UpdateBadge::Available(info) => UpdateCard::Available {
+                        info: info.clone(),
+                        can_install: self.update_can_install,
+                    },
+                    UpdateBadge::RestartRequired => UpdateCard::Installed,
+                };
+                self.update_card = Some(card);
+                // The modal grab, as for every card: keys answer the card,
+                // not the terminal under it.
+                TerminalView::unfocus()
+            }
+            Event::UpdateCardDismiss => {
+                // The install stage has no Later: the worker is mid-pkexec
+                // and nothing on this side can stop it.
+                if matches!(self.update_card, Some(UpdateCard::Installing)) {
+                    return Task::none();
+                }
+                self.update_card = None;
+                self.focus_selected_terminal()
+            }
+            Event::UpdateViewRelease => {
+                if let UpdateBadge::Available(info) = &self.update_badge
+                    && let Err(e) = open::that(&info.release_url)
+                {
+                    log::warn!("open release page: {e}");
+                }
+                self.update_card = None;
+                self.focus_selected_terminal()
+            }
+            Event::UpdateInstall => {
+                let Some(UpdateCard::Available {
+                    info,
+                    can_install: true,
+                }) = &self.update_card
+                else {
+                    return Task::none();
+                };
+                let Some(url) = info.deb_url.clone() else {
+                    return Task::none();
+                };
+                self.update_card = Some(UpdateCard::Installing);
+                // Download, then one polkit prompt; both block, so a worker.
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        let path = update::download_deb(VERSION, &url)?;
+                        let result = update::install_deb(&path);
+                        let _ = std::fs::remove_file(&path);
+                        result
+                    }),
+                    |joined| {
+                        Event::UpdateInstalled(
+                            joined.unwrap_or_else(|e| Err(format!("Install thread failed: {e}"))),
+                        )
+                    },
+                )
+            }
+            Event::UpdateInstalled(result) => match result {
+                Ok(()) => {
+                    // Also what the chip means from now on, should the user
+                    // pick Later: the download already happened.
+                    self.update_badge = UpdateBadge::RestartRequired;
+                    self.update_card = Some(UpdateCard::Installed);
+                    Task::none()
+                }
+                Err(msg) => {
+                    self.update_card = None;
+                    self.notice = Some(("Update failed".into(), msg));
+                    Task::none()
+                }
+            },
+            Event::UpdateRestart => {
+                self.update_card = None;
+                match update::restart() {
+                    // The relauncher waits for this process to exit before
+                    // starting the new one, so quitting is what triggers it
+                    // — through the normal close path, so the window
+                    // geometry is saved and the mic bridge torn down.
+                    Ok(()) => iced::window::oldest().map(Event::UpdateQuit),
+                    // Surfaced, not just logged: a silent failure here reads
+                    // as the button doing nothing at all.
+                    Err(msg) => {
+                        log::error!("Restart failed: {msg}");
+                        self.notice = Some((
+                            "Could not restart".into(),
+                            format!(
+                                "{msg}\n\nThe update is installed — quit and start TuxFlow again to use it."
+                            ),
+                        ));
+                        Task::none()
+                    }
+                }
+            }
+            Event::UpdateQuit(id) => match id {
+                Some(id) => Task::done(Event::WindowCloseRequested(id)),
+                None => Task::none(),
+            },
             Event::GitMsg(msg) => self.update_git_view(msg),
             Event::ClearTerminal => {
                 if let Some(project) = self.projects.get_mut(self.active)
@@ -4760,6 +4977,9 @@ impl App {
                         self.notice = None;
                         return self.focus_selected_terminal();
                     }
+                    if self.update_card.is_some() {
+                        return self.update(Event::UpdateCardDismiss);
+                    }
                     if self.confirm.is_some() {
                         self.confirm = None;
                         return self.focus_selected_terminal();
@@ -4802,7 +5022,11 @@ impl App {
                 // retargets what Proceed is about to delete. GTK's popover
                 // and AlertDialog are grabs; this is that grab's keyboard
                 // half (the unfocus on raise is the terminal half).
-                if self.notice.is_some() || self.confirm.is_some() || self.context_menu.is_some() {
+                if self.notice.is_some()
+                    || self.update_card.is_some()
+                    || self.confirm.is_some()
+                    || self.context_menu.is_some()
+                {
                     return Task::none();
                 }
                 // Palette navigation first (its input consumes typing but
@@ -5473,6 +5697,9 @@ impl App {
         if self.confirm.is_some() {
             layers.push(self.view_confirm());
         }
+        if let Some(card) = &self.update_card {
+            layers.push(self.view_update_card(card));
+        }
         if let Some((heading, body)) = &self.notice {
             layers.push(self.view_notice(heading, body));
         }
@@ -5768,6 +5995,115 @@ impl App {
             .center_y(Length::Fill);
 
         iced::widget::stack![backdrop, placed].into()
+    }
+
+    /// GTK's update dialog as a card: the notes stage, the blocking
+    /// install stage, the restart offer. Same furniture as the
+    /// confirmation; the notes scroll under a cap like GTK's scroller.
+    fn view_update_card<'a>(&'a self, card: &'a UpdateCard) -> Element<'a, Event> {
+        let later = |label: &'static str| {
+            button(text(label).size(12))
+                .padding([6, 16])
+                .style(theme::pill_button(LOCAL_ACCENT))
+                .on_press(Event::UpdateCardDismiss)
+        };
+        let (heading, body, buttons): (String, Element<'a, Event>, Element<'a, Event>) = match card
+        {
+            UpdateCard::Available { info, can_install } => {
+                let notes = info.notes.trim();
+                let body: Element<'a, Event> = if notes.is_empty() {
+                    column![].into()
+                } else {
+                    scrollable(
+                        container(text(notes).size(12).color(TEXT_SECONDARY))
+                            .width(Length::Fill)
+                            .padding(iced::Padding::ZERO.right(12)),
+                    )
+                    .height(Length::Shrink)
+                    .style(theme::overlay_scrollbar)
+                    .into()
+                };
+                let mut buttons = row![
+                    later("Later"),
+                    button(text("View release").size(12))
+                        .padding([6, 16])
+                        .style(theme::pill_button(LOCAL_ACCENT))
+                        .on_press(Event::UpdateViewRelease),
+                ]
+                .spacing(8);
+                // Installing in place only works for a dpkg-owned binary; a
+                // tarball or `cargo run` build has nothing for apt to upgrade.
+                if *can_install {
+                    buttons = buttons.push(
+                        button(text("Install and restart").size(12).font(bold()))
+                            .padding([6, 16])
+                            .style(theme::primary(LOCAL_ACCENT))
+                            .on_press(Event::UpdateInstall),
+                    );
+                }
+                (
+                    format!("TuxFlow v{} is available", info.latest_version),
+                    body,
+                    buttons.into(),
+                )
+            }
+            UpdateCard::Installing => (
+                "Installing update".into(),
+                text("Downloading\u{2026}").size(12).color(TEXT_SECONDARY).into(),
+                row![].into(),
+            ),
+            UpdateCard::Installed => (
+                "Update installed".into(),
+                text("Restart TuxFlow to run the new version. Remote processes keep running while it restarts.")
+                    .size(12)
+                    .color(TEXT_SECONDARY)
+                    .into(),
+                row![
+                    later("Later"),
+                    button(text("Restart now").size(12).font(bold()))
+                        .padding([6, 16])
+                        .style(theme::primary(LOCAL_ACCENT))
+                        .on_press(Event::UpdateRestart),
+                ]
+                .spacing(8)
+                .into(),
+            ),
+        };
+
+        let card = container(
+            column![
+                text(heading).size(15).font(bold()).color(TEXT),
+                container(body).max_height(320),
+                container(buttons)
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(460)
+        .style(theme::form_card);
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::UpdateCardDismiss);
+
+        iced::widget::stack![
+            backdrop,
+            container(card)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .into()
     }
 
     /// Report-only card: what GTK opens an AlertDialog for when something
@@ -7151,6 +7487,32 @@ impl App {
                 )),
                 None => bar.push(counter),
             };
+        }
+
+        // GTK's update chip: amber caption text in the left cluster, two
+        // states behind one click (`OpenUpdateCard` dispatches on the
+        // badge, as GTK's single handler does).
+        let chip = match &self.update_badge {
+            UpdateBadge::Hidden => None,
+            UpdateBadge::Available(info) => Some((
+                format!("Update available: v{}", info.latest_version),
+                "See what changed and install",
+            )),
+            UpdateBadge::RestartRequired => Some((
+                "Restart to finish updating".to_string(),
+                "A newer TuxFlow is installed; this window is still running the old one",
+            )),
+        };
+        if let Some((label, hint)) = chip {
+            bar = bar.push(tip(
+                button(text(label).size(11).font(bold()).color(UPDATE_CHIP))
+                    .padding([2, 6])
+                    .style(theme::ghost(UPDATE_CHIP))
+                    .on_press(Event::OpenUpdateCard)
+                    .into(),
+                hint.to_string(),
+                iced::widget::tooltip::Position::Top,
+            ));
         }
 
         bar = bar.push(iced::widget::space::horizontal());

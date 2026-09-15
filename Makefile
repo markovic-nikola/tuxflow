@@ -6,9 +6,9 @@ help: ## Show this help
 run: ## Run the app, release (a debug build misrepresents terminal latency)
 	cargo run --release
 
-dev: ## Live reload with cargo-watch (debug build)
+dev: ## Live reload with cargo-watch, release build like `run`
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	cargo watch -x run
+	cargo watch -x "run --release"
 
 run-mcp: ## Run the tuxflow-mcp client against a running app (stdio <-> project socket)
 	cargo run --bin tuxflow-mcp

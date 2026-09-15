@@ -12,6 +12,7 @@ mod add_ssh;
 mod dnd;
 mod edit_project;
 mod git_view;
+mod instance;
 mod keys;
 mod mcp;
 mod notify;
@@ -249,8 +250,29 @@ impl Sweep {
     }
 }
 
+/// The clipboard handle that owns a staged composer attachment. See
+/// `composer_deliver`.
+static STAGING_CLIPBOARD: std::sync::Mutex<Option<arboard::Clipboard>> =
+    std::sync::Mutex::new(None);
+
+/// Pause after each attachment's Ctrl+V so the agent ingests the staged
+/// image before the clipboard is overwritten or the text lands (GTK's
+/// INGEST_MS).
+const COMPOSER_INGEST: Duration = Duration::from_millis(400);
+
 fn main() -> iced::Result {
     env_logger::init();
+    // GTK's HANDLES_OPEN: a second launch hands its projects to the
+    // running window and exits. Keys are normalized HERE, against this
+    // process's cwd — the instance would resolve a relative path against
+    // its own.
+    let keys: Vec<String> = std::env::args()
+        .skip(1)
+        .map(|a| normalize_key(&a))
+        .collect();
+    if let instance::Claim::Forwarded = instance::claim(&keys) {
+        return Ok(());
+    }
     // VTE set TERM for its children silently; on this stack it is the
     // embedder's job (spike finding — top/less break without it).
     alacritty_terminal::tty::setup_env();
@@ -307,6 +329,49 @@ fn main() -> iced::Result {
         .exit_on_close_request(false)
         .subscription(App::subscription)
         .run()
+}
+
+/// A pasted image waiting on the composer: where it lives on the machine
+/// the agent runs on, the pixels (re-staged as the local clipboard at send
+/// time), and the chip's thumbnail.
+#[derive(Clone, Debug)]
+struct Attachment {
+    path: String,
+    width: u32,
+    height: u32,
+    rgba: std::sync::Arc<Vec<u8>>,
+    thumb: iced::widget::image::Handle,
+}
+
+/// Serve the single-instance socket: each accepted connection is one
+/// launch's keys. Ends at once when this process is not the instance.
+fn instance_stream() -> impl iced::futures::Stream<Item = Vec<String>> + Send {
+    iced::futures::stream::unfold(
+        None::<std::sync::Arc<std::os::unix::net::UnixListener>>,
+        |listener| async move {
+            let listener = match listener {
+                Some(l) => l,
+                None => std::sync::Arc::new(instance::take_listener()?),
+            };
+            // `accept` blocks; keep it off the executor's threads.
+            let l = listener.clone();
+            let keys = tokio::task::spawn_blocking(move || -> Option<Vec<String>> {
+                loop {
+                    let (mut stream, _) = l.accept().ok()?;
+                    match instance::read_request(&mut stream) {
+                        Ok(keys) => {
+                            instance::ack(&mut stream);
+                            return Some(keys);
+                        }
+                        Err(e) => log::warn!("instance request unreadable: {e}"),
+                    }
+                }
+            })
+            .await
+            .ok()??;
+            Some((keys, Some(listener)))
+        },
+    )
 }
 
 enum Phase {
@@ -512,6 +577,13 @@ struct App {
     /// install in place. Probed with the check.
     update_can_install: bool,
     composer: String,
+    /// Pending image attachments — chips above the composer, delivered
+    /// ahead of the text on send.
+    composer_attachments: Vec<Attachment>,
+    /// (project id, term id) the attachments were pasted for. Paths are
+    /// machine-specific, so a selection change drops them (GTK's
+    /// `context` on the composer bar).
+    composer_context: Option<(u64, u64)>,
     /// Header toggle (GTK: the AdwOverlaySplitView sidebar). Runtime-only,
     /// like GTK — a fresh launch always shows the sidebar.
     sidebar_visible: bool,
@@ -966,6 +1038,46 @@ enum Event {
     },
     ComposerChanged(String),
     ComposerSend,
+    /// The composer's paste hook: the field's whole contents after the
+    /// paste. Unchanged contents mean the clipboard held no text — an
+    /// image, which becomes an attachment chip.
+    ComposerPasted(String),
+    /// The paste worker materialized an image on the agent's machine.
+    ComposerAttach {
+        project: u64,
+        term: u64,
+        result: Result<Attachment, String>,
+    },
+    ComposerRemoveAttachment(usize),
+    /// One step of a composed send: deliver the next attachment, or the
+    /// text once they are all in. `after` = at least one attachment went
+    /// before the text.
+    ComposerDeliver {
+        project: u64,
+        term: u64,
+        run: u64,
+        remaining: std::collections::VecDeque<Attachment>,
+        text: String,
+        after: bool,
+    },
+    /// A remote attachment was staged as the host's clipboard shim.
+    ComposerStaged {
+        project: u64,
+        term: u64,
+        run: u64,
+        remaining: std::collections::VecDeque<Attachment>,
+        text: String,
+        result: Result<(), String>,
+    },
+    /// The Enter that submits a composed message, a beat after the text.
+    ComposerEnter {
+        project: u64,
+        term: u64,
+        run: u64,
+    },
+    /// A second `tuxflow [keys…]` launch handed over its projects (empty
+    /// = a bare launch: raise the window).
+    InstanceOpen(Vec<String>),
     SearchQueryChanged(String),
     SearchStep(SearchDirection),
     /// Enter in the search field: next match, or previous with Shift held.
@@ -976,7 +1088,7 @@ enum Event {
     /// A palette row picked by click.
     PaletteActivate(PaletteEntry),
     /// Ignored-status keys — the widget consumed everything it wanted
-    /// (Ctrl+Shift+V with pal().text on the clipboard never reaches here).
+    /// (Ctrl+Shift+V with text on the clipboard never reaches here).
     Hotkey(iced::keyboard::Event),
     /// The image-paste worker finished: bytes to feed the terminal that
     /// initiated the paste (a typed path, or Ctrl+V for agents).
@@ -1070,6 +1182,8 @@ impl App {
             update_card: None,
             update_can_install: false,
             composer: String::new(),
+            composer_attachments: Vec::new(),
+            composer_context: None,
             sidebar_visible: true,
             // Settled: a fresh launch shows the sidebar without a glide.
             sidebar_anim: Anim { t: 1.0, stamp: 0 },
@@ -1221,6 +1335,8 @@ impl App {
             }),
             Event::SystemScheme,
         ));
+        // Later launches (`tuxflow /path` from another shell) arrive here.
+        tasks.push(Task::run(instance_stream(), Event::InstanceOpen));
         (app, Task::batch(tasks))
     }
 
@@ -3486,7 +3602,7 @@ impl App {
             // on a remote project the selection the user SEES is tmux's
             // (`explicit_remote_copy` checks both).
             AppAction::Copy => self.explicit_remote_copy(),
-            // Reaching here means the widget's Paste found no pal().text — the
+            // Reaching here means the widget's Paste found no text — the
             // clipboard holds an image (or nothing).
             AppAction::Paste => self.paste_image(),
             AppAction::TerminalSearch => {
@@ -4042,6 +4158,171 @@ impl App {
         )
     }
 
+    /// (project id, term id, run id) of the selected process while it is
+    /// running — the triple every composed write is addressed to, so a
+    /// restart or a switch between paste and delivery drops the bytes
+    /// instead of typing them into whatever now holds the pane.
+    fn selected_run(&self) -> Option<(u64, u64, u64)> {
+        let project = self.active_project()?;
+        let entry = project.entries.get(project.selected)?;
+        let term = entry.term_id?;
+        entry
+            .is_running()
+            .then_some((project.id, term, entry.run_id))
+    }
+
+    /// Feed `bytes` to the run named, if it is still the one on the pane.
+    fn write_to_run(&mut self, project: u64, term: u64, run: u64, bytes: Vec<u8>) {
+        let target = self.project_index(project).and_then(|pidx| {
+            self.projects[pidx]
+                .entries
+                .iter_mut()
+                .find(|e| e.term_id == Some(term) && e.run_id == run)
+                .filter(|e| e.is_running())
+                .and_then(|e| e.terminal.as_mut())
+        });
+        match target {
+            Some(terminal) => {
+                terminal.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
+                    bytes,
+                )));
+            }
+            None => log::info!("composer: run ended before delivery, bytes dropped"),
+        }
+    }
+
+    /// An image on the clipboard, pasted into the composer: materialize
+    /// it as a file on the machine the agent runs on (GTK's on_image_paste
+    /// bridge — /tmp on either side, nothing survives a reboot) and hand
+    /// back a chip. Clipboard read, PNG encode and the upload all run on
+    /// a worker.
+    fn composer_attach_image(&mut self) -> Task<Event> {
+        let Some((project, term, _)) = self.selected_run() else {
+            return Task::none();
+        };
+        let host = self
+            .active_project()
+            .and_then(|p| p.location.host().map(String::from));
+        Task::perform(
+            tokio::task::spawn_blocking(move || -> Result<Attachment, String> {
+                let image = arboard::Clipboard::new()
+                    .and_then(|mut cb| cb.get_image())
+                    .map_err(|e| format!("no image on clipboard: {e}"))?;
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let png = encode_png(&image)?;
+                let path = match host {
+                    Some(host) => remote::upload_temp_image(&host, &png, stamp)?,
+                    None => {
+                        let path = std::env::temp_dir().join(format!(".tuxflow-img-{stamp}.png"));
+                        std::fs::write(&path, &png).map_err(|e| e.to_string())?;
+                        path.display().to_string()
+                    }
+                };
+                let rgba = image.bytes.into_owned();
+                let (width, height) = (image.width as u32, image.height as u32);
+                Ok(Attachment {
+                    path,
+                    width,
+                    height,
+                    thumb: iced::widget::image::Handle::from_rgba(width, height, rgba.clone()),
+                    rgba: std::sync::Arc::new(rgba),
+                })
+            }),
+            move |joined| Event::ComposerAttach {
+                project,
+                term,
+                result: joined.unwrap_or_else(|e| Err(format!("paste worker died: {e}"))),
+            },
+        )
+    }
+
+    /// One step of GTK's `deliver_composed`: stage the next attachment as
+    /// the agent's clipboard and announce it with Ctrl+V (the shim file on
+    /// a host, the real clipboard locally), pace `COMPOSER_INGEST` so the
+    /// agent reads it before the next lands; with none left, the text in
+    /// one bracketed paste (a leading newline keeps the `[Image #N]`
+    /// tokens on their own line) and Enter a beat later.
+    fn composer_deliver(
+        &mut self,
+        project: u64,
+        term: u64,
+        run: u64,
+        mut remaining: std::collections::VecDeque<Attachment>,
+        text: String,
+        after: bool,
+    ) -> Task<Event> {
+        let Some(att) = remaining.pop_front() else {
+            if !text.is_empty() {
+                let mut buf = Vec::with_capacity(text.len() + 13);
+                buf.extend_from_slice(b"\x1b[200~");
+                if after {
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(text.as_bytes());
+                buf.extend_from_slice(b"\x1b[201~");
+                self.write_to_run(project, term, run, buf);
+            }
+            return Task::perform(tokio::time::sleep(Duration::from_millis(60)), move |_| {
+                Event::ComposerEnter { project, term, run }
+            });
+        };
+        let host = self
+            .project_index(project)
+            .and_then(|pidx| self.projects[pidx].location.host().map(String::from));
+        match host {
+            Some(host) => Task::perform(
+                tokio::task::spawn_blocking(move || {
+                    remote::stage_clipboard_image(&host, &att.path)
+                }),
+                move |joined| Event::ComposerStaged {
+                    project,
+                    term,
+                    run,
+                    remaining,
+                    text,
+                    result: joined.unwrap_or_else(|e| Err(format!("staging worker died: {e}"))),
+                },
+            ),
+            None => {
+                // The local agent reads the real clipboard on its Ctrl+V.
+                // On X11 the selection is served only while an arboard
+                // handle lives, so the staging handle is a static kept
+                // for the process's lifetime (the notify.rs bus idiom).
+                let staged = {
+                    let mut guard = STAGING_CLIPBOARD.lock().unwrap();
+                    if guard.is_none() {
+                        *guard = arboard::Clipboard::new().ok();
+                    }
+                    match guard.as_mut() {
+                        Some(cb) => cb.set_image(arboard::ImageData {
+                            width: att.width as usize,
+                            height: att.height as usize,
+                            bytes: std::borrow::Cow::Borrowed(att.rgba.as_slice()),
+                        }),
+                        None => Err(arboard::Error::ClipboardNotSupported),
+                    }
+                };
+                match staged {
+                    Ok(()) => self.write_to_run(project, term, run, vec![0x16]),
+                    Err(e) => log::error!("composer send: clipboard staging failed: {e}"),
+                }
+                Task::perform(tokio::time::sleep(COMPOSER_INGEST), move |_| {
+                    Event::ComposerDeliver {
+                        project,
+                        term,
+                        run,
+                        remaining,
+                        text,
+                        after: true,
+                    }
+                })
+            }
+        }
+    }
+
     fn open_in_browser(&mut self, pidx: usize, index: usize) {
         let name = self.projects[pidx].entries[index].config.name.clone();
         self.projects[pidx].entries[index].pending_auto_open = false;
@@ -4073,6 +4354,15 @@ impl App {
             && self.active_project().map(|p| p.id) != Some(state.project)
         {
             self.edit_project = None;
+        }
+        // Attachment paths belong to one machine and one agent: the chips
+        // go with the selection they were pasted for (GTK clears on a
+        // context change the same way).
+        if self.composer_context.is_some()
+            && self.composer_context != self.selected_run().map(|(p, t, _)| (p, t))
+        {
+            self.composer_attachments.clear();
+            self.composer_context = None;
         }
         // Running-tier flips stamp last_used and re-sort the sidebar —
         // checked here for the same reason as the git view above: the
@@ -4183,6 +4473,7 @@ impl App {
                 // pointed at this machine's hardware. PDEATHSIG covers the
                 // exits that skip this (crash, SIGKILL, cargo watch).
                 remote::mic::shutdown();
+                instance::release();
                 // The MCP sockets go too — a socket file nothing answers on
                 // would have `tuxflow-mcp` connecting to a dead server.
                 for pidx in 0..self.projects.len() {
@@ -5279,7 +5570,7 @@ impl App {
                     // chord (`AppAction::Paste` above): plain Ctrl+V on a
                     // remote AGENT terminal, where start() rebinds it to
                     // the widget's Paste. Reaching here means the widget
-                    // found no pal().text to paste — the clipboard holds an image
+                    // found no text to paste — the clipboard holds an image
                     // (or nothing); the guard keeps a stray unfocused chord
                     // from typing into a terminal it was never aimed at.
                     iced::keyboard::Key::Character(c)
@@ -5400,22 +5691,136 @@ impl App {
                 // The composer types into the selected terminal like the
                 // GTK composer_bar does via feed_child — local input beats
                 // ssh typing latency for remote agents.
-                if !self.composer.is_empty() {
-                    let selected = self
-                        .projects
-                        .get_mut(self.active)
-                        .and_then(|p| p.entries.get_mut(p.selected))
-                        .and_then(|e| e.terminal.as_mut());
-                    if let Some(term) = selected {
+                let Some((project, term, run)) = self.selected_run() else {
+                    return Task::none();
+                };
+                if self.composer_attachments.is_empty() {
+                    if !self.composer.is_empty() {
                         let mut bytes = self.composer.clone().into_bytes();
                         bytes.push(b'\r');
-                        term.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
-                            bytes,
-                        )));
+                        self.write_to_run(project, term, run, bytes);
                         self.composer.clear();
                     }
+                    return Task::none();
+                }
+                // GTK's deliver_composed: each attachment goes first through
+                // the agent's NATIVE route (staged as its clipboard, then
+                // Ctrl+V — Claude shows [Image #N] rather than a path),
+                // then the text, then Enter.
+                let remaining: std::collections::VecDeque<Attachment> =
+                    std::mem::take(&mut self.composer_attachments).into();
+                let text = std::mem::take(&mut self.composer);
+                self.composer_context = None;
+                self.composer_deliver(project, term, run, remaining, text, false)
+            }
+            Event::ComposerPasted(value) => {
+                // text_input already spliced whatever text the clipboard
+                // held and reports the field. Unchanged = nothing was text:
+                // an image-only clipboard reads as "" (fork patch 15's
+                // lesson), and that is the chip route.
+                let unchanged = value == self.composer;
+                self.composer = value;
+                if unchanged {
+                    self.composer_attach_image()
+                } else {
+                    Task::none()
+                }
+            }
+            Event::ComposerAttach {
+                project,
+                term,
+                result,
+            } => {
+                match result {
+                    // Only for the selection it was pasted into — a switch
+                    // mid-upload must not attach a host's path to a local
+                    // agent, or another project's.
+                    Ok(att)
+                        if self
+                            .selected_run()
+                            .is_some_and(|(p, t, _)| (p, t) == (project, term)) =>
+                    {
+                        log::info!(
+                            "composer: attached {} ({}x{})",
+                            att.path,
+                            att.width,
+                            att.height
+                        );
+                        self.composer_attachments.push(att);
+                        self.composer_context = Some((project, term));
+                    }
+                    Ok(att) => {
+                        log::info!("composer: attachment {} dropped, selection moved", att.path)
+                    }
+                    Err(e) => log::warn!("composer image paste failed: {e}"),
                 }
                 Task::none()
+            }
+            Event::ComposerRemoveAttachment(i) => {
+                if i < self.composer_attachments.len() {
+                    self.composer_attachments.remove(i);
+                }
+                if self.composer_attachments.is_empty() {
+                    self.composer_context = None;
+                }
+                Task::none()
+            }
+            Event::ComposerDeliver {
+                project,
+                term,
+                run,
+                remaining,
+                text,
+                after,
+            } => self.composer_deliver(project, term, run, remaining, text, after),
+            Event::ComposerStaged {
+                project,
+                term,
+                run,
+                remaining,
+                text,
+                result,
+            } => {
+                match result {
+                    Ok(()) => self.write_to_run(project, term, run, vec![0x16]),
+                    Err(e) => log::error!("composer send: staging attachment failed: {e}"),
+                }
+                Task::perform(tokio::time::sleep(COMPOSER_INGEST), move |_| {
+                    Event::ComposerDeliver {
+                        project,
+                        term,
+                        run,
+                        remaining,
+                        text,
+                        after: true,
+                    }
+                })
+            }
+            Event::ComposerEnter { project, term, run } => {
+                self.write_to_run(project, term, run, vec![b'\r']);
+                Task::none()
+            }
+            Event::InstanceOpen(keys) => {
+                let mut tasks = Vec::new();
+                for key in keys {
+                    match self.projects.iter().position(|p| p.location.key() == key) {
+                        Some(idx) => tasks.push(self.activate_project(idx)),
+                        None => {
+                            log::info!("instance: opening {key}");
+                            if !self.saved.directories.iter().any(|d| d == &key) {
+                                self.saved.add(&key);
+                                self.saved.save();
+                            }
+                            tasks.push(self.open_project(&key));
+                            self.active = self.projects.len() - 1;
+                            tasks.push(self.poll_git_fetch());
+                        }
+                    }
+                }
+                // GTK's `activate`: the window comes forward whether or not
+                // anything was opened.
+                tasks.push(iced::window::oldest().and_then(iced::window::gain_focus));
+                Task::batch(tasks)
             }
             Event::OpenBadge => {
                 if let Some(project) = self.active_project()
@@ -7480,26 +7885,64 @@ impl App {
             && self.settings.tools.agent_composer
         {
             let placeholder = format!("Message to {}\u{2026}", entry.config.name);
-            col = col.push(hline()).push(
-                container(
-                    row![
-                        text_input(&placeholder, &self.composer)
-                            .on_input(Event::ComposerChanged)
-                            .on_submit(Event::ComposerSend)
-                            .style(theme::input(accent))
-                            .padding([7, 14])
-                            .size(13),
-                        button(text("Send").size(12).font(bold()))
-                            .padding([7, 16])
-                            .style(theme::primary(accent))
-                            .on_press(Event::ComposerSend),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
-                )
-                .padding([8, 10])
-                .style(theme::chrome),
+            // The chips slot is ALWAYS in the tree, empty or not: a
+            // conditional row above the text input changes the tree's
+            // shape and iced then rebuilds the input, dropping its focus
+            // and cursor the moment the first chip lands (the DROP_GAP
+            // rule — only the padding varies).
+            let chips = self.composer_attachments.iter().enumerate().fold(
+                row![].spacing(6),
+                |r, (i, att)| {
+                    r.push(
+                        container(
+                            row![
+                                iced::widget::image(att.thumb.clone()).height(Length::Fixed(44.0)),
+                                button(text("\u{00d7}").size(13))
+                                    .padding([2, 6])
+                                    .style(theme::pill_button(accent))
+                                    .on_press(Event::ComposerRemoveAttachment(i)),
+                            ]
+                            .spacing(4)
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .padding(3)
+                        .style(theme::menu_card),
+                    )
+                },
             );
+            let chips_pad = if self.composer_attachments.is_empty() {
+                0.0
+            } else {
+                8.0
+            };
+            let mut composer = column![
+                container(
+                    scrollable(chips).direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(0).scroller_width(0),
+                    ))
+                )
+                .padding(iced::Padding::ZERO.bottom(chips_pad))
+            ];
+            composer = composer.push(
+                row![
+                    text_input(&placeholder, &self.composer)
+                        .on_input(Event::ComposerChanged)
+                        .on_paste(Event::ComposerPasted)
+                        .on_submit(Event::ComposerSend)
+                        .style(theme::input(accent))
+                        .padding([7, 14])
+                        .size(13),
+                    button(text("Send").size(12).font(bold()))
+                        .padding([7, 16])
+                        .style(theme::primary(accent))
+                        .on_press(Event::ComposerSend),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+            col = col
+                .push(hline())
+                .push(container(composer).padding([8, 10]).style(theme::chrome));
         }
 
         col.into()

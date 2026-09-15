@@ -15,7 +15,7 @@ Built in Rust on [iced](https://iced.rs) with its own terminal widget (an [alacr
 - **Process management** — Start, stop, restart dev servers and background tasks from one place
 - **AI agent support** — Run Claude Code, Codex, Gemini CLI, OpenCode, and other AI agents side-by-side
 - **Agent idle notifications** — Get notified when an agent finishes its turn (terminal BEL + optional silence fallback), with per-agent sound overrides
-- **Message composer** — Write to an agent in a local box under the terminal (Enter sends, Shift+Enter adds a line) instead of typing into the PTY — no per-keystroke round trip when the agent runs on a remote host.
+- **Message composer** — Write to an agent in a local box under the terminal (Enter sends, Shift+Enter adds a line) instead of typing into the PTY — no per-keystroke round trip when the agent runs on a remote host. Pasted images attach as chips and are delivered to the agent on send
 - **Voice input for remote agents** — Optional microphone bridge so an agent running on a server records through this machine's mic over the same SSH connection (Settings → Tools → Agents)
 - **Multi-project workspace** — Open multiple projects in one window with expandable sidebar sections, optional recently-used-first sorting, and a filter that narrows both projects and processes
 - **Remote projects (SSH)** — Open a project that lives on another machine: processes run on the host inside persistent tmux sessions, so dropped connections and app restarts just detach and reattach — dev servers keep running. Detected ports auto-tunnel to localhost, clipboard and image paste bridge both ways, and git, stack detection, and project icons all work over the same shared connection

@@ -4,10 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Read current version from Cargo.toml and bump patch
+# Read current version from Cargo.toml and bump patch, unless an explicit
+# version is given (`scripts/release.sh 0.2.0` for a minor/major bump).
 CURRENT=$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+if [ $# -ge 1 ]; then
+    NEW_VERSION="$1"
+    [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Error: '$NEW_VERSION' is not MAJOR.MINOR.PATCH"; exit 1; }
+    [ "$(printf '%s\n%s\n' "$CURRENT" "$NEW_VERSION" | sort -V | tail -1)" = "$NEW_VERSION" ] && [ "$NEW_VERSION" != "$CURRENT" ] \
+        || { echo "Error: $NEW_VERSION is not newer than $CURRENT"; exit 1; }
+else
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+    NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+fi
 
 echo "Current version: $CURRENT"
 echo "New version:     $NEW_VERSION"
@@ -52,8 +60,10 @@ echo "  Updated Cargo.toml"
 sed -i "/<releases>/a\\    <release version=\"$NEW_VERSION\" date=\"$TODAY\">\n      <description>\n        <p>Release $NEW_VERSION.</p>\n      </description>\n    </release>" data/com.tuxflow.TuxFlow.metainfo.xml
 echo "  Updated data/com.tuxflow.TuxFlow.metainfo.xml"
 
-# 3. Update Cargo.lock
-cargo generate-lockfile 2>/dev/null || true
+# 3. Update Cargo.lock — only the workspace's own entries. generate-lockfile
+# would re-resolve every dependency to its newest version here, AFTER the
+# checks above ran against the old lock.
+cargo update --workspace --offline 2>/dev/null || cargo update --workspace
 echo "  Updated Cargo.lock"
 
 # 4. Commit, tag, push

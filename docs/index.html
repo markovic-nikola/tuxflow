@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TuxFlow — Linux-Native Dev Environment Manager</title>
-  <meta name="description" content="Manage dev servers, AI coding agents, SSH connections, and terminals from a single GTK4 window — on this machine or on a server. Built with Rust for Linux.">
+  <meta name="description" content="Manage dev servers, AI coding agents, SSH connections, and terminals from a single window — on this machine or on a server. Built with Rust for Linux, no toolkit required.">
   <meta property="og:title" content="TuxFlow — Linux-Native Dev Environment Manager">
-  <meta property="og:description" content="Processes, AI agents, and terminals — local or on a remote host over SSH, managed together. Native Linux desktop app built with Rust + GTK4.">
+  <meta property="og:description" content="Processes, AI agents, and terminals — local or on a remote host over SSH, managed together. Native Linux desktop app built with Rust, one binary for X11 and Wayland.">
   <meta property="og:image" content="hero.png">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="style.css">
@@ -37,7 +37,7 @@
 
 <!-- Hero -->
 <section class="hero" id="top">
-  <div class="hero-badge"><span class="dot"></span> Built with Rust + GTK4</div>
+  <div class="hero-badge"><span class="dot"></span> Built with Rust · one binary, no toolkit</div>
   <h1>One window for<br>your <span class="gold">dev environment</span></h1>
   <p class="tagline">Processes, AI agents, and terminals &mdash; on this machine or on a server over SSH, managed together. A native Linux desktop app for the way you actually work.</p>
   <div class="cta">
@@ -138,7 +138,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
       </span>
       <h3>Embedded Terminals</h3>
-      <p>Full VTE4 terminals with true color, mouse events, search, clickable URLs, and configurable color schemes.</p>
+      <p>Alacritty-grade terminals with true color, mouse events, scrollback search, clickable URLs, and configurable color schemes.</p>
     </div>
 
     <div class="feature-card">
@@ -334,18 +334,14 @@ cd tuxflow-*-x86_64-linux
           <span class="code-block-dots"><span></span><span></span><span></span></span>
           <span>shell</span>
         </div>
-<pre><code># Ubuntu/Debian
-sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev build-essential
-
-# Fedora
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
-
-# Arch
-sudo pacman -S gtk4 libadwaita vte4
+<pre><code># A Rust toolchain and a C compiler — no toolkit dev packages
+#   Ubuntu/Debian: sudo apt install build-essential
+#   Fedora:        sudo dnf install gcc
+#   Arch:          sudo pacman -S base-devel
 
 git clone https://github.com/markovic-nikola/tuxflow.git
 cd tuxflow
-cargo build --release
+cargo build --release -p tuxflow
 ./target/release/tuxflow</code></pre>
       </div>
     </div>

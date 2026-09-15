@@ -5493,22 +5493,18 @@ dependencies = [
 name = "tuxflow"
 version = "0.1.70"
 dependencies = [
+ "alacritty_terminal",
+ "arboard",
  "dirs",
  "env_logger",
- "gdk4-x11",
- "glob",
- "gtk4",
- "libadwaita",
+ "iced",
+ "iced_term",
  "log",
- "nix",
- "serde",
- "serde_json",
- "tempfile",
+ "open",
+ "png 0.18.1",
  "tokio",
  "tuxflow-core",
- "uuid",
- "vte4",
- "x11",
+ "zbus",
 ]
 
 [[package]]
@@ -5533,21 +5529,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "tuxflow-iced"
+name = "tuxflow-gtk"
 version = "0.1.70"
 dependencies = [
- "alacritty_terminal",
- "arboard",
  "dirs",
  "env_logger",
- "iced",
- "iced_term",
+ "gdk4-x11",
+ "glob",
+ "gtk4",
+ "libadwaita",
  "log",
- "open",
- "png 0.18.1",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tuxflow-core",
- "zbus",
+ "uuid",
+ "vte4",
+ "x11",
 ]
 
 [[package]]

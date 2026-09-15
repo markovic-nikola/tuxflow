@@ -1,16 +1,18 @@
 [workspace]
-members = ["tuxflow-core", "tuxflow-iced", "vendor/iced_term"]
+members = ["tuxflow-core", "tuxflow-gtk", "vendor/iced_term"]
 # The spike is a frozen record with its own lockfile; it consumes
 # vendor/iced_term as an external path dep.
 exclude = ["spike"]
 
 # ONE version for the .deb and every binary in it: the update chip compares
-# the running binary's CARGO_PKG_VERSION against the latest release, and a
-# tuxflow-iced left at its own 0.1.0 would report an update forever.
+# the running binary's CARGO_PKG_VERSION against the latest release, so
+# every package must inherit this rather than carry its own.
 # scripts/release.sh bumps the first `version = ` line, which is this one.
 [workspace.package]
 version = "0.1.70"
 
+# The app: the iced shell, built on the vendored iced_term fork. The GTK
+# shell it replaced lives in tuxflow-gtk/ until it is deleted.
 [package]
 name = "tuxflow"
 version.workspace = true
@@ -23,10 +25,6 @@ homepage = "https://markovic-nikola.github.io/tuxflow/"
 readme = "README.md"
 default-run = "tuxflow"
 
-[lib]
-name = "tuxflow"
-path = "src/lib.rs"
-
 [[bin]]
 name = "tuxflow"
 path = "src/main.rs"
@@ -37,28 +35,28 @@ path = "src/bin/tuxflow-mcp.rs"
 
 [dependencies]
 tuxflow-core = { path = "tuxflow-core" }
-gtk4 = { version = "0.11", features = ["v4_14"] }
-gdk4-x11 = { version = "0.11", features = ["xlib"] }
-x11 = { version = "2.21", features = ["xlib"] }
-libadwaita = { version = "0.9", features = ["v1_5"] }
-vte4 = { version = "0.10", features = ["v0_76"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
-log = "0.4"
-env_logger = "0.11"
-uuid = { version = "1", features = ["v4"] }
-glob = "0.3"
+iced_term = { path = "vendor/iced_term" }
+# `image` is what draws project avatars (PNG/WEBP/ICO); `svg` already came
+# free with the vendored fork's resvg and handles the vector half.
+iced = { version = "0.14.0", features = ["tokio", "svg", "canvas", "image"] }
+alacritty_terminal = "0.25.1"
+tokio = { version = "1.53.1", features = ["time"] }
+log = "0.4.34"
+open = "5"
+env_logger = "0.11.11"
+arboard = "3"
+png = "0.18"
 dirs = "6"
-nix = { version = "0.29", features = ["signal", "process"] }
-
-[dev-dependencies]
-tempfile = "3"
+# Desktop notifications over ONE app-lifetime bus connection (see notify.rs);
+# already in the tree through iced, so this costs no build.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [package.metadata.deb]
 maintainer = "Nikola Markovic <markovic-nikola@users.noreply.github.com>"
 copyright = "2026, TuxFlow Contributors"
-depends = "$auto, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libvte-2.91-gtk4-0"
+# $auto resolves the shared libraries the binary actually links (X11,
+# Wayland, fontconfig, ...); there is no toolkit runtime to name any more.
+depends = "$auto"
 recommends = "pulseaudio-utils"
 section = "devel"
 priority = "optional"
@@ -72,16 +70,6 @@ assets = [
 		"target/release/tuxflow-mcp",
 		"usr/bin/",
 		"755",
-	],
-	[
-		"target/release/tuxflow-iced",
-		"usr/bin/",
-		"755",
-	],
-	[
-		"data/com.tuxflow.TuxFlowIced.desktop",
-		"usr/share/applications/",
-		"644",
 	],
 	[
 		"data/com.tuxflow.TuxFlow.desktop",
@@ -99,21 +87,6 @@ assets = [
 		"644",
 	],
 	[
-		"data/icons/hicolor/scalable/apps/tuxflow-logo-symbolic.svg",
-		"usr/share/icons/hicolor/scalable/apps/",
-		"644",
-	],
-	[
-		"data/icons/hicolor/scalable/actions/ai-brain-symbolic.svg",
-		"usr/share/icons/hicolor/scalable/actions/",
-		"644",
-	],
-	[
-		"data/icons/hicolor/scalable/actions/tuxflow-remote-symbolic.svg",
-		"usr/share/icons/hicolor/scalable/actions/",
-		"644",
-	],
-	[
 		"README.md",
 		"usr/share/doc/tuxflow/",
 		"644",
@@ -122,5 +95,5 @@ assets = [
 extended-description = """\
 TuxFlow lets developers manage their entire dev environment from one window — \
 start/stop/restart dev servers, run multiple AI coding agents side by side, \
-monitor process status and resource usage, and expose an MCP server so AI agents \
+follow their output and status, and expose an MCP server so AI agents \
 can observe and control neighboring processes."""

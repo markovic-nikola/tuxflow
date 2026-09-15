@@ -1,25 +1,26 @@
-# TuxFlow Preview — test drive guide
+# TuxFlow — test drive guide
 
-The iced shell, feature-complete for daily remote work. It shares
-`~/.config/tuxflow/{projects,settings}.toml` with the GTK app — same
-workspace, same custom commands, same keybindings; changes made in either
-shell land in the other. Running both at once is fine (saves are atomic),
-just don't edit the *same* process in both simultaneously.
+The iced shell, now the app. It shares
+`~/.config/tuxflow/{projects,settings}.toml` with the retired GTK shell
+(`make gtk`) — same workspace, same custom commands, same keybindings;
+changes made in either land in the other. Running both at once is fine
+(saves are atomic), just don't edit the *same* process in both
+simultaneously.
 
 ## Run it
 
 ```bash
 cd ~/Projects/tuxflow
 git pull
-make iced                                  # release build + run (debug misrepresents latency)
-./target/release/tuxflow-iced ssh://host/dir   # add a project from the CLI
+make run                                   # release build + run (debug misrepresents latency)
+./target/release/tuxflow ssh://host/dir   # add a project from the CLI
 ```
 
-`make dev` still runs the GTK app; `make dev-iced` is the live-reload
-equivalent for hacking on the iced shell.
+`make dev` is the live-reload equivalent for hacking on the app; `make gtk`
+/ `make dev-gtk` run the retired GTK shell.
 
-From the next tagged release the .deb ships it as **TuxFlow Preview** in
-the app grid (`/usr/bin/tuxflow-iced`).
+The .deb ships it as `/usr/bin/tuxflow`, the **TuxFlow** entry in the app
+grid.
 
 ## Shortcuts
 
@@ -100,7 +101,7 @@ memory, rendering under your real workload.
   When Focused drops what you are looking at: the window has focus AND the
   process is the selected one of the active project with no full-pane
   view over it — switch to another row and the same bell notifies. Watch
-  the gates with `RUST_LOG=tuxflow_iced=debug` (`bell from X`, `agent
+  the gates with `RUST_LOG=tuxflow=debug` (`bell from X`, `agent
   idle: X — notifying / suppressed, focused`). Headless: a fake
   `org.freedesktop.Notifications` on `dbus-run-session` records every
   Notify; mind that local commands run through your LOGIN shell, so a
@@ -262,7 +263,7 @@ memory, rendering under your real workload.
 
 Anything that feels off — a paste that didn't land, a badge on the wrong
 port, a stutter — note the project, the process, and what the terminal
-showed. `RUST_LOG=info ./target/release/tuxflow-iced 2>tuxflow-iced.log`
+showed. `RUST_LOG=info ./target/release/tuxflow 2>tuxflow.log`
 captures the app's own account.
 
 ## MCP server (agents see what is running)

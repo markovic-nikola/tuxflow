@@ -17,11 +17,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -36,7 +31,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-release-
 
       - name: Build release binaries
-        run: cargo build --release -p tuxflow -p tuxflow-iced
+        run: cargo build --release -p tuxflow
 
       - name: Install cargo-deb
         run: cargo install cargo-deb

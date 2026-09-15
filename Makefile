@@ -1,25 +1,25 @@
-.PHONY: help dev run run-mcp build build-release test fmt clippy lint deb install uninstall clean release
+.PHONY: help run dev run-mcp build build-release test fmt clippy lint deb install uninstall release clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+
+run: ## Run the app, release (a debug build misrepresents terminal latency)
+	cargo run --release
 
 dev: ## Live reload with cargo-watch (debug build)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
 	cargo watch -x run
 
-run: ## Run the app, release (debug misrepresents terminal latency)
-	cargo run --release
-
-run-mcp: ## Run MCP server binary
+run-mcp: ## Run the tuxflow-mcp client against a running app (stdio <-> project socket)
 	cargo run --bin tuxflow-mcp
 
-build: ## Debug build of the app (tuxflow + tuxflow-mcp)
-	cargo build -p tuxflow
+build: ## Debug build (tuxflow + tuxflow-mcp)
+	cargo build
 
-build-release: ## Release build of the app
-	cargo build --release -p tuxflow
+build-release: ## Release build
+	cargo build --release
 
-test: ## Run all tests
+test: ## Run every test in the workspace
 	cargo test --all
 
 fmt: ## Format code
@@ -33,17 +33,17 @@ lint: ## Run all checks (same as CI)
 	cargo clippy --all-targets -- -W clippy::all
 	cargo test --all
 
-deb: build-release ## Build .deb package
+deb: build-release ## Build the .deb package (needs cargo-deb)
 	cargo deb --no-build
 
-install: ## Install to /usr/local
-	./scripts/install.sh
+install: build-release ## Install the release build to /usr/local (PREFIX=... to change)
+	./scripts/install.sh $(if $(PREFIX),--prefix $(PREFIX),)
 
-uninstall: ## Uninstall from /usr/local
-	./scripts/install.sh --uninstall
+uninstall: ## Remove the installed files
+	./scripts/install.sh --uninstall $(if $(PREFIX),--prefix $(PREFIX),)
 
-release: ## Bump patch version, tag, and push
-	./scripts/release.sh
+release: ## Bump patch, tag and push; V=0.3.0 for an explicit version
+	./scripts/release.sh $(V)
 
 clean: ## Clean build artifacts
 	cargo clean

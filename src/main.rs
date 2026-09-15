@@ -1833,47 +1833,47 @@ impl App {
         let entry = &mut project.entries[index];
         let separator_label = run_label(&entry.status);
         // (widget id to focus, terminal id, whether `fresh_id` was taken)
-        let spawned: std::io::Result<(iced::widget::Id, u64, bool)> = if entry.terminal.is_some() {
-            let id = entry.term_id.unwrap_or(fresh_id);
-            let term = entry.terminal.as_mut().expect("terminal, just checked");
-            let cols = term.backend().renderable_content().terminal_size.columns();
-            let banner = banner::run_separator(cols, separator_label);
-            term.respawn(settings.backend, banner.as_bytes())
-                .map(|()| (term.widget_id().clone(), id, false))
-        } else {
-            iced_term::Terminal::new(fresh_id, settings).map(|mut term| {
-                // Reserve the app's chords before the first keystroke —
-                // the stock bindings would type them into the shell.
-                term.handle(iced_term::Command::AddBindings(reservations));
-                if remote_agent && ctrl_v_is_free {
-                    // GTK parity (window.rs, "plain Ctrl+V in a remote
-                    // agent terminal"): the agent's raw ^V reads the
-                    // HOST's clipboard, which is not where the user's
-                    // clipboard lives — paste text from here instead.
-                    // An image-only clipboard leaves the widget nothing
-                    // to paste, so the chord falls through uncaptured to
-                    // the Hotkey handler's paste_image bridge.
-                    term.handle(iced_term::Command::AddBindings(vec![(
-                        iced_term::bindings::Binding {
-                            target: iced_term::bindings::InputKind::Char("v".into()),
-                            modifiers: iced::keyboard::Modifiers::CTRL,
-                            terminal_mode_include: iced_term::TermMode::empty(),
-                            terminal_mode_exclude: iced_term::TermMode::empty(),
-                        },
-                        iced_term::bindings::BindingAction::Paste,
-                    )]));
-                }
-                if remote_agent {
-                    // Hold-to-talk over a jittery link: Space repeats
-                    // and the release surface as actions and the hold is
-                    // relayed on the host (fork patch 22, `hold_repeat`).
-                    term.handle(iced_term::Command::SetHoldRelay(true));
-                }
-                let widget = term.widget_id().clone();
-                entry.terminal = Some(term);
-                (widget, fresh_id, true)
-            })
-        };
+        let spawned: std::io::Result<(iced::widget::Id, u64, bool)> =
+            if let Some(term) = entry.terminal.as_mut() {
+                let id = entry.term_id.unwrap_or(fresh_id);
+                let cols = term.backend().renderable_content().terminal_size.columns();
+                let banner = banner::run_separator(cols, separator_label);
+                term.respawn(settings.backend, banner.as_bytes())
+                    .map(|()| (term.widget_id().clone(), id, false))
+            } else {
+                iced_term::Terminal::new(fresh_id, settings).map(|mut term| {
+                    // Reserve the app's chords before the first keystroke —
+                    // the stock bindings would type them into the shell.
+                    term.handle(iced_term::Command::AddBindings(reservations));
+                    if remote_agent && ctrl_v_is_free {
+                        // GTK parity (window.rs, "plain Ctrl+V in a remote
+                        // agent terminal"): the agent's raw ^V reads the
+                        // HOST's clipboard, which is not where the user's
+                        // clipboard lives — paste text from here instead.
+                        // An image-only clipboard leaves the widget nothing
+                        // to paste, so the chord falls through uncaptured to
+                        // the Hotkey handler's paste_image bridge.
+                        term.handle(iced_term::Command::AddBindings(vec![(
+                            iced_term::bindings::Binding {
+                                target: iced_term::bindings::InputKind::Char("v".into()),
+                                modifiers: iced::keyboard::Modifiers::CTRL,
+                                terminal_mode_include: iced_term::TermMode::empty(),
+                                terminal_mode_exclude: iced_term::TermMode::empty(),
+                            },
+                            iced_term::bindings::BindingAction::Paste,
+                        )]));
+                    }
+                    if remote_agent {
+                        // Hold-to-talk over a jittery link: Space repeats
+                        // and the release surface as actions and the hold is
+                        // relayed on the host (fork patch 22, `hold_repeat`).
+                        term.handle(iced_term::Command::SetHoldRelay(true));
+                    }
+                    let widget = term.widget_id().clone();
+                    entry.terminal = Some(term);
+                    (widget, fresh_id, true)
+                })
+            };
 
         match spawned {
             Ok((widget, id, took_fresh_id)) => {
@@ -9755,7 +9755,7 @@ mod tests {
     /// below it most-recently-used first, never-used last in manual order.
     #[test]
     fn recent_first_orders_in_two_tiers() {
-        let mut rows = vec![
+        let mut rows = [
             ("stopped-recent", recent_order_key(false, 200, 0)),
             ("running-old", recent_order_key(true, 50, 1)),
             ("never-used-b", recent_order_key(false, 0, 3)),

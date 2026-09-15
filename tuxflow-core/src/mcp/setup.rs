@@ -25,14 +25,6 @@ pub const EXPOSED_TOOLS: &[(&str, &str)] = &[
     ("start_process", "Start a stopped process"),
 ];
 
-const MCP_CONFIG: &str = r#"{
-  "mcpServers": {
-    "tuxflow": {
-      "command": "tuxflow-mcp"
-    }
-  }
-}"#;
-
 /// The command an agent runs to reach TuxFlow: the shipped binary locally,
 /// the shim TuxFlow installs on a remote host (not on the pane's PATH, so
 /// spelled out). Both honour `TUXFLOW_MCP_SOCKET`, so no project argument.

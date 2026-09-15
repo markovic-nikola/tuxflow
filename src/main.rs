@@ -31,7 +31,7 @@ use alacritty_terminal::event::Event as AEvent;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::ClipboardType;
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
 use iced::{Element, Length, Size, Subscription, Task};
 use iced_term::{BackendCommand, SearchDirection, TerminalView};
 use tuxflow_core::config::projects::SavedProjects;
@@ -576,7 +576,9 @@ struct App {
     /// A dpkg-owned binary with a .deb on the release: the card can
     /// install in place. Probed with the check.
     update_can_install: bool,
-    composer: String,
+    /// The message box under an agent terminal — multi-line, like GTK's
+    /// TextView: Enter sends, Shift+Enter breaks the line.
+    composer: text_editor::Content,
     /// Pending image attachments — chips above the composer, delivered
     /// ahead of the text on send.
     composer_attachments: Vec<Attachment>,
@@ -1036,12 +1038,18 @@ enum Event {
         term: u64,
         generation: u64,
     },
-    ComposerChanged(String),
+    /// An edit in the composer. A paste of NOTHING is the image route: an
+    /// image-only clipboard reads as "" on X11 (fork patch 15), and that
+    /// becomes an attachment chip instead of an empty edit.
+    ComposerAction(text_editor::Action),
+    /// Ctrl+V in the composer: read the clipboard ourselves. The editor's
+    /// own Paste publishes nothing when the read yields no text, so an
+    /// image-only clipboard would be a dead chord.
+    ComposerPaste,
+    /// The clipboard's text, if it had any: paste it; otherwise the image
+    /// route (an image-only clipboard reads as "" or None, patch 15).
+    ComposerClipboard(Option<String>),
     ComposerSend,
-    /// The composer's paste hook: the field's whole contents after the
-    /// paste. Unchanged contents mean the clipboard held no text — an
-    /// image, which becomes an attachment chip.
-    ComposerPasted(String),
     /// The paste worker materialized an image on the agent's machine.
     ComposerAttach {
         project: u64,
@@ -1181,7 +1189,7 @@ impl App {
             update_badge: UpdateBadge::Hidden,
             update_card: None,
             update_can_install: false,
-            composer: String::new(),
+            composer: text_editor::Content::new(),
             composer_attachments: Vec::new(),
             composer_context: None,
             sidebar_visible: true,
@@ -5677,10 +5685,21 @@ impl App {
                 }
                 Task::none()
             }
-            Event::ComposerChanged(value) => {
-                self.composer = value;
+            Event::ComposerAction(action) => {
+                self.composer.perform(action);
                 Task::none()
             }
+            Event::ComposerPaste => iced::clipboard::read().map(Event::ComposerClipboard),
+            Event::ComposerClipboard(text) => match text {
+                Some(text) if !text.is_empty() => {
+                    self.composer
+                        .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                            std::sync::Arc::new(text),
+                        )));
+                    Task::none()
+                }
+                _ => self.composer_attach_image(),
+            },
             Event::ComposerSend => {
                 // Ctrl+Return: GTK's capture-phase focus-terminal alias wins
                 // over the composer's own Enter, so it leaves the draft in
@@ -5694,37 +5713,21 @@ impl App {
                 let Some((project, term, run)) = self.selected_run() else {
                     return Task::none();
                 };
-                if self.composer_attachments.is_empty() {
-                    if !self.composer.is_empty() {
-                        let mut bytes = self.composer.clone().into_bytes();
-                        bytes.push(b'\r');
-                        self.write_to_run(project, term, run, bytes);
-                        self.composer.clear();
-                    }
+                let text = self.composer.text().trim_end().to_string();
+                if text.is_empty() && self.composer_attachments.is_empty() {
                     return Task::none();
                 }
                 // GTK's deliver_composed: each attachment goes first through
                 // the agent's NATIVE route (staged as its clipboard, then
                 // Ctrl+V — Claude shows [Image #N] rather than a path),
-                // then the text, then Enter.
+                // then the text in one bracketed paste (a newline inside it
+                // inserts, so a multi-line draft stays one message), then
+                // Enter.
                 let remaining: std::collections::VecDeque<Attachment> =
                     std::mem::take(&mut self.composer_attachments).into();
-                let text = std::mem::take(&mut self.composer);
+                self.composer = text_editor::Content::new();
                 self.composer_context = None;
                 self.composer_deliver(project, term, run, remaining, text, false)
-            }
-            Event::ComposerPasted(value) => {
-                // text_input already spliced whatever text the clipboard
-                // held and reports the field. Unchanged = nothing was text:
-                // an image-only clipboard reads as "" (fork patch 15's
-                // lesson), and that is the chip route.
-                let unchanged = value == self.composer;
-                self.composer = value;
-                if unchanged {
-                    self.composer_attach_image()
-                } else {
-                    Task::none()
-                }
             }
             Event::ComposerAttach {
                 project,
@@ -7925,20 +7928,50 @@ impl App {
             ];
             composer = composer.push(
                 row![
-                    text_input(&placeholder, &self.composer)
-                        .on_input(Event::ComposerChanged)
-                        .on_paste(Event::ComposerPasted)
-                        .on_submit(Event::ComposerSend)
-                        .style(theme::input(accent))
+                    // Grows with the draft up to GTK's cap (MAX_GROW_LINES ≈
+                    // 110 px), then scrolls inside; the font follows the
+                    // terminal's size setting as GTK's apply_terminal_style
+                    // did.
+                    text_editor(&self.composer)
+                        .placeholder(placeholder)
+                        .max_height(110)
                         .padding([7, 14])
-                        .size(13),
+                        .size(self.settings.appearance.font_size as f32 + 1.0)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                        .style(theme::editor(accent))
+                        .key_binding(|kp| {
+                            use iced::keyboard::{Key, key::Named};
+                            match kp.key.as_ref() {
+                                // Enter sends; Shift+Enter is the newline.
+                                // Ctrl+Enter reaches the same handler, which
+                                // turns it into focus-terminal (GTK's
+                                // capture-phase alias).
+                                Key::Named(Named::Enter) if !kp.modifiers.shift() => {
+                                    Some(text_editor::Binding::Custom(Event::ComposerSend))
+                                }
+                                Key::Named(Named::Enter) => Some(text_editor::Binding::Enter),
+                                Key::Character(c)
+                                    if c.eq_ignore_ascii_case("v")
+                                        && kp.modifiers.command()
+                                        && !kp.modifiers.alt()
+                                        && matches!(
+                                            kp.status,
+                                            text_editor::Status::Focused { .. }
+                                        ) =>
+                                {
+                                    Some(text_editor::Binding::Custom(Event::ComposerPaste))
+                                }
+                                _ => text_editor::Binding::from_key_press(kp),
+                            }
+                        })
+                        .on_action(Event::ComposerAction),
                     button(text("Send").size(12).font(bold()))
                         .padding([7, 16])
                         .style(theme::primary(accent))
                         .on_press(Event::ComposerSend),
                 ]
                 .spacing(8)
-                .align_y(iced::Alignment::Center),
+                .align_y(iced::Alignment::End),
             );
             col = col
                 .push(hline())

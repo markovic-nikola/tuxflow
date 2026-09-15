@@ -3,6 +3,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Two layouts: the release tarball (binaries and data beside this script)
+# and a source checkout (`make install`: binaries in target/release, data
+# under data/). Resolve each file from whichever holds it.
+REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
+src() {
+    for candidate in "$SCRIPT_DIR/$1" "$REPO/target/release/$1" "$REPO/data/$1" "$REPO/data/icons/hicolor/scalable/apps/$1"; do
+        if [ -f "$candidate" ]; then echo "$candidate"; return; fi
+    done
+    echo "Error: cannot find $1 next to this script or under $REPO (run 'cargo build --release' first?)" >&2
+    exit 1
+}
+
 PREFIX="/usr/local"
 USER_INSTALL=false
 UNINSTALL=false
@@ -76,11 +88,11 @@ fi
 
 echo "Installing TuxFlow to $PREFIX..."
 
-install -Dm755 "$SCRIPT_DIR/tuxflow" "$PREFIX/bin/tuxflow"
-install -Dm755 "$SCRIPT_DIR/tuxflow-mcp" "$PREFIX/bin/tuxflow-mcp"
-install -Dm644 "$SCRIPT_DIR/com.tuxflow.TuxFlow.desktop" "$PREFIX/share/applications/com.tuxflow.TuxFlow.desktop"
-install -Dm644 "$SCRIPT_DIR/com.tuxflow.TuxFlow.metainfo.xml" "$PREFIX/share/metainfo/com.tuxflow.TuxFlow.metainfo.xml"
-install -Dm644 "$SCRIPT_DIR/com.tuxflow.TuxFlow.svg" "$PREFIX/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg"
+install -Dm755 "$(src tuxflow)" "$PREFIX/bin/tuxflow"
+install -Dm755 "$(src tuxflow-mcp)" "$PREFIX/bin/tuxflow-mcp"
+install -Dm644 "$(src com.tuxflow.TuxFlow.desktop)" "$PREFIX/share/applications/com.tuxflow.TuxFlow.desktop"
+install -Dm644 "$(src com.tuxflow.TuxFlow.metainfo.xml)" "$PREFIX/share/metainfo/com.tuxflow.TuxFlow.metainfo.xml"
+install -Dm644 "$(src com.tuxflow.TuxFlow.svg)" "$PREFIX/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg"
 
 if command -v gtk-update-icon-cache &>/dev/null; then
     gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true

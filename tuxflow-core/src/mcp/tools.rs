@@ -1,9 +1,6 @@
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
-    handler::server::{
-        tool::ToolRouter,
-        wrapper::{Json, Parameters},
-    },
+    handler::server::wrapper::{Json, Parameters},
     model::{
         ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, RawResource,
         RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, Resource,
@@ -102,19 +99,18 @@ pub struct GetLogsParams {
 
 // --- Server ---
 
+// `#[tool_router]` generates the `Self::tool_router()` constructor and
+// `#[tool_handler]` routes through it directly, so the server holds no
+// router of its own.
 #[derive(Clone)]
 pub struct TuxFlowMcpServer {
-    tool_router: ToolRouter<Self>,
     bridge: McpBridge,
 }
 
 #[tool_router]
 impl TuxFlowMcpServer {
     pub fn new(bridge: McpBridge) -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-            bridge,
-        }
+        Self { bridge }
     }
 
     #[tool(

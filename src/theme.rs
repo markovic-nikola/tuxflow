@@ -54,7 +54,7 @@ pub struct Palette {
     pub wash: Color,
     /// #cca700 / its dark twin — the restart-pending amber.
     pub restarting: Color,
-    /// The status bar's update chip — style.css's `.update-label`.
+    /// The status bar's update chip — the GTK stylesheet's `.update-label`.
     /// Semantic like the git colours: not the accent, which the user sets.
     pub update_chip: Color,
     /// Insertions, and commits waiting to be pushed. Same hue as the
@@ -79,7 +79,7 @@ pub struct Palette {
     pub shadow_scale: f32,
 }
 
-/// The shipped dark shell — direction C's values, matching style.css
+/// The shipped dark shell — direction C's values, matching the GTK stylesheet
 /// where the two shells share a hue.
 pub const DARK: Palette = Palette {
     light: false,
@@ -732,7 +732,7 @@ pub fn process_row(
 }
 
 /// How much of a dragged row is left behind in the sidebar while its
-/// ghost travels — style.css `.dragging { opacity: 0.35 }`. Applied to
+/// ghost travels — the GTK stylesheet's `.dragging { opacity: 0.35 }`. Applied to
 /// the row's ink and dot from the view; a button style can't fade its
 /// content.
 pub const LIFTED_ALPHA: f32 = 0.35;

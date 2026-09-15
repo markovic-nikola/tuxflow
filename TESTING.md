@@ -1,11 +1,8 @@
 # TuxFlow — test drive guide
 
-The iced shell, now the app. It shares
-`~/.config/tuxflow/{projects,settings}.toml` with the retired GTK shell
-(`make gtk`) — same workspace, same custom commands, same keybindings;
-changes made in either land in the other. Running both at once is fine
-(saves are atomic), just don't edit the *same* process in both
-simultaneously.
+The iced shell, now the app. Its `~/.config/tuxflow/{projects,settings}.toml`
+are the files the GTK-era releases wrote, so an upgrade keeps the workspace,
+custom commands and keybindings.
 
 ## Run it
 
@@ -16,8 +13,7 @@ make run                                   # release build + run (debug misrepre
 ./target/release/tuxflow ssh://host/dir   # add a project from the CLI
 ```
 
-`make dev` is the live-reload equivalent for hacking on the app; `make gtk`
-/ `make dev-gtk` run the retired GTK shell.
+`make dev` is the live-reload equivalent for hacking on the app.
 
 The .deb ships it as `/usr/bin/tuxflow`, the **TuxFlow** entry in the app
 grid.

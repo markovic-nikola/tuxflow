@@ -6,7 +6,7 @@
 
 A Linux-native dev environment manager. Manage dev servers, AI coding agents, and terminals from a single window.
 
-Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
+Built in Rust on [iced](https://iced.rs) with its own terminal widget (an [alacritty](https://github.com/alacritty/alacritty)-backed fork of iced_term), so it needs no desktop toolkit installed: one binary, X11 or Wayland.
 
 > **Note:** TuxFlow is in early development. Expect rough edges, missing features, and breaking changes.
 
@@ -15,12 +15,12 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 - **Process management** — Start, stop, restart dev servers and background tasks from one place
 - **AI agent support** — Run Claude Code, Codex, Gemini CLI, OpenCode, and other AI agents side-by-side
 - **Agent idle notifications** — Get notified when an agent finishes its turn (terminal BEL + optional silence fallback), with per-agent sound overrides
-- **Message composer** — Write to an agent in a local box under the terminal (Enter sends, Shift+Enter adds a line) instead of typing into the PTY — no per-keystroke round trip when the agent runs on a remote host. Pasted images attach as chips and are delivered to the agent on send
+- **Message composer** — Write to an agent in a local box under the terminal (Enter sends, Shift+Enter adds a line) instead of typing into the PTY — no per-keystroke round trip when the agent runs on a remote host.
 - **Voice input for remote agents** — Optional microphone bridge so an agent running on a server records through this machine's mic over the same SSH connection (Settings → Tools → Agents)
 - **Multi-project workspace** — Open multiple projects in one window with expandable sidebar sections, optional recently-used-first sorting, and a filter that narrows both projects and processes
 - **Remote projects (SSH)** — Open a project that lives on another machine: processes run on the host inside persistent tmux sessions, so dropped connections and app restarts just detach and reattach — dev servers keep running. Detected ports auto-tunnel to localhost, clipboard and image paste bridge both ways, and git, stack detection, and project icons all work over the same shared connection
 - **SSH connections** — Connect to remote hosts from `~/.ssh/config`, managed like any other process
-- **Embedded terminals** — Full VTE4 terminals with ANSI color, true color, and mouse support
+- **Embedded terminals** — Alacritty-grade terminals with true color, mouse support, scrollback search and clickable URLs
 - **Auto-restart** — Crashed processes restart automatically with exponential backoff
 - **File watching** — Restart processes when source files change (glob patterns)
 - **Git integration** — Status, diff, commit, push, and pull from a built-in dialog; status bar shows the branch with one-click sync (fetch + pull + push) and live working-tree `+/−` line counts
@@ -40,10 +40,9 @@ Built with Rust, GTK4, and libadwaita for a native Linux desktop experience.
 
 ## Requirements
 
-- Linux (Ubuntu 24.04+, Fedora 39+, Arch, openSUSE Tumbleweed)
-- GTK4 (>= 4.12)
-- libadwaita (>= 1.4)
-- VTE4 (vte-2.91-gtk4)
+- Linux (Ubuntu 24.04+, Fedora 39+, Arch, openSUSE Tumbleweed), X11 or Wayland
+- No toolkit runtime: the binary links libc alone and uses the desktop's own X11/Wayland and OpenGL libraries
+- Optional: `tmux` on remote hosts (persistent remote sessions), `paplay` for notification sounds
 
 ## Installation
 
@@ -83,19 +82,15 @@ cd tuxflow-*-x86_64-linux
 ### Build from source
 
 ```bash
-# Install system dependencies (Ubuntu/Debian)
-sudo apt install libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev build-essential
-
-# Install system dependencies (Fedora)
-sudo dnf install gtk4-devel libadwaita-devel vte291-gtk4-devel gcc
-
-# Install system dependencies (Arch)
-sudo pacman -S gtk4 libadwaita vte4
+# A Rust toolchain and a C compiler are all it takes (no toolkit dev packages):
+#   Ubuntu/Debian: sudo apt install build-essential
+#   Fedora:        sudo dnf install gcc
+#   Arch:          sudo pacman -S base-devel
 
 # Clone and build
 git clone https://github.com/markovic-nikola/tuxflow.git
 cd tuxflow
-cargo build --release
+cargo build --release -p tuxflow
 
 # Run
 ./target/release/tuxflow

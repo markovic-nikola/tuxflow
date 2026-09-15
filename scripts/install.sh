@@ -14,10 +14,8 @@ usage() {
     echo "  --prefix DIR  Install to custom prefix (default: /usr/local)"
     echo "  --uninstall   Remove installed files"
     echo ""
-    echo "System dependencies required:"
-    echo "  Ubuntu/Debian: sudo apt install libgtk-4-1 libadwaita-1-0 libvte-2.91-gtk4-0"
-    echo "  Fedora:        sudo dnf install gtk4 libadwaita vte291-gtk4"
-    echo "  Arch:          sudo pacman -S gtk4 libadwaita vte4"
+    echo "No toolkit runtime is needed: the binary links libc alone and loads the"
+    echo "desktop's own X11/Wayland, xkbcommon and OpenGL libraries at run time."
     echo "Notification sounds need paplay (optional):"
     echo "  Ubuntu/Debian/Fedora: pulseaudio-utils    Arch: libpulse"
     exit 0
@@ -95,10 +93,6 @@ fi
 echo ""
 echo "TuxFlow installed successfully!"
 echo ""
-echo "Make sure you have the required system libraries:"
-echo "  Ubuntu/Debian: sudo apt install libgtk-4-1 libadwaita-1-0 libvte-2.91-gtk4-0"
-echo "  Fedora:        sudo dnf install gtk4 libadwaita vte291-gtk4"
-echo "  Arch:          sudo pacman -S gtk4 libadwaita vte4"
 echo "Notification sounds need paplay (optional):"
 echo "  Ubuntu/Debian/Fedora: pulseaudio-utils    Arch: libpulse"
 if [ "$USER_INSTALL" = true ]; then

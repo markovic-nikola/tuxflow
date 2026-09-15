@@ -2603,7 +2603,7 @@ impl TuxFlowWindow {
 
     fn load_css() {
         let provider = gtk4::CssProvider::new();
-        provider.load_from_string(include_str!("../../data/style.css"));
+        provider.load_from_string(include_str!("../../../data/style.css"));
         gtk4::style_context_add_provider_for_display(
             &gdk::Display::default().expect("No display"),
             &provider,

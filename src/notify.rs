@@ -35,7 +35,7 @@ use zbus::zvariant::Value;
 const APP_NAME: &str = "TuxFlow";
 /// The `desktop-entry` hint gio sends: lets the daemon show the app's own
 /// name and icon for the source when the .desktop file is installed.
-const DESKTOP_ID: &str = "com.tuxflow.TuxFlowIced";
+const DESKTOP_ID: &str = "com.tuxflow.TuxFlow";
 
 /// The app's notification connection, opened on first use and kept.
 /// Dropped on a failed call so the next send reconnects rather than

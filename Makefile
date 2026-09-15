@@ -1,30 +1,30 @@
-.PHONY: help dev run run-mcp iced dev-iced build build-release test fmt clippy lint deb install uninstall clean release
+.PHONY: help dev run run-mcp gtk dev-gtk build build-release test fmt clippy lint deb install uninstall clean release
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-dev: ## Live reload with cargo-watch
+dev: ## Live reload with cargo-watch (debug build)
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
 	cargo watch -x run
 
-run: ## Run debug build
-	cargo run
+run: ## Run the app, release (debug misrepresents terminal latency)
+	cargo run --release
 
 run-mcp: ## Run MCP server binary
 	cargo run --bin tuxflow-mcp
 
-iced: ## Run the iced shell, release (debug misrepresents terminal latency)
-	cargo run --release -p tuxflow-iced
+gtk: ## Run the retired GTK shell (needs the GTK4/libadwaita/VTE dev packages)
+	cargo run -p tuxflow-gtk
 
-dev-iced: ## Live reload for iced-shell hacking (debug build)
+dev-gtk: ## Live reload for the retired GTK shell
 	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	cargo watch -x 'run -p tuxflow-iced'
+	cargo watch -x 'run -p tuxflow-gtk'
 
-build: ## Debug build
-	cargo build
+build: ## Debug build of the app (tuxflow + tuxflow-mcp)
+	cargo build -p tuxflow
 
-build-release: ## Release build
-	cargo build --release
+build-release: ## Release build of the app
+	cargo build --release -p tuxflow
 
 test: ## Run all tests
 	cargo test --all

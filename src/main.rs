@@ -1,18 +1,9338 @@
-mod app;
-mod config;
-mod process;
-mod ui;
-mod util;
-mod watcher;
-mod workspace;
+//! TuxFlow — the iced shell, the app since the GTK exit.
+//!
+//! `tuxflow [path | file:///path | ssh://host/dir]…`. Projects come from
+//! `~/.config/tuxflow/projects.toml` (plus any CLI args, which persist),
+//! each with its own process list (config or detection, overlaid with the
+//! user's custom commands/deletions/order — same policy as the GTK app),
+//! ports, tunnels and poll cadence. Add project / add command / add agent
+//! run as inline forms; closing a project detaches its remote sessions.
 
-// Extracted to tuxflow-core (migration M0); the re-export keeps all
-// `crate::detect`/`crate::mcp`/`crate::remote` paths working.
-pub use tuxflow_core::{detect, mcp, remote};
+mod add_project;
+mod add_ssh;
+mod dnd;
+mod edit_project;
+mod git_view;
+mod keys;
+mod mcp;
+mod notify;
+mod processes;
+mod scheme;
+mod settings_ui;
+mod status_dot;
+mod theme;
+mod widgets;
 
-fn main() {
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use alacritty_terminal::event::Event as AEvent;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Line;
+use alacritty_terminal::term::ClipboardType;
+use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::{Element, Length, Size, Subscription, Task};
+use iced_term::{BackendCommand, SearchDirection, TerminalView};
+use tuxflow_core::config::projects::SavedProjects;
+use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
+use tuxflow_core::config::ssh;
+use tuxflow_core::detect::detector;
+use tuxflow_core::remote::probe::ProbeError;
+use tuxflow_core::remote::tunnel::TunnelManager;
+use tuxflow_core::remote::{self, ProjectLocation};
+use tuxflow_core::util::activity;
+use tuxflow_core::util::agents::{self, resume_command_for};
+use tuxflow_core::util::banner;
+use tuxflow_core::util::icon_detector;
+use tuxflow_core::util::port_detector::{self, PortDetector, remap_url_port, rewrite_clicked_url};
+use tuxflow_core::util::update::{self, InstallKind, UpdateInfo};
+use tuxflow_core::util::watch::{self, WatchSet};
+
+use keys::{AppAction, AppKeys};
+use processes::{ProcessEntry, Status, plan_after_exit};
+use status_dot::{spinner, status_dot};
+use theme::{CRASHED, LOCAL_ACCENT, accent_for, pal};
+use tuxflow_core::config::settings::AppSettings;
+use widgets::form_card;
+
+/// Ports-poll cadence: fast while a run is settling (a new forward just
+/// opened), backed off once nothing new appears (GTK behavior).
+const POLL_FAST: Duration = Duration::from_secs(2);
+const POLL_SLOW: Duration = Duration::from_secs(30);
+/// Provisional badges get this long to firm up before auto-open fires.
+const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
+
+/// Frame cadence shared by every [`Anim`] ramp — ~60fps.
+const FRAME: Duration = Duration::from_millis(16);
+/// The sidebar cluster's slide-in (design round F).
+const HOVER_SLIDE_MS: f32 = 140.0;
+/// The gap a drop target opens on its targeted edge: GTK's 2px border +
+/// 2px padding (style.css `.drop-target-above/-below`).
+const DROP_GAP: f32 = 4.0;
+/// The sidebar's collapse/expand glide. Longer than the hover glide: it
+/// moves the whole window's layout, and Adwaita's own flap takes ~200ms.
+const SIDEBAR_SLIDE_MS: f32 = 180.0;
+
+/// One pass of the working-agent sweep across a project card. Slow: this
+/// says "something is thinking", it is not a progress bar.
+const SWEEP_MS: f32 = 2600.0;
+/// Its own cadence, a third of [`FRAME`]'s. The glides last 140–180 ms;
+/// this chain runs for as long as an agent stays busy, which can be
+/// minutes, and every frame repaints the WHOLE window — where GTK's
+/// equivalent spinner is a 14 px cairo widget that redraws alone. Measured
+/// on a release build under llvmpipe, against the same app with the sweep
+/// off and a terminal printing at 20 Hz beside it: 30 fps cost ~25 % of a
+/// core, 20 fps ~9 %. A soft band with no edges, crossing in 2.6 s, moves
+/// ~7 px per frame here — there is nothing at 30 fps worth triple that.
+const SWEEP_FRAME: Duration = Duration::from_millis(50);
+
+/// GTK sidebar parity: AdwOverlaySplitView sizes the sidebar at a quarter
+/// of the window, clamped to the GTK app's min/max (window.rs: 220–400).
+const SIDEBAR_FRACTION: f32 = 0.25;
+const SIDEBAR_MIN: f32 = 220.0;
+const SIDEBAR_MAX: f32 = 400.0;
+/// Width of the collapsed icon rail, and so the floor of the collapse
+/// glide: 16px icon + 7px button padding either side + 4px rail padding.
+const SIDEBAR_RAIL: f32 = 38.0;
+
+/// The sidebar's category sections, in the order they are drawn. This is
+/// the single source for both the render loop and [`App::switch_targets`],
+/// which numbers the Ctrl+1..9 hints by position in the drawn sequence —
+/// the two orders diverging is exactly what makes a row advertise a chord
+/// that lands somewhere else. GTK keeps the same pair in sync by hand
+/// (`project_list.rs`'s `categories` vs `running_names_in_sidebar_order`,
+/// each carrying a comment pointing at the other); here there is one array.
+const SIDEBAR_CATEGORIES: [ProcessCategory; 4] = [
+    ProcessCategory::Agent,
+    ProcessCategory::Command,
+    ProcessCategory::Terminal,
+    ProcessCategory::SSH,
+];
+
+/// How many processes the digit switcher can reach — Ctrl+1..9.
+const SWITCH_SLOTS: usize = 9;
+
+/// Entry indices of one project's rows in the order the sidebar draws
+/// them: grouped by category, each keeping its saved order.
+fn sidebar_order(entries: &[ProcessEntry]) -> impl Iterator<Item = usize> + '_ {
+    SIDEBAR_CATEGORIES.iter().flat_map(move |cat| {
+        (0..entries.len()).filter(move |&i| entries[i].config.category == *cat)
+    })
+}
+
+/// The word on the separator a new run starts under, read off the status
+/// the run is REPLACING — the entry is still wearing the outgoing run's
+/// state when [`App::start`] asks.
+fn run_label(status: &Status) -> &'static str {
+    match status {
+        Status::Reconnecting(_) => "reconnecting",
+        Status::Restarting(_) => "auto-restart",
+        _ => "restarted",
+    }
+}
+
+/// The switcher sequence over a workspace's per-project entry lists. Split
+/// out of [`App::switch_targets`] so the ordering rules can be tested
+/// without standing up a live workspace.
+fn switch_targets_of<'a>(
+    projects: impl IntoIterator<Item = &'a [ProcessEntry]>,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (pidx, entries) in projects.into_iter().enumerate() {
+        for i in sidebar_order(entries) {
+            if entries[i].is_running() {
+                out.push((pidx, i));
+                if out.len() == SWITCH_SLOTS {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A 0..1 progress ramp advanced by a self-scheduling chain of frame
+/// ticks — iced 0.14 has no animation driver, so this is the same
+/// sleep-and-re-fire idiom the restart timers use.
+///
+/// Generation-stamped because a ramp restarted mid-flight (toggle the
+/// sidebar twice quickly, sweep across two rows) leaves the previous
+/// chain in flight: without the stamp both chains keep firing and the
+/// ramp advances at double speed, then keeps ticking after it settles.
+#[derive(Default)]
+struct Anim {
+    t: f32,
+    stamp: u64,
+}
+
+impl Anim {
+    /// Restart from zero. The returned generation is what the tick chain
+    /// must carry back; anything else is stale by definition.
+    fn start(&mut self) -> u64 {
+        self.restart_at(0.0)
+    }
+
+    /// Restart so the ramp's EASED position lands on `f` — for reversing
+    /// a glide in flight without the widget jumping. The ease has to be
+    /// inverted to get there: `1 - t` would not do, since
+    /// `eased(1 - t) != 1 - eased(t)` (mirroring t=0.5 lands on 0.75, not
+    /// the 0.25 the reversal needs).
+    fn restart_at(&mut self, f: f32) -> u64 {
+        self.t = 1.0 - (1.0 - f.clamp(0.0, 1.0)).sqrt();
+        self.stamp += 1;
+        self.stamp
+    }
+
+    /// Advance one frame. `false` means stop scheduling — either the tick
+    /// was stale or the ramp has arrived.
+    fn tick(&mut self, generation: u64, span_ms: f32) -> bool {
+        if generation != self.stamp || self.t >= 1.0 {
+            return false;
+        }
+        self.t = (self.t + FRAME.as_millis() as f32 / span_ms).min(1.0);
+        self.t < 1.0
+    }
+
+    fn settled(&self) -> bool {
+        self.t >= 1.0
+    }
+
+    /// Ease-out (quadratic): quick off the mark, gentle into the seat.
+    fn eased(&self) -> f32 {
+        let t = self.t.clamp(0.0, 1.0);
+        1.0 - (1.0 - t) * (1.0 - t)
+    }
+}
+
+/// The working-agent sweep: the shared phase driving every card whose
+/// agent is producing output — a breath in the card's border ring, and,
+/// on the ACTIVE card only, a band of light crossing its wash
+/// ([`theme::project_card`]). Same tick-chain idiom as [`Anim`] and
+/// generation-stamped for the same reason, but it LOOPS rather than
+/// settling — and it is linear, since an ease would make a repeating pass
+/// lurch at the seam. Also instanced as `sync_spin`, the phase behind
+/// the status bar's sync spinner — same mechanics, different audience.
+#[derive(Default)]
+struct Sweep {
+    phase: f32,
+    stamp: u64,
+    running: bool,
+}
+
+impl Sweep {
+    /// Begin a chain, or `None` if one is already in flight.
+    fn start(&mut self) -> Option<u64> {
+        if self.running {
+            return None;
+        }
+        self.running = true;
+        self.phase = 0.0;
+        self.stamp += 1;
+        Some(self.stamp)
+    }
+
+    /// Advance one frame. `None` means the tick was stale; otherwise the
+    /// bool says whether the phase wrapped — the moment cards that have
+    /// gone quiet may drop out, since the band is off-card there and their
+    /// light goes out at the edge instead of mid-pass.
+    fn tick(&mut self, generation: u64) -> Option<bool> {
+        if generation != self.stamp {
+            return None;
+        }
+        self.phase += SWEEP_FRAME.as_millis() as f32 / SWEEP_MS;
+        Some(if self.phase >= 1.0 {
+            self.phase -= 1.0;
+            true
+        } else {
+            false
+        })
+    }
+}
+
+fn main() -> iced::Result {
     env_logger::init();
+    // VTE set TERM for its children silently; on this stack it is the
+    // embedder's job (spike finding — top/less break without it).
+    alacritty_terminal::tty::setup_env();
 
-    let app = app::TuxFlowApp::new();
-    app.run();
+    // GTK parity: reopen with the last session's geometry, saved on close.
+    // Position is X11 — Wayland ignores Specific placement and only honors
+    // size and maximized. A saved position is passed even when maximized so
+    // the window maximizes on the monitor it was closed on.
+    let window = tuxflow_core::config::settings::AppSettings::load().window;
+    iced::application(App::new, App::update, App::view)
+        .theme(|_: &App| {
+            if theme::pal().light {
+                iced::Theme::Light
+            } else {
+                iced::Theme::Dark
+            }
+        })
+        // The pane carries no toolbar, so the window title says what it
+        // used to: which project, and what the selected process calls
+        // itself right now (its OSC title, else its configured name).
+        // Capped — agents write whole sentences into the OSC title.
+        .title(|app: &App| match app.active_project() {
+            Some(p) => match p.entries.get(p.selected) {
+                Some(entry) => format!(
+                    "TuxFlow - {}: {}",
+                    p.name,
+                    entry.display_title().chars().take(70).collect::<String>()
+                ),
+                None => format!("TuxFlow - {}", p.name),
+            },
+            None => String::from("TuxFlow"),
+        })
+        .window(iced::window::Settings {
+            size: Size {
+                width: window.width.max(1) as f32,
+                height: window.height.max(1) as f32,
+            },
+            maximized: window.maximized,
+            position: match (window.x, window.y) {
+                (Some(x), Some(y)) => {
+                    iced::window::Position::Specific(iced::Point::new(x as f32, y as f32))
+                }
+                _ => iced::window::Position::Default,
+            },
+            // WM_CLASS on X11, app_id on Wayland: the desktop file's
+            // basename, so the shell pairs the window with its launcher
+            // entry and icon (StartupWMClass says the same).
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: String::from("com.tuxflow.TuxFlow"),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .exit_on_close_request(false)
+        .subscription(App::subscription)
+        .run()
+}
+
+enum Phase {
+    /// Remote probe in flight on a worker.
+    Loading,
+    Ready,
+    /// Probe failed; bool = retryable (host unreachable vs bad project).
+    Failed(String, bool),
+}
+
+/// One open project: its own processes, port knowledge, tunnels and poll
+/// cadence. `id` is stable across closes — timer events must never land on
+/// whatever project inherited a vec index.
+struct ProjectState {
+    id: u64,
+    location: ProjectLocation,
+    name: String,
+    phase: Phase,
+    entries: Vec<ProcessEntry>,
+    selected: usize,
+    expanded: bool,
+    ports: PortDetector,
+    tunnels: Option<TunnelManager>,
+    port_map: HashMap<u16, u16>,
+    poll_interval: Duration,
+    poll_chain_started: bool,
+    terminals_created: usize,
+    git: Option<tuxflow_core::remote::git::GitStatus>,
+    /// Working-tree line counts behind the status bar's changes chip.
+    /// Separate from `git` because it costs its own round trips — the
+    /// porcelain status can't produce `+N −M`.
+    diffstat: tuxflow_core::remote::git::DiffStat,
+    /// The project's avatar, resolved once at load; None falls back to the
+    /// initials square. Already checked to exist — `view` runs every frame
+    /// and must never stat the disk.
+    icon: Option<PathBuf>,
+    /// The pre-merge config list the load produced (tuxflow.toml's authored
+    /// processes, or detection). Edit Project resolves its Hidden and
+    /// Detected groups from this — GTK keeps its load-time stacks for the
+    /// same job, because re-detecting a REMOTE project live would be an ssh
+    /// round trip mid-dialog (local projects re-detect live on top of it).
+    detected_configs: Vec<ProcessConfig>,
+    /// Everything the load-time detection found BEFORE the conservative
+    /// trim — remote only (a local project re-detects live when the edit
+    /// form opens). The add flow offers this full list, so a process
+    /// deselected there is in `deleted_processes` with no copy anywhere
+    /// else; without this pool Edit Project's Hidden group could not show
+    /// it, and the user's "hidden" list came up shorter than what they
+    /// had deselected.
+    detected_full: Vec<ProcessConfig>,
+    /// The card is riding the working-agent sweep. Set when an agent here
+    /// starts producing output, cleared only at a pass boundary — see
+    /// [`Sweep::tick`].
+    sweeping: bool,
+    /// Whether the project sat in the running TIER at the last look —
+    /// [`App::refresh_recent_order`] stamps `last_used` and re-sorts the
+    /// sidebar on the flip, GTK's `refresh_project_running_state`. Starts
+    /// false, so a project loading with live sessions (reattach) flips and
+    /// stamps like a start, while a project loading idle stamps nothing —
+    /// stamping at load would re-date every project and wipe the saved
+    /// recency order.
+    was_running: bool,
+    /// Hash of the last tmux buffer the clipboard bridge published for
+    /// this project (primed at open with whatever a previous session left
+    /// on the host). The bridge's hash gate — see
+    /// [`remote::tmux_buffer_publishable`].
+    clip_seen: u64,
+    /// The project's MCP server while Settings → Integrations has it on:
+    /// started at boot (before the first spawn, so every process is born
+    /// knowing its socket), stopped with the project or the setting.
+    mcp: Option<McpLink>,
+}
+
+/// One project's live MCP server: the socket, the bridge its snapshots
+/// are written through, and the command stream's abort handle.
+struct McpLink {
+    handle: tuxflow_core::mcp::server::McpServerHandle,
+    bridge: tuxflow_core::mcp::bridge::McpBridge,
+    commands: iced::task::Handle,
+    /// What the snapshot table was last built from — see
+    /// [`App::sync_mcp_snapshots`].
+    fingerprint: u64,
+}
+
+impl ProjectState {
+    fn key(&self) -> String {
+        self.location.key()
+    }
+
+    fn running(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_running()).count()
+    }
+
+    /// Whether the card should read as live. Wider than [`running`], which
+    /// feeds the counter pill: GTK's `project_has_running` counts
+    /// `Restarting` too, and a `Reconnecting` remote process is the same
+    /// case — its tmux session is alive on the host, only the link is
+    /// down, so the card must not go dark mid-reconnect.
+    fn has_running(&self) -> bool {
+        self.entries.iter().any(|e| {
+            matches!(
+                e.status,
+                Status::Running | Status::Restarting(_) | Status::Reconnecting(_)
+            )
+        })
+    }
+
+    /// At least one agent in here is producing output right now.
+    fn agent_working(&self) -> bool {
+        self.entries.iter().any(|e| e.working)
+    }
+}
+
+struct ProcessForm {
+    name: String,
+    command: String,
+    working_dir: String,
+    agent: bool,
+    /// The user has edited the name, so an agent-preset pick must stop
+    /// rewriting it. Without this, choosing a preset after naming the
+    /// process silently discards the name.
+    name_touched: bool,
+    start_with_project: bool,
+    auto_restart: bool,
+    open_in_browser: bool,
+    /// Comma-separated `restart_when_changed` globs, as typed; parsed on
+    /// submit by core's `parse_patterns` (GTK's Watch Patterns row).
+    watch: String,
+    /// Some((project id, entry index)) when editing an existing process.
+    editing: Option<(u64, usize)>,
+    original_category: ProcessCategory,
+    /// Why the last submit was refused (duplicate name, empty fields).
+    /// Cleared on the next edit of any text field — a refusal with no
+    /// message is a dead button, and taking the form down with everything
+    /// typed in it is worse.
+    error: Option<String>,
+}
+
+struct App {
+    projects: Vec<ProjectState>,
+    /// Index of the project owning the main pane.
+    active: usize,
+    saved: SavedProjects,
+    app_keys: AppKeys,
+    /// The shared settings.toml — this shell's single authority. The
+    /// settings view mutates it and saves immediately on every change,
+    /// like the GTK dialog's per-row save points.
+    settings: AppSettings,
+    /// Settings view state; `Some` = the main pane shows settings.
+    settings_ui: Option<settings_ui::State>,
+    /// Git Changes view state; `Some` = the main pane shows it. Like
+    /// settings, it takes the pane rather than floating over it — a diff
+    /// wants the whole window, and GTK's dialog opens at the parent's
+    /// full size for the same reason.
+    git_ui: Option<git_view::State>,
+    /// Projects whose one-click status-bar sync (fetch + ff-pull + push)
+    /// is still owed something, by project id: the sync command itself,
+    /// and then the settle window until the follow-up poll the sync
+    /// launched repaints the counters (`GitSyncSettled`). The chip wears
+    /// the spinner — counters hidden, click dead — through BOTH: showing
+    /// the pre-sync numbers next to a spinner reads as "the sync did
+    /// nothing", and releasing at sync-done redisplays exactly those
+    /// numbers for the second or two the refresh takes, a stale flash
+    /// (GTK's `set_git_syncing(false)` rides its refresh callback for the
+    /// same reason). Keyed rather than a bare bool because a remote sync
+    /// takes seconds and the user can switch projects under it — an
+    /// unkeyed flag put the spinner on project B's chip and hung B's repo
+    /// name on A's failure notice.
+    git_syncing: std::collections::HashSet<u64>,
+    /// Hold-to-talk relays by TERMINAL id (core `remote/hold.rs`): a held
+    /// Space in a remote agent terminal is generated on the host, not
+    /// forwarded byte-by-byte — see fork patch 22 for why.
+    hold_relays: HashMap<u64, remote::hold::HoldRelay>,
+    /// The sync spinner's phase: a second [`Sweep`] chain at the same
+    /// 20 fps cadence, alive only while `git_syncing` is non-empty. One
+    /// chain serves however many syncs overlap.
+    sync_spin: Sweep,
+    /// Projects with a status-chip `git fetch` in flight, by id. Without
+    /// the fetch the chip's ↓ can never light up on its own — `branch.ab`
+    /// counts against the last-FETCHED upstream ref. Guarded because a
+    /// down remote host blocks each git call ~10 s (GTK's poller keeps
+    /// one in-flight flag for the same reason): skipping a tick is free,
+    /// stacking another blocked worker is not.
+    git_fetching: std::collections::HashSet<u64>,
+    /// GitTick firings so far — every third one fetches (the 20 s local
+    /// tick at GTK's 60 s "poll git pull indicator" cadence).
+    git_ticks: u64,
+    /// Identifies the open Git Changes view's poll chain, so a rapid
+    /// close-and-reopen doesn't leave two of them polling one view.
+    git_tick_stamp: u64,
+    /// Seed for each add-project form's generation stamps, strided so no
+    /// two form instances ever share a stamp value — an in-flight listing
+    /// or probe outlives its form, and must not be accepted by the next one.
+    add_form_epoch: u64,
+    /// A (heading, body) message awaiting an OK — GTK's AlertDialog for
+    /// things that failed but need no decision.
+    notice: Option<(String, String)>,
+    /// The status bar's update chip state.
+    update_badge: UpdateBadge,
+    /// The update card, when one of its stages is up.
+    update_card: Option<UpdateCard>,
+    /// A dpkg-owned binary with a .deb on the release: the card can
+    /// install in place. Probed with the check.
+    update_can_install: bool,
+    composer: String,
+    /// Header toggle (GTK: the AdwOverlaySplitView sidebar). Runtime-only,
+    /// like GTK — a fresh launch always shows the sidebar.
+    sidebar_visible: bool,
+    /// The collapse/expand glide toward whatever `sidebar_visible` now
+    /// says. Until it settles the sidebar is mid-flight, not at either end.
+    sidebar_anim: Anim,
+    /// Sidebar filter (GTK: the header search toggle + SearchEntry).
+    filter_open: bool,
+    /// The desktop's light/dark preference (portal), for the System scheme.
+    /// None = no portal answered; the shell stays dark then.
+    system_light: Option<bool>,
+    filter_query: String,
+    filter_input: iced::widget::Id,
+    /// Which sidebar row the pointer is on: (project id, process index),
+    /// index None = the project header. Drives the cluster slide-in.
+    hovered_row: Option<(u64, Option<usize>)>,
+    hover_anim: Anim,
+    /// A sidebar drag in progress (see [`Drag`]).
+    drag: Option<Drag>,
+    /// Generation of the drag auto-scroll tick chain (the restart-timer
+    /// idiom: a tick carrying an old stamp stops).
+    drag_tick: u64,
+    /// The sidebar list's scrollable, addressed by drag auto-scroll.
+    sidebar_scroll: iced::widget::Id,
+    /// Ctrl is down right now, so the rows the digit switcher can reach are
+    /// wearing their keycaps. Nothing about the chords depends on this — it
+    /// only decides whether the sidebar is currently answering "which one
+    /// is 3?", which is why it can be dropped on focus loss without care.
+    ctrl_held: bool,
+    /// Shift is down — read at the search bar's submit, which is how a
+    /// text_input's Enter (it carries no modifiers) becomes GTK's
+    /// Shift+Enter "previous match".
+    shift_held: bool,
+    /// The window has keyboard focus — GTK's `window.is_active()`, half of
+    /// the notification focus gate. Starts false: the WM's focus-in lands
+    /// as a Focused event once the window is mapped, and until then
+    /// "not looking at it" is the assumption that lets a bell through.
+    window_focused: bool,
+    /// Shared by every card riding it, so their bands stay in step.
+    sweep: Sweep,
+    /// Last pointer position in window coords — where a right-click's
+    /// context menu opens (mouse_area reports no position itself).
+    cursor: iced::Point,
+    /// An open right-click menu (GTK's sidebar popovers).
+    context_menu: Option<MenuTarget>,
+    /// A pending destructive action awaiting its GTK-style confirmation.
+    confirm: Option<ConfirmAction>,
+    search_open: bool,
+    search_query: String,
+    search_hit: Option<bool>,
+    search_input: iced::widget::Id,
+    palette_open: bool,
+    palette_query: String,
+    palette_index: usize,
+    palette_input: iced::widget::Id,
+    /// The palette's result list, addressed by `palette_snap`.
+    palette_scroll: iced::widget::Id,
+    add_project: Option<add_project::State>,
+    add_command: Option<ProcessForm>,
+    /// The Add SSH Connection form; `Some` = the main pane shows it.
+    add_ssh: Option<add_ssh::State>,
+    /// Edit Project form; `Some` = the main pane shows it. Mutually
+    /// exclusive with the two add forms, like the GTK dialogs they port.
+    edit_project: Option<edit_project::State>,
+    /// Live inner size (resize events); the sidebar takes a fraction of
+    /// the width (GTK parity). The *position* is never tracked from Moved
+    /// events — those carry the client-area point while restore sets the
+    /// frame origin, so a save/restore cycle through them drifts the
+    /// window by the WM's frame extents. Saves query
+    /// `window::position()` (winit outer_position) instead.
+    window_size: Size,
+    /// Bumped on every move/resize; the debounced save only fires for the
+    /// newest generation, so a drag writes once, not per pixel.
+    geometry_gen: u64,
+    next_project_id: u64,
+    next_term_id: u64,
+}
+
+/// A sidebar drag from press to release — GTK's DragSource/DropTarget pair
+/// as app state, since iced widgets can neither start a drag nor accept
+/// one. A press on a row opens a CANDIDATE; travelling past
+/// [`dnd::DRAG_THRESHOLD`] makes it a drag (until then a release is a
+/// click, which the row's button handles as usual).
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    /// The row being dragged: (project id, process index / None = header).
+    source: (u64, Option<usize>),
+    /// Window-space press position, for the threshold.
+    origin: iced::Point,
+    /// Pointer offset inside the row and the row's size — the ghost is
+    /// drawn at `pointer - offset`, so it lifts off exactly where the row
+    /// was and stays under the grab point.
+    grab: dnd::Grab,
+    active: bool,
+    /// The slot the pointer is over — a LEGAL target row and which half.
+    /// Illegal rows (another project's process, a process over a header)
+    /// never get here, so no indicator promises a drop that would be
+    /// refused.
+    over: Option<((u64, Option<usize>), dnd::Over)>,
+    /// Pointer distances to the sidebar's visible edges, for auto-scroll;
+    /// None while the pointer is off the list.
+    edges: Option<dnd::Edges>,
+}
+
+/// A right-click's target row: process index, or None for the project
+/// header. `at` is the click position (menus open at the pointer).
+#[derive(Debug, Clone, Copy)]
+struct MenuTarget {
+    project: u64,
+    index: Option<usize>,
+    at: iced::Point,
+}
+
+/// Destructive sidebar actions ask first, like GTK's AlertDialogs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmAction {
+    RemoveProject(u64),
+    DeleteProcess { project: u64, index: usize },
+}
+
+/// The running binary's version — what the release check compares
+/// against. One workspace version, so this is the .deb's too.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// What the status bar's update chip means, and so what a click opens
+/// (GTK's `UpdateBadge`).
+#[derive(Clone)]
+enum UpdateBadge {
+    Hidden,
+    /// A newer release exists upstream; click to see notes and install.
+    Available(UpdateInfo),
+    /// The newer release is already installed — this window is just still
+    /// running the old code. Click goes straight to the restart prompt.
+    RestartRequired,
+}
+
+/// The update card's stages — GTK's `update_dialog` as one overlay card:
+/// notes + install, the blocking download/install, then the restart offer.
+#[derive(Clone)]
+enum UpdateCard {
+    /// Release notes with Later / View release / Install and restart —
+    /// the last only when `can_install` (a dpkg-owned binary and a .deb
+    /// on the release).
+    Available { info: UpdateInfo, can_install: bool },
+    /// Download + `pkexec apt-get install` running on a worker. No
+    /// buttons: nothing here can be cancelled from our side.
+    Installing,
+    /// The new version is on disk (our install, or the system's software
+    /// manager): Later / Restart now.
+    Installed,
+}
+
+/// Probe success: project name if configured, process configs, live tmux
+/// sessions, and the local cache path of a fetched icon. Failure: message +
+/// whether it's worth retrying.
+type ProbeResult = Result<ProbeOk, (String, bool)>;
+
+/// The probe's payload — a struct rather than a tuple because the icon made
+/// it four wide and `p.2` stopped saying anything.
+#[derive(Debug, Clone)]
+struct ProbeOk {
+    name: Option<String>,
+    /// What the project loads with: an authored `tuxflow.toml`'s processes,
+    /// or the CONSERVATIVE detection subset.
+    configs: Vec<ProcessConfig>,
+    /// Everything detection found, conservative or not — the pool Edit
+    /// Project resolves the Hidden group from (see `detected_full`).
+    detected_full: Vec<ProcessConfig>,
+    live_sessions: Vec<String>,
+    /// Icon pulled into `~/.cache/tuxflow/icons/`, when the project had none
+    /// saved and the host had one to give.
+    icon: Option<String>,
+}
+
+/// One command-palette row's target. GTK's palette is a flat list of
+/// action items (`New …`, Stop/Restart all), navigation items (one per
+/// process) and project items; the iced palette had only the middle tier.
+#[derive(Debug, Clone)]
+enum PaletteEntry {
+    Action(PaletteAction),
+    Process { project: u64, index: usize },
+    Project(u64),
+}
+
+#[derive(Debug, Clone)]
+enum PaletteAction {
+    /// Index into `agents::AGENT_PRESETS` — opens the agent form with
+    /// that preset picked.
+    NewAgent(usize),
+    NewCustomAgent,
+    NewCommand,
+    NewTerminal,
+    NewSsh,
+    NewProject(add_project::Kind),
+    /// Every project's running processes, not the active card's.
+    StopAll,
+    RestartAll,
+}
+
+/// A palette row as listed: GTK's category chip, the label the query is
+/// matched against, and what picking it does.
+#[derive(Debug, Clone)]
+struct PaletteRow {
+    category: &'static str,
+    label: String,
+    entry: PaletteEntry,
+}
+
+#[derive(Debug, Clone)]
+enum Event {
+    Terminal(iced_term::Event),
+    WindowResized(Size),
+    /// A Moved event arrived — only ever a trigger for the debounced
+    /// save, never a position source (see `window_size` field comment).
+    WindowMoved,
+    WindowCloseRequested(iced::window::Id),
+    WindowClose {
+        id: iced::window::Id,
+        maximized: bool,
+        position: Option<iced::Point>,
+    },
+    /// Debounced geometry persistence — `make dev-iced` kills the process
+    /// on rebuild, so waiting for a clean close would lose every move.
+    GeometrySettled(u64),
+    SaveGeometry {
+        maximized: bool,
+        position: Option<iced::Point>,
+    },
+    /// Post-launch placement correction (GTK's restore_window_placement
+    /// trick): measure where the frame actually landed and fix the delta.
+    RestoreSettle,
+    /// Re-request maximize once the window is mapped (the pre-map hint
+    /// is dropped on X11).
+    RestoreMaximize,
+    RestoreMeasured {
+        id: iced::window::Id,
+        actual: Option<iced::Point>,
+    },
+    OpenSettings,
+    ToggleSidebar,
+    ToggleFilter,
+    FilterInput(String),
+    SettingsMsg(settings_ui::Msg),
+    Probed {
+        project: u64,
+        result: ProbeResult,
+    },
+    /// The microphone bridge for a freshly probed remote project reported
+    /// (up, refused, or timed out). Carries the probe's live sessions, since
+    /// the boot that reattaches them waited on this.
+    MicBridgeReady {
+        project: u64,
+        live_sessions: Vec<String>,
+        result: Result<(), String>,
+    },
+    /// The desktop's light/dark preference changed (portal signal).
+    SystemScheme(bool),
+    /// A mouse press landed on the terminal pane — GTK's auto-hide trigger
+    /// (Settings → Sidebar): clicking into the terminal collapses the
+    /// sidebar to the rail, where its toggle still lives.
+    TerminalPressed,
+    /// An agent's tool call on a project's MCP socket (start / stop /
+    /// restart / read logs). The reply travels back inside the request.
+    McpCommand {
+        project: u64,
+        request: mcp::Request,
+    },
+    /// Settings → Remote Microphone switched on: one (host, reason) per
+    /// bridge that could not be brought up.
+    MicBridgeReport(Vec<(String, String)>),
+    /// A debounced batch of paths changed under a local project that has
+    /// `restart_when_changed` patterns (the watcher subscription).
+    FilesChanged {
+        project: u64,
+        paths: Vec<PathBuf>,
+    },
+    RetryProbe(u64),
+    SelectProcess {
+        project: u64,
+        index: usize,
+    },
+    Start {
+        project: u64,
+        index: usize,
+    },
+    Stop {
+        project: u64,
+        index: usize,
+    },
+    Restart {
+        project: u64,
+        index: usize,
+    },
+    /// Project-header cluster (GTK's hover controls): start every
+    /// process marked start_with_project / restart / stop the running.
+    StartAll(u64),
+    RestartAll(u64),
+    StopAll(u64),
+    /// Pointer entered/left a sidebar row (index None = project header).
+    RowEnter {
+        project: u64,
+        index: Option<usize>,
+    },
+    RowExit {
+        project: u64,
+        index: Option<usize>,
+    },
+    /// One frame of the cluster slide-in.
+    HoverTick(u64),
+    /// A left press on a sidebar row: a drag candidate (GTK's DragSource
+    /// `prepare`). Becomes a drag once the pointer travels past
+    /// [`dnd::DRAG_THRESHOLD`]; released before that it was a click, and
+    /// the row's button already got it.
+    DragPress {
+        row: (u64, Option<usize>),
+        grab: dnd::Grab,
+    },
+    /// The pointer is over a row's upper (`before`) or lower half while a
+    /// drag is active — GTK's DropTarget `motion`.
+    DragOver {
+        row: (u64, Option<usize>),
+        over: dnd::Over,
+    },
+    /// Pointer distance to the sidebar's visible edges while dragging,
+    /// None off the list.
+    DragEdges(Option<dnd::Edges>),
+    /// One frame of drag auto-scroll.
+    DragTick(u64),
+    /// Left button released anywhere: the drop, or the end of a click.
+    PointerReleased,
+    /// The window lost focus: a held Ctrl comes back up unseen, and a
+    /// drag's release will never arrive.
+    WindowUnfocused,
+    /// The window gained focus — the other edge of the notification gate.
+    WindowFocused,
+    /// One frame of the sidebar's collapse/expand glide.
+    SidebarTick(u64),
+    /// Fixed-interval sample of which agents are producing output.
+    ActivityTick,
+    /// One frame of the working-agent sweep.
+    SweepTick(u64),
+    /// One frame of the sync chip's spinner.
+    SyncSpinTick(u64),
+    CursorMoved(iced::Point),
+    /// The modifier set changed — Ctrl reveals/hides the sidebar's
+    /// keycaps, Shift decides the search bar's submit direction.
+    ModifiersHeld(iced::keyboard::Modifiers),
+    /// Right-click on a sidebar row (index None = project header).
+    OpenContextMenu {
+        project: u64,
+        index: Option<usize>,
+    },
+    CloseContextMenu,
+    /// A picked menu item: close the menu, then run the wrapped event.
+    MenuAction(Box<Event>),
+    /// GTK menu backings without a button elsewhere.
+    CopyText(String),
+    OpenInEditor(u64),
+    ToggleProcessAt {
+        project: u64,
+        index: usize,
+    },
+    ResumeAgentAt {
+        project: u64,
+        index: usize,
+    },
+    EditProcessAt {
+        project: u64,
+        index: usize,
+    },
+    /// Destructive actions route through a confirmation card first.
+    ConfirmRequest(ConfirmAction),
+    ConfirmCancel,
+    ConfirmProceed,
+    AddTerminal(u64),
+    ToggleExpanded(u64),
+    /// Keyed by TERMINAL, not entry index: the sidebar can be reordered
+    /// while a backoff runs, and an index would fire the restart — or the
+    /// auto-open below — at whichever row moved into its slot.
+    RestartDue {
+        term: u64,
+        generation: u64,
+    },
+    GitTick,
+    GitPolled {
+        project: u64,
+        status: Option<tuxflow_core::remote::git::GitStatus>,
+        diffstat: tuxflow_core::remote::git::DiffStat,
+        /// This poll ran `git fetch` first — its arrival releases the
+        /// project's `git_fetching` guard.
+        fetched: bool,
+    },
+    /// Status-bar sync chip: fetch, ff-pull if behind, push if ahead.
+    GitSync,
+    GitSynced {
+        project: u64,
+        result: Result<(), String>,
+    },
+    /// The follow-up poll a finished sync launched has landed: repaint
+    /// the counters and let the spinner yield to them. Distinct from
+    /// [`Event::GitPolled`] so a poll already in flight at click time —
+    /// the 20 s tick, a switch — can't end the settle early still
+    /// carrying pre-sync numbers.
+    GitSyncSettled {
+        project: u64,
+        status: Option<tuxflow_core::remote::git::GitStatus>,
+        diffstat: tuxflow_core::remote::git::DiffStat,
+    },
+    /// Status-bar changes chip → the Git Changes view.
+    OpenGitChanges,
+    GitMsg(git_view::Msg),
+    /// Status-bar Clear: empty the selected terminal's grid, child intact.
+    ClearTerminal,
+    NoticeDismiss,
+    /// The once-per-launch release check answered (a newer version, or
+    /// nothing). Carries whether this binary can be upgraded in place.
+    UpdateChecked(Option<(UpdateInfo, bool)>),
+    /// The 30 s readlink of /proc/self/exe (release builds only).
+    BinaryReplacedTick,
+    /// The status-bar chip was clicked.
+    OpenUpdateCard,
+    UpdateCardDismiss,
+    UpdateViewRelease,
+    UpdateInstall,
+    UpdateInstalled(Result<(), String>),
+    UpdateRestart,
+    /// The relauncher is armed; close the window through the normal path.
+    UpdateQuit(Option<iced::window::Id>),
+    PortsPollTick(u64),
+    PortsPolled {
+        project: u64,
+        session_ports: HashMap<String, Vec<u16>>,
+    },
+    /// The tmux clipboard bridge answered: the newest paste buffer on the
+    /// project's host, fetched after a selection gesture or an explicit
+    /// copy. The staleness gates run when this lands, not at fetch time.
+    TmuxClipFetched {
+        project: u64,
+        route: remote::ClipRoute,
+        buf: Option<remote::TmuxBuffer>,
+    },
+    /// Startup prime for the bridge's hash gate — whatever buffer a
+    /// previous session left on the host must not be publishable as a
+    /// fresh selection by the first gesture.
+    TmuxClipPrimed {
+        project: u64,
+        hash: Option<u64>,
+    },
+    AutoOpenDue {
+        term: u64,
+        generation: u64,
+    },
+    ComposerChanged(String),
+    ComposerSend,
+    SearchQueryChanged(String),
+    SearchStep(SearchDirection),
+    /// Enter in the search field: next match, or previous with Shift held.
+    SearchSubmit,
+    SearchClose,
+    PaletteInput(String),
+    PaletteSubmit,
+    /// A palette row picked by click.
+    PaletteActivate(PaletteEntry),
+    /// Ignored-status keys — the widget consumed everything it wanted
+    /// (Ctrl+Shift+V with pal().text on the clipboard never reaches here).
+    Hotkey(iced::keyboard::Event),
+    /// The image-paste worker finished: bytes to feed the terminal that
+    /// initiated the paste (a typed path, or Ctrl+V for agents).
+    ImagePasted {
+        project: u64,
+        term: u64,
+        /// The run that asked for the paste — the terminal outlives its
+        /// runs, so its id alone no longer says the paste is still wanted.
+        run: u64,
+        result: Result<Vec<u8>, String>,
+    },
+    /// The status bar's open-in-browser button: the (tunnel-mapped) URL.
+    OpenBadge,
+    /// The row context menu's "Open in Browser" — any process, not just
+    /// the selected.
+    OpenBadgeFor {
+        project: u64,
+        index: usize,
+    },
+    OpenAddProject,
+    AddProjectMsg(add_project::Msg),
+    /// Add a command (or agent) to a project — the form writes into
+    /// whatever project is active, so it names the one it was raised on.
+    OpenAddCommand {
+        project: u64,
+        agent: bool,
+    },
+    OpenEditProcess,
+    /// GTK's "New SSH connection" — the form is raised on a project like
+    /// the other creators, so it names one.
+    OpenAddSsh(u64),
+    AddSshMsg(add_ssh::Msg),
+    AddCommandName(String),
+    AddCommandCommand(String),
+    /// Index into `agents::AGENT_PRESETS`.
+    AgentPreset(usize),
+    FormWorkingDir(String),
+    FormWatch(String),
+    FormToggleStartWith(bool),
+    FormToggleAutoRestart(bool),
+    FormToggleOpenBrowser(bool),
+    DeleteProcess,
+    AddCommandSubmit,
+    AddCommandCancel,
+    /// The project context menu's Edit Project — GTK's dialog as a
+    /// full-pane view.
+    OpenEditProject(u64),
+    EditProjectMsg(edit_project::Msg),
+}
+
+impl App {
+    fn new() -> (Self, Task<Event>) {
+        let settings = AppSettings::load();
+        // Must reach the mic module before any project registers its host,
+        // or the first load would skip bridging (GTK's window does the same
+        // before it builds anything).
+        remote::mic::set_enabled(settings.tools.remote_microphone);
+        // The scheme goes in BEFORE the accents: the same accent name is a
+        // different hex per scheme, and set_accents reads the palette.
+        let system_light = scheme::system_prefers_light();
+        theme::set_scheme(effective_light(&settings.appearance.theme, system_light));
+        theme::set_accents(
+            &settings.appearance.local_accent_color,
+            &settings.appearance.remote_accent_color,
+        );
+        let saved = SavedProjects::load();
+        // Insurance: keep a .bak of the last known-good (non-empty)
+        // workspace before this process ever saves. One wipe was enough.
+        if !saved.directories.is_empty()
+            && let Some(dir) = dirs::config_dir()
+        {
+            let file = dir.join("tuxflow/projects.toml");
+            let _ = std::fs::copy(&file, file.with_extension("toml.bak"));
+        }
+        let mut app = App {
+            projects: Vec::new(),
+            active: 0,
+            saved,
+            app_keys: AppKeys::from_settings(&settings.keybindings),
+            settings_ui: None,
+            git_ui: None,
+            git_syncing: std::collections::HashSet::new(),
+            hold_relays: HashMap::new(),
+            sync_spin: Sweep::default(),
+            git_fetching: std::collections::HashSet::new(),
+            git_ticks: 0,
+            git_tick_stamp: 0,
+            add_form_epoch: 0,
+            notice: None,
+            update_badge: UpdateBadge::Hidden,
+            update_card: None,
+            update_can_install: false,
+            composer: String::new(),
+            sidebar_visible: true,
+            // Settled: a fresh launch shows the sidebar without a glide.
+            sidebar_anim: Anim { t: 1.0, stamp: 0 },
+            filter_open: std::env::var("TUXFLOW_UI").as_deref() == Ok("filter"),
+            system_light,
+            filter_query: String::new(),
+            filter_input: iced::widget::Id::unique(),
+            hovered_row: None,
+            drag: None,
+            drag_tick: 0,
+            sidebar_scroll: iced::widget::Id::unique(),
+            ctrl_held: false,
+            shift_held: false,
+            window_focused: false,
+            hover_anim: Anim::default(),
+            sweep: Sweep::default(),
+            cursor: iced::Point::ORIGIN,
+            context_menu: None,
+            confirm: None,
+            // Headless design/debug hook: force panels open for screenshots.
+            search_open: std::env::var("TUXFLOW_UI").as_deref() == Ok("search"),
+            search_query: String::new(),
+            search_hit: None,
+            search_input: iced::widget::Id::unique(),
+            palette_open: std::env::var("TUXFLOW_UI").as_deref() == Ok("palette"),
+            palette_query: String::new(),
+            palette_index: 0,
+            palette_input: iced::widget::Id::unique(),
+            palette_scroll: iced::widget::Id::unique(),
+            add_project: None,
+            add_command: None,
+            add_ssh: None,
+            edit_project: None,
+            window_size: Size {
+                width: settings.window.width.max(1) as f32,
+                height: settings.window.height.max(1) as f32,
+            },
+            geometry_gen: 0,
+            next_project_id: 0,
+            next_term_id: 0,
+            settings,
+        };
+
+        let mut tasks = Vec::new();
+
+        // CLI args join the persisted workspace.
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        for arg in &args {
+            let key = normalize_key(arg);
+            if !app.saved.directories.iter().any(|d| d == &key) {
+                app.saved.add(&key);
+                app.saved.save();
+            }
+        }
+
+        let mut keys: Vec<String> = if app.saved.directories.is_empty() {
+            // Nothing saved and no args: live in the cwd, unpersisted.
+            vec![ProjectLocation::Local(std::env::current_dir().unwrap_or_default()).key()]
+        } else {
+            app.saved.directories.clone()
+        };
+        // GTK sidebar parity: recently used projects first (stable for
+        // never-used ones, which keep their saved order).
+        if app.settings.sidebar.recent_first {
+            let mut indexed: Vec<(usize, String)> = keys.into_iter().enumerate().collect();
+            let saved = &app.saved;
+            indexed.sort_by_key(|(i, k)| (std::cmp::Reverse(saved.get_last_used(k)), *i));
+            keys = indexed.into_iter().map(|(_, k)| k).collect();
+        }
+        for key in keys {
+            tasks.push(app.open_project(&key));
+        }
+        if std::env::var("TUXFLOW_UI").as_deref() == Ok("edit") {
+            tasks.push(Task::done(Event::OpenEditProcess));
+        }
+        if std::env::var("TUXFLOW_UI").as_deref() == Ok("settings") {
+            tasks.push(Task::done(Event::OpenSettings));
+        }
+        if std::env::var("TUXFLOW_UI").as_deref() == Ok("ssh")
+            && let Some(id) = app.projects.first().map(|p| p.id)
+        {
+            tasks.push(Task::done(Event::OpenAddSsh(id)));
+        }
+        // Placement correction after the WM settles (see RestoreSettle).
+        if app.settings.window.x.is_some() && !app.settings.window.maximized {
+            tasks.push(Task::perform(
+                tokio::time::sleep(Duration::from_millis(300)),
+                |_| Event::RestoreSettle,
+            ));
+        }
+        // Maximized restore needs a second ask AFTER the WM maps the
+        // window: winit's pre-map request is lost on X11 (verified under
+        // metacity — the window came up floating at the saved size).
+        if app.settings.window.maximized {
+            tasks.push(Task::perform(
+                tokio::time::sleep(Duration::from_millis(250)),
+                |_| Event::RestoreMaximize,
+            ));
+        }
+        tasks.push(Task::done(Event::GitTick));
+        // Check for updates in the background, once per launch (15-min
+        // cache in core). The install-kind probe (`dpkg -S`) rides the
+        // same worker so the card knows its buttons before it opens.
+        if std::env::var("TUXFLOW_UI").as_deref() == Ok("update") {
+            // Screenshot hook: a fake release, so the chip and the card can
+            // be exercised without a newer release existing.
+            tasks.push(Task::done(Event::UpdateChecked(Some((
+                UpdateInfo {
+                    latest_version: "9.9.9".into(),
+                    release_url: "https://github.com/markovic-nikola/tuxflow/releases".into(),
+                    notes: "## What's Changed\n* A fake release for the update card.\n* Nothing here is real.".into(),
+                    deb_url: None,
+                },
+                false,
+            )))));
+        } else {
+            tasks.push(Task::perform(
+                tokio::task::spawn_blocking(|| {
+                    let info = update::check_for_update(VERSION)?;
+                    let can_install = info.deb_url.is_some()
+                        && matches!(update::install_kind(), InstallKind::Deb);
+                    Some((info, can_install))
+                }),
+                |joined| Event::UpdateChecked(joined.ok().flatten()),
+            ));
+        }
+        // Watch for the binary being replaced underneath us (GTK's 30 s
+        // poll): a release installed by the system's software manager
+        // while this window is open would otherwise be invisible. Debug
+        // builds are exempt — `cargo run` replaces its own binary on every
+        // rebuild, which would leave the chip permanently lit.
+        if !cfg!(debug_assertions) {
+            tasks.push(Task::perform(
+                tokio::time::sleep(Duration::from_secs(30)),
+                |_| Event::BinaryReplacedTick,
+            ));
+        }
+        tasks.push(Task::done(Event::ActivityTick));
+
+        // Desktop scheme changes (a night-mode switch) arrive as events;
+        // the thread outlives the stream and is dropped with the process.
+        let (scheme_tx, scheme_rx) = tokio::sync::mpsc::unbounded_channel();
+        scheme::watch(move |light| {
+            let _ = scheme_tx.send(light);
+        });
+        tasks.push(Task::run(
+            iced::futures::stream::unfold(scheme_rx, |mut rx| async move {
+                rx.recv().await.map(|light| (light, rx))
+            }),
+            Event::SystemScheme,
+        ));
+        (app, Task::batch(tasks))
+    }
+
+    fn open_project(&mut self, key: &str) -> Task<Event> {
+        let location = ProjectLocation::parse(key);
+        let id = self.next_project_id;
+        self.next_project_id += 1;
+
+        let mut project = ProjectState {
+            id,
+            name: self
+                .saved
+                .get_name(key)
+                .cloned()
+                .unwrap_or_else(|| location.base_name()),
+            expanded: self.saved.is_expanded(key).unwrap_or(true),
+            phase: Phase::Loading,
+            entries: Vec::new(),
+            selected: 0,
+            ports: PortDetector::new(),
+            tunnels: location.host().map(TunnelManager::new),
+            port_map: HashMap::new(),
+            poll_interval: POLL_FAST,
+            poll_chain_started: false,
+            terminals_created: 0,
+            git: None,
+            diffstat: tuxflow_core::remote::git::DiffStat::default(),
+            icon: None,
+            detected_configs: Vec::new(),
+            detected_full: Vec::new(),
+            sweeping: false,
+            was_running: false,
+            clip_seen: 0,
+            mcp: None,
+            location,
+        };
+
+        match project.location.clone() {
+            ProjectLocation::Local(dir) => {
+                let (name, configs) = processes::load_local_configs(&dir);
+                if self.saved.get_name(key).is_none() {
+                    project.name = name;
+                }
+                // Local detection is a handful of stats on a directory we are
+                // already reading configs from — cheap enough to stay inline,
+                // unlike the remote half, which rides the probe worker.
+                project.icon = usable_icon(icon_detector::resolve_icon(
+                    &mut self.saved,
+                    key,
+                    Some(&dir),
+                    None,
+                ));
+                project.detected_configs = configs.clone();
+                let merged = processes::merge_saved(configs, &self.saved, key);
+                project.entries = processes::entries_from(merged);
+                project.phase = Phase::Ready;
+                self.projects.push(project);
+                let pidx = self.projects.len() - 1;
+                self.boot_processes(pidx, &[])
+            }
+            ProjectLocation::Ssh { .. } => {
+                self.projects.push(project);
+                let pidx = self.projects.len() - 1;
+                // The clipboard bridge primes alongside the probe: hash the
+                // buffer a previous session left on the host, so the first
+                // gesture can't publish it as a fresh selection.
+                Task::batch([self.prime_clip_bridge(pidx), self.probe_task(pidx)])
+            }
+        }
+    }
+
+    /// Prime [`ProjectState::clip_seen`] at open — GTK does the same at
+    /// project load, for the same reason: `fetch_tmux_buffer` always
+    /// answers with the newest buffer on the host, however old, and only
+    /// this hash keeps a leftover one from riding the first gesture.
+    fn prime_clip_bridge(&self, pidx: usize) -> Task<Event> {
+        let Some(host) = self.projects[pidx].location.host().map(String::from) else {
+            return Task::none();
+        };
+        let id = self.projects[pidx].id;
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                let _permit = remote::ssh_permit();
+                remote::fetch_tmux_buffer(&host).map(|b| remote::fnv64(&b.text))
+            }),
+            move |hash| Event::TmuxClipPrimed {
+                project: id,
+                hash: hash.ok().flatten(),
+            },
+        )
+    }
+
+    /// The remote half of copy-on-select: ask the project's host for the
+    /// newest tmux paste buffer. What may be done with the answer is decided
+    /// when [`Event::TmuxClipFetched`] lands — the gates live there (and in
+    /// core), not here.
+    fn fetch_tmux_clip(&self, pidx: usize, route: remote::ClipRoute) -> Task<Event> {
+        let Some(host) = self.projects[pidx].location.host().map(String::from) else {
+            return Task::none();
+        };
+        let id = self.projects[pidx].id;
+        Task::perform(
+            async move {
+                if route == remote::ClipRoute::Selection {
+                    // Give tmux a beat to store the buffer — the gesture's
+                    // release beats `copy-selection` by milliseconds. GTK
+                    // waits the same 150 ms.
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+                tokio::task::spawn_blocking(move || {
+                    let _permit = remote::ssh_permit();
+                    remote::fetch_tmux_buffer(&host)
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            move |buf| Event::TmuxClipFetched {
+                project: id,
+                route,
+                buf,
+            },
+        )
+    }
+
+    /// Ctrl+Shift+C fell through the widget (the fork's Copy never
+    /// captures): GTK's Copy arbitration, ported. The widget answered
+    /// already if it had a selection — with nothing selected in the widget
+    /// on a remote pane, the selection the user is LOOKING at is tmux's,
+    /// and the explicit route takes the newest buffer at any age. That is
+    /// also the only way a copy-mode `y` or an agent's OSC 52 copy is ever
+    /// collected on demand.
+    fn explicit_remote_copy(&self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        if project.location.host().is_none() {
+            return Task::none();
+        }
+        let widget_has_selection = project
+            .entries
+            .get(project.selected)
+            .and_then(|e| e.terminal.as_ref())
+            .is_some_and(|t| !t.backend().selectable_content().is_empty());
+        if widget_has_selection {
+            return Task::none();
+        }
+        self.fetch_tmux_clip(self.active, remote::ClipRoute::ExplicitCopy)
+    }
+
+    fn project_index(&self, id: u64) -> Option<usize> {
+        self.projects.iter().position(|p| p.id == id)
+    }
+
+    fn active_project(&self) -> Option<&ProjectState> {
+        self.projects.get(self.active)
+    }
+
+    /// Is the selected process a live remote AGENT terminal? Decides
+    /// whether a plain Ctrl+V that fell through the widget belongs to
+    /// the paste bridge (see the Paste rebind in start()).
+    fn remote_agent_selected(&self) -> bool {
+        self.active_project().is_some_and(|p| {
+            p.location.host().is_some()
+                && p.entries
+                    .get(p.selected)
+                    .is_some_and(|e| e.is_running() && e.config.category == ProcessCategory::Agent)
+        })
+    }
+
+    /// A full-pane view (settings, git, the add/edit forms) is covering
+    /// the terminal pane.
+    fn full_pane_open(&self) -> bool {
+        self.settings_ui.is_some()
+            || self.git_ui.is_some()
+            || self.add_command.is_some()
+            || self.add_ssh.is_some()
+            || self.add_project.is_some()
+            || self.edit_project.is_some()
+    }
+
+    /// Is this process's terminal the one on screen? GTK reads the
+    /// terminal stack's visible child; here it is the active project's
+    /// selection, unless a full-pane view stands in front of it — GTK's
+    /// equivalents are separate windows, which leave the main window
+    /// inactive, so those count as "not looking" there too.
+    fn terminal_visible(&self, pidx: usize, index: usize) -> bool {
+        self.active == pidx && self.projects[pidx].selected == index && !self.full_pane_open()
+    }
+
+    /// GTK's notification focus gate (`auto_restart::should_notify`):
+    /// with Suppress When Focused on, skip what the user is looking at.
+    fn should_notify(&self, pidx: usize, index: usize) -> bool {
+        notification_allowed(
+            self.settings.notifications.suppress_when_focused,
+            self.window_focused,
+            self.terminal_visible(pidx, index),
+        )
+    }
+
+    /// "Waiting for input" for an agent, behind every gate GTK's bell
+    /// handler applies: agents only, the Agent Idle flag, the focus gate.
+    /// Fired by the terminal bell and by the silence fallback.
+    fn notify_agent_idle(&self, pidx: usize, index: usize) {
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
+        if entry.config.category != ProcessCategory::Agent || !entry.is_running() {
+            return;
+        }
+        if !self.settings.notifications.on_agent_idle {
+            log::debug!("agent idle: {} — Agent Idle is off", entry.config.name);
+            return;
+        }
+        if !self.should_notify(pidx, index) {
+            log::debug!("agent idle: {} — suppressed, focused", entry.config.name);
+            return;
+        }
+        log::debug!("agent idle: {} — notifying", entry.config.name);
+        notify::agent_idle(
+            &self.settings.notifications,
+            &project.name,
+            &entry.config.name,
+            project.icon.as_deref(),
+            agents::AgentKind::from_command(&entry.config.command),
+        );
+    }
+
+    /// The idle-silence fallback (GTK's `check_agent_silence`, on the same
+    /// 2 s ticker as the working dot): an agent that stopped printing
+    /// `agent_idle_silence_seconds` ago is treated as waiting, once per
+    /// silence. Off unless both Agent Idle and the fallback are on.
+    fn check_agent_silence(&mut self) {
+        let ns = &self.settings.notifications;
+        if !ns.on_agent_idle || !ns.on_agent_idle_silence_fallback {
+            return;
+        }
+        let threshold = Duration::from_secs(ns.agent_idle_silence_seconds as u64);
+        let mut due = Vec::new();
+        for (pidx, project) in self.projects.iter_mut().enumerate() {
+            for (index, entry) in project.entries.iter_mut().enumerate() {
+                if entry.take_silence_due(threshold) {
+                    due.push((pidx, index));
+                }
+            }
+        }
+        for (pidx, index) in due {
+            self.notify_agent_idle(pidx, index);
+        }
+    }
+
+    /// Kick the blocking ssh probe onto a worker; the project shows Loading.
+    fn probe_task(&mut self, pidx: usize) -> Task<Event> {
+        let project = &mut self.projects[pidx];
+        project.phase = Phase::Loading;
+        let id = project.id;
+        let (Some(host), dir) = (
+            project.location.host().map(String::from),
+            project.location.dir_str(),
+        ) else {
+            return Task::none();
+        };
+        // A project whose saved icon still exists skips the fetch entirely —
+        // it is a second ssh round trip, and the saved path wins over it
+        // anyway. Existence-aware on purpose: fetched icons live in
+        // ~/.cache, and after a cleared cache the fetch is the only way the
+        // file comes back.
+        let fetch_icon =
+            !icon_detector::has_usable_saved_icon(&self.saved, &self.projects[pidx].key());
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                // Full detection, filtered here: the load list stays the
+                // conservative subset, but the whole list is what the
+                // add flow offered, so a process deselected THERE has a
+                // source to resolve from in Edit Project's Hidden group.
+                // Probing conservatively lost exactly those rows.
+                remote::probe::probe_remote(&host, &dir, false)
+                    .map(|p| {
+                        let name = p.config.as_ref().map(|c| c.project.name.clone());
+                        let flatten = |stacks: Vec<detector::DetectedStack>| -> Vec<ProcessConfig> {
+                            stacks
+                                .into_iter()
+                                .flat_map(|s| s.suggested_processes)
+                                .collect()
+                        };
+                        let mut conservative = p.stacks.clone();
+                        detector::apply_conservative_filter(&mut conservative);
+                        let detected_full = flatten(p.stacks);
+                        let configs = match p.config {
+                            Some(c) => c.process,
+                            None => flatten(conservative),
+                        };
+                        // Own ssh permit inside: the probe released its own
+                        // on return and the fetch opens channels of its own.
+                        let icon = fetch_icon
+                            .then(|| {
+                                let _permit = remote::ssh_permit();
+                                remote::icon::fetch_remote_icon(&host, &dir)
+                            })
+                            .flatten();
+                        ProbeOk {
+                            name,
+                            configs,
+                            detected_full,
+                            live_sessions: p.live_sessions,
+                            icon,
+                        }
+                    })
+                    .map_err(|e| {
+                        let retryable = matches!(e, ProbeError::Unreachable(_));
+                        (e.to_string(), retryable)
+                    })
+            }),
+            move |joined| Event::Probed {
+                project: id,
+                result: joined.unwrap_or_else(|e| Err((format!("probe worker died: {e}"), false))),
+            },
+        )
+    }
+
+    /// A Space auto-repeat in a remote agent terminal (fork patch 22): keep
+    /// the running relay alive, start one if there is none, and fall back
+    /// to forwarding the repeat as a byte — the behaviour before the relay
+    /// — when the host has no tmux session to inject into or the relay is
+    /// gone (a link stalled past `STALE_MS`, a host without tmux, the
+    /// session ended). The fallback is what keeps the flag safe to set.
+    fn hold_repeat(&mut self, pidx: usize, index: usize, term_id: u64) {
+        if let Some(relay) = self.hold_relays.get_mut(&term_id) {
+            if relay.keepalive() {
+                return;
+            }
+            log::info!("hold relay for terminal {term_id} is gone; forwarding");
+            self.hold_relays.remove(&term_id);
+            self.forward_space(pidx, index);
+            return;
+        }
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
+        let target = match (project.location.host(), entry.remote_session.as_deref()) {
+            (Some(host), Some(session)) if entry.is_running() => {
+                Some((host.to_string(), session.to_string()))
+            }
+            _ => None,
+        };
+        let Some((host, session)) = target else {
+            self.forward_space(pidx, index);
+            return;
+        };
+        match remote::hold::HoldRelay::spawn(&host, &session) {
+            Ok(relay) => {
+                log::info!("hold relay started: {session} on {host}");
+                self.hold_relays.insert(term_id, relay);
+            }
+            Err(e) => {
+                log::warn!("hold relay for {session} on {host} failed to start: {e}");
+                self.forward_space(pidx, index);
+            }
+        }
+    }
+
+    /// The pre-relay behaviour for one repeat: write the space.
+    fn forward_space(&mut self, pidx: usize, index: usize) {
+        if let Some(term) = self.projects[pidx].entries[index].terminal.as_mut() {
+            term.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
+                b" ".to_vec(),
+            )));
+        }
+    }
+
+    /// End a relay whose terminal is stopping, exiting or closing.
+    fn drop_hold_relay(&mut self, term_id: Option<u64>) {
+        if let Some(relay) = term_id.and_then(|id| self.hold_relays.remove(&id)) {
+            relay.stop();
+        }
+    }
+
+    /// GTK parity (window.rs, the probe's reattach): note the host with the
+    /// mic module and, while bridging is on, wait (bounded) for its bridge
+    /// BEFORE the processes appear. Claude Code probes for a microphone
+    /// once and caches the answer for the life of the agent process, so an
+    /// agent whose pane shows up before the bridge is up can never see it —
+    /// and the user has no way to tell that from a broken bridge. Boots
+    /// either way; a failure lands as a notification, because every
+    /// downstream symptom points nowhere near the cause.
+    fn boot_after_mic_bridge(&mut self, pidx: usize, live_sessions: Vec<String>) -> Task<Event> {
+        let Some(host) = self.projects[pidx].location.host().map(String::from) else {
+            return self.boot_processes(pidx, &live_sessions);
+        };
+        // Registered unconditionally — `mic` decides whether to bridge from
+        // the setting, so toggling it later reaches projects already open.
+        remote::mic::register_host(&host);
+        if !remote::mic::is_enabled() {
+            return self.boot_processes(pidx, &live_sessions);
+        }
+        let id = self.projects[pidx].id;
+        Task::perform(
+            // Parks on the mic worker's reply (20 s cap inside) — exactly
+            // what the blocking pool is for.
+            tokio::task::spawn_blocking(move || remote::mic::wait_ready(&host)),
+            move |joined| Event::MicBridgeReady {
+                project: id,
+                live_sessions: live_sessions.clone(),
+                result: joined.unwrap_or_else(|e| Err(format!("mic bridge worker died: {e}"))),
+            },
+        )
+    }
+
+    /// Start what should be up after load: sessions still alive on the host
+    /// (reattach — never show "stopped" for a running detached process) and
+    /// start_with_project ones (those count as user-initiated).
+    fn boot_processes(&mut self, pidx: usize, live_sessions: &[String]) -> Task<Event> {
+        let key = self.projects[pidx].key();
+        // Before the first spawn: the socket path goes into each process's
+        // environment, and the server should be answering by the time an
+        // agent's first tool call arrives.
+        let mut tasks = vec![self.start_mcp(pidx)];
+        for i in 0..self.projects[pidx].entries.len() {
+            let name = self.projects[pidx].entries[i].config.name.clone();
+            let live = live_sessions.contains(&remote::remote_session_name(&key, &name));
+            if live {
+                tasks.push(self.start(pidx, i));
+            } else if self.projects[pidx].entries[i].config.start_with_project {
+                tasks.push(self.start_fresh(pidx, i));
+            }
+        }
+        // Remote: begin the self-perpetuating ports-poll chain, once.
+        if self.projects[pidx].tunnels.is_some() && !self.projects[pidx].poll_chain_started {
+            self.projects[pidx].poll_chain_started = true;
+            tasks.push(self.schedule_poll(pidx));
+        }
+        Task::batch(tasks)
+    }
+
+    fn schedule_poll(&self, pidx: usize) -> Task<Event> {
+        let id = self.projects[pidx].id;
+        Task::perform(
+            tokio::time::sleep(self.projects[pidx].poll_interval),
+            move |_| Event::PortsPollTick(id),
+        )
+    }
+
+    /// Spawn (or respawn/reattach) a process's run.
+    ///
+    /// An entry keeps ONE terminal for its whole life: a second run of the
+    /// same process spawns into the grid the first one printed into, under
+    /// a separator, so its output is still there to read (the GTK app gets
+    /// this by reusing a single VTE widget per process). Only the first run
+    /// builds a terminal, and only that path takes a fresh terminal id —
+    /// subscription identity must change per TERMINAL or iced keeps the
+    /// dead stream, but a respawn keeps the live stream it already has.
+    fn start(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let fresh_id = self.next_term_id;
+
+        let reservations = self.app_keys.reservations();
+        // The hardcoded remote-agent Ctrl+V below yields to a configured
+        // chord on the same keys, as GTK's configurable map runs first.
+        let ctrl_v_is_free = self
+            .app_keys
+            .action_for(
+                &iced::keyboard::Key::Character("v".into()),
+                iced::keyboard::Modifiers::CTRL,
+            )
+            .is_none();
+        let font = self.term_font();
+        let scrollback = self.settings.appearance.scrollback_lines as usize;
+        let palette = theme::terminal_palette(&self.settings.appearance.terminal_theme);
+        let mcp_socket = self.mcp_socket_for(pidx);
+        let project = &mut self.projects[pidx];
+        let settings = processes::spawn_settings(
+            &project.location,
+            &mut project.entries[index],
+            font,
+            scrollback,
+            palette,
+            mcp_socket.as_deref(),
+        );
+        let remote_agent = project.location.host().is_some()
+            && project.entries[index].config.category == ProcessCategory::Agent;
+        // Beyond GTK: re-ensure the mic bridge on every remote run. The
+        // forward is its own ssh connection, so the outage that has this
+        // process reconnecting killed the bridge too — and nothing else
+        // would bring it back before the next launch. Non-blocking, and
+        // one try_wait on the mic worker while the bridge is up.
+        if let Some(host) = project.location.host() {
+            remote::mic::register_host(host);
+        }
+        let entry = &mut project.entries[index];
+        let separator_label = run_label(&entry.status);
+        // (widget id to focus, terminal id, whether `fresh_id` was taken)
+        let spawned: std::io::Result<(iced::widget::Id, u64, bool)> = if entry.terminal.is_some() {
+            let id = entry.term_id.unwrap_or(fresh_id);
+            let term = entry.terminal.as_mut().expect("terminal, just checked");
+            let cols = term.backend().renderable_content().terminal_size.columns();
+            let banner = banner::run_separator(cols, separator_label);
+            term.respawn(settings.backend, banner.as_bytes())
+                .map(|()| (term.widget_id().clone(), id, false))
+        } else {
+            iced_term::Terminal::new(fresh_id, settings).map(|mut term| {
+                // Reserve the app's chords before the first keystroke —
+                // the stock bindings would type them into the shell.
+                term.handle(iced_term::Command::AddBindings(reservations));
+                if remote_agent && ctrl_v_is_free {
+                    // GTK parity (window.rs, "plain Ctrl+V in a remote
+                    // agent terminal"): the agent's raw ^V reads the
+                    // HOST's clipboard, which is not where the user's
+                    // clipboard lives — paste text from here instead.
+                    // An image-only clipboard leaves the widget nothing
+                    // to paste, so the chord falls through uncaptured to
+                    // the Hotkey handler's paste_image bridge.
+                    term.handle(iced_term::Command::AddBindings(vec![(
+                        iced_term::bindings::Binding {
+                            target: iced_term::bindings::InputKind::Char("v".into()),
+                            modifiers: iced::keyboard::Modifiers::CTRL,
+                            terminal_mode_include: iced_term::TermMode::empty(),
+                            terminal_mode_exclude: iced_term::TermMode::empty(),
+                        },
+                        iced_term::bindings::BindingAction::Paste,
+                    )]));
+                }
+                if remote_agent {
+                    // Hold-to-talk over a jittery link: Space repeats
+                    // and the release surface as actions and the hold is
+                    // relayed on the host (fork patch 22, `hold_repeat`).
+                    term.handle(iced_term::Command::SetHoldRelay(true));
+                }
+                let widget = term.widget_id().clone();
+                entry.terminal = Some(term);
+                (widget, fresh_id, true)
+            })
+        };
+
+        match spawned {
+            Ok((widget, id, took_fresh_id)) => {
+                entry.term_id = Some(id);
+                entry.run_id += 1;
+                entry.status = Status::Running;
+                entry.last_exit = None;
+                entry.stopping = false;
+                entry.auto_open_grace = false;
+                entry.started_at = Some(Instant::now());
+                // Silence is measured from the spawn until the first
+                // repaint (GTK stamps `last_activity` at handler build).
+                entry.last_activity = Some(Instant::now());
+                entry.idle_notified = false;
+                let name = entry.config.name.clone();
+                project.ports.clear(&name);
+                project.selected = index;
+                self.active = pidx;
+                if took_fresh_id {
+                    self.next_term_id += 1;
+                }
+                TerminalView::focus(widget)
+            }
+            Err(err) => {
+                log::error!("failed to spawn {}: {err}", entry.config.name);
+                entry.status = Status::Crashed(None);
+                Task::none()
+            }
+        }
+    }
+
+    /// Manual start: forgives past failures, cancels pending timers, arms
+    /// the one-shot auto-open. NO last_used stamp here — recency is stamped
+    /// on running-tier FLIPS by `refresh_recent_order` (GTK parity). A
+    /// per-start stamp re-dates a project that is already running, which
+    /// moves it WITHIN the running tier the moment a second process starts;
+    /// GTK's running tier holds still.
+    fn start_fresh(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let entry = &mut self.projects[pidx].entries[index];
+        entry.restart_attempts = 0;
+        entry.restart_generation += 1;
+        entry.pending_auto_open = entry.config.open_in_browser;
+        entry.auto_open_grace = false;
+        entry.outage_notified = false;
+        self.start(pidx, index)
+    }
+
+    /// Stop. Remote: explicitly kill the host-side session first (the local
+    /// PTY teardown only detaches it), fire-and-forget, and make the next
+    /// spawn clear any survivor. Local: `shutdown()` SIGHUPs the child on
+    /// the PTY thread — the same teardown dropping the terminal performed,
+    /// minus the part that threw away everything the process printed.
+    /// It emits no Exit event, so the status set here is the final word.
+    fn stop(&mut self, pidx: usize, index: usize) {
+        self.drop_hold_relay(self.projects[pidx].entries[index].term_id);
+        let project = &mut self.projects[pidx];
+        if let Some(host) = project.location.host() {
+            let entry = &mut project.entries[index];
+            if entry.config.category != ProcessCategory::SSH {
+                let session = entry.remote_session.take();
+                if let Some(pidfile) = entry.remote_pidfile.take() {
+                    remote::remote_kill(host, &pidfile, session.as_deref());
+                    entry.remote_fresh_next = true;
+                }
+            }
+        }
+        let entry = &mut project.entries[index];
+        entry.stopping = true;
+        entry.restart_generation += 1;
+        entry.restart_attempts = 0;
+        entry.pending_auto_open = false;
+        if let Some(term) = entry.terminal.as_ref() {
+            term.shutdown();
+        }
+        entry.status = Status::Stopped;
+        self.maybe_drop_tunnels(pidx);
+    }
+
+    /// Forwards live only while something runs — the next run rediscovers
+    /// its ports instead of inheriting stale forwards (GTK behavior).
+    fn maybe_drop_tunnels(&mut self, pidx: usize) {
+        let project = &mut self.projects[pidx];
+        if project.entries.iter().any(|e| e.is_running()) {
+            return;
+        }
+        if let Some(tunnels) = &mut project.tunnels {
+            tunnels.close_all();
+        }
+        project.port_map.clear();
+    }
+
+    fn add_terminal(&mut self, pidx: usize) -> Task<Event> {
+        self.projects[pidx].terminals_created += 1;
+        let config = ProcessConfig {
+            name: format!("terminal {}", self.projects[pidx].terminals_created),
+            command: String::new(),
+            working_dir: None,
+            start_with_project: false,
+            auto_restart: false,
+            open_in_browser: false,
+            restart_when_changed: Vec::new(),
+            env: Default::default(),
+            category: ProcessCategory::Terminal,
+            auto_named: true,
+            display_name: None,
+        };
+        self.projects[pidx].entries.push(ProcessEntry::new(config));
+        let index = self.projects[pidx].entries.len() - 1;
+        self.start(pidx, index)
+    }
+
+    /// Raise the Add SSH Connection form on `project`. Submit adds to the
+    /// ACTIVE project (as the command form does), so raising it on another
+    /// card switches there first.
+    fn open_add_ssh(&mut self, project: u64) -> Task<Event> {
+        let Some(pidx) = self.project_index(project) else {
+            return Task::none();
+        };
+        let switched = self.active != pidx;
+        self.active = pidx;
+        self.add_ssh = Some(add_ssh::State::new(project, ssh::parse_ssh_config()));
+        // Mutually exclusive with the other form panes.
+        self.add_command = None;
+        self.add_project = None;
+        self.edit_project = None;
+        if switched {
+            self.poll_git_fetch()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// GTK's add handler for the SSH dialog: persist as a custom command,
+    /// add the row (a plain `ssh` process on THIS machine, whatever the
+    /// project's location — `spawn_settings` never wraps the SSH category
+    /// in the remote tmux path), select it, and connect only when
+    /// Auto-connect is on. The name is the identifier the saved file keys
+    /// on — `ssh`, `ssh-2`, … like the agent names rather than GTK's uuid
+    /// suffix — while the sidebar shows `display_name`.
+    fn update_add_ssh(&mut self, msg: add_ssh::Msg) -> Task<Event> {
+        match msg {
+            add_ssh::Msg::Cancel => {
+                self.add_ssh = None;
+                self.focus_selected_terminal()
+            }
+            add_ssh::Msg::Submit => {
+                let Some(mut form) = self.add_ssh.take() else {
+                    return Task::none();
+                };
+                let Some(pidx) = self.project_index(form.project) else {
+                    return Task::none();
+                };
+                let taken: Vec<String> = self.projects[pidx]
+                    .entries
+                    .iter()
+                    .map(|e| e.config.name.clone())
+                    .collect();
+                let name = agents::unique_agent_name(&taken, "ssh");
+                let Some(config) =
+                    form.fields
+                        .to_process_config(name, form.auto_connect, form.auto_reconnect)
+                else {
+                    // Refuse, but KEEP the form with the reason on it.
+                    form.error = Some(String::from("A host is required."));
+                    self.add_ssh = Some(form);
+                    return Task::none();
+                };
+                let key = self.projects[pidx].key();
+                self.saved.add_custom_command(&key, config.clone());
+                let auto_connect = config.start_with_project;
+                self.projects[pidx].entries.push(ProcessEntry::new(config));
+                let index = self.projects[pidx].entries.len() - 1;
+                if auto_connect {
+                    self.start_fresh(pidx, index)
+                } else {
+                    self.projects[pidx].selected = index;
+                    Task::none()
+                }
+            }
+            other => {
+                if let Some(form) = &mut self.add_ssh {
+                    form.edit(&other);
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn open_edit_form(&mut self, pidx: usize, index: usize) {
+        let project = &self.projects[pidx];
+        let Some(entry) = project.entries.get(index) else {
+            return;
+        };
+        self.add_command = Some(ProcessForm {
+            name: entry.config.name.clone(),
+            command: entry.config.command.clone(),
+            working_dir: entry.config.working_dir.clone().unwrap_or_default(),
+            agent: entry.config.category == ProcessCategory::Agent,
+            name_touched: true,
+            start_with_project: entry.config.start_with_project,
+            auto_restart: entry.config.auto_restart,
+            open_in_browser: entry.config.open_in_browser,
+            watch: entry.config.restart_when_changed.join(", "),
+            editing: Some((project.id, index)),
+            original_category: entry.config.category.clone(),
+            error: None,
+        });
+        // The form panes are mutually exclusive, as GTK's modal dialogs
+        // are — the main pane can only show one, and a form left standing
+        // underneath swallows the first Esc invisibly.
+        self.add_project = None;
+        self.edit_project = None;
+    }
+
+    /// Stop and remove a process: drop its custom-command copy AND record
+    /// the deletion — the user's edit of a DETECTED process lives in
+    /// custom_commands, and without the deletion record detection
+    /// resurrects it on the next load.
+    fn delete_process(&mut self, pidx: usize, index: usize) {
+        if self.projects[pidx].entries.get(index).is_none() {
+            return;
+        }
+        self.stop(pidx, index);
+        let key = self.projects[pidx].key();
+        let name = self.projects[pidx].entries[index].config.name.clone();
+        let is_custom = self
+            .saved
+            .get_custom_commands(&key)
+            .is_some_and(|l| l.iter().any(|c| c.name == name));
+        if is_custom {
+            self.saved.remove_custom_command(&key, &name);
+        }
+        self.saved.add_deleted_process(&key, &name);
+        self.projects[pidx].entries.remove(index);
+        let n = self.projects[pidx].entries.len();
+        self.projects[pidx].selected = if n == 0 { 0 } else { index.min(n - 1) };
+    }
+
+    /// Close a project: local processes die with their PTYs, remote
+    /// sessions DETACH (kill only happens on explicit per-process stop) —
+    /// the same contract as quitting the app.
+    fn close_project(&mut self, pidx: usize) {
+        self.stop_mcp(pidx);
+        let held: Vec<u64> = self.projects[pidx]
+            .entries
+            .iter()
+            .filter_map(|e| e.term_id)
+            .collect();
+        for id in held {
+            self.drop_hold_relay(Some(id));
+        }
+        let key = self.projects[pidx].key();
+        if let Some(tunnels) = &mut self.projects[pidx].tunnels {
+            tunnels.close_all();
+        }
+        // A fetched remote icon lives in our cache — delete it with the
+        // project so removals don't orphan cache files (GTK parity).
+        if let Some(icon) = self.saved.get_icon(&key) {
+            remote::icon::discard_if_cached(icon);
+        }
+        self.projects.remove(pidx);
+        self.saved.remove(&key);
+        self.saved.save();
+        if self.active >= self.projects.len() {
+            self.active = self.projects.len().saturating_sub(1);
+        }
+    }
+
+    /// A terminal's run ended (Exit event) — classify and schedule what the
+    /// policy asks for (restart with backoff, endless reconnect, nothing).
+    fn finalize_exit(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        self.drop_hold_relay(self.projects[pidx].entries[index].term_id);
+        let project = &mut self.projects[pidx];
+        let connection_loss = project.location.is_remote()
+            && project.entries[index].config.category != ProcessCategory::SSH
+            && project.entries[index].last_exit == Some(255);
+
+        let host = project.location.host().map(String::from);
+        let entry = &mut project.entries[index];
+
+        // The terminal stays — it holds the run's output, which is what the
+        // user reaches for when a run ends badly. GTK feeds the same line
+        // into its VTE, and it matters most on remote projects: an error
+        // printed inside the tmux pane dies with the session, leaving only
+        // tmux's bare "[exited]" behind.
+        if let Some(code) = entry.last_exit
+            && let Some(msg) = banner::exit_banner(
+                code,
+                connection_loss,
+                &entry.config.command,
+                host.as_deref(),
+            )
+            && let Some(term) = entry.terminal.as_mut()
+        {
+            term.feed(msg.as_bytes());
+        }
+
+        let run = entry.started_at.map(|t| t.elapsed());
+        let stopping_was = entry.stopping;
+        let (status, attempts, delay) = plan_after_exit(
+            entry.config.auto_restart,
+            entry.stopping,
+            connection_loss,
+            entry.last_exit,
+            run,
+            entry.restart_attempts,
+        );
+        entry.status = status;
+        entry.restart_attempts = attempts;
+        entry.stopping = false;
+
+        // Desktop notifications, per the shared settings and GTK's focus
+        // gate (`should_notify` guards every exit kind there). The outage
+        // flag flips whether or not the gate lets this one through: "once
+        // per outage" is once, not "once the user looks away".
+        let allowed = self.should_notify(pidx, index);
+        let project_name = self.projects[pidx].name.clone();
+        let icon = self.projects[pidx].icon.clone();
+        let ns = &self.settings.notifications;
+        let entry = &mut self.projects[pidx].entries[index];
+        let name = entry.config.name.clone();
+        match &entry.status {
+            Status::Crashed(code) if ns.on_crash && allowed => {
+                notify::crash(ns, &project_name, &name, *code, icon.as_deref())
+            }
+            Status::Restarting(attempt) if ns.on_auto_restart && allowed => {
+                notify::auto_restart(ns, &project_name, &name, *attempt, icon.as_deref())
+            }
+            Status::Reconnecting(_) if !entry.outage_notified => {
+                entry.outage_notified = true;
+                if allowed {
+                    notify::disconnect(ns, &project_name, &name, icon.as_deref());
+                }
+            }
+            Status::Stopped if !stopping_was && ns.on_process_finish && allowed => {
+                notify::finish(ns, &project_name, &name, icon.as_deref())
+            }
+            _ => {}
+        }
+
+        let entry = &mut self.projects[pidx].entries[index];
+        let task = match (delay, entry.term_id) {
+            (Some(delay), Some(term)) => {
+                let generation = entry.restart_generation;
+                Task::perform(tokio::time::sleep(delay), move |_| Event::RestartDue {
+                    term,
+                    generation,
+                })
+            }
+            _ => Task::none(),
+        };
+        self.maybe_drop_tunnels(pidx);
+        task
+    }
+
+    /// One status + diffstat query against `location` on a worker,
+    /// reported through `wrap` — the shared tail of every chip refresh.
+    /// The plain poll, the fetch arm and the sync's settle poll differ
+    /// only in what runs first and which event carries the answer.
+    fn query_git_task(
+        location: ProjectLocation,
+        fetch_first: bool,
+        wrap: impl Fn(
+            Option<tuxflow_core::remote::git::GitStatus>,
+            tuxflow_core::remote::git::DiffStat,
+        ) -> Event
+        + Send
+        + 'static,
+    ) -> Task<Event> {
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                if fetch_first {
+                    tuxflow_core::remote::git::fetch(&location);
+                }
+                let status = tuxflow_core::remote::git::query_status(&location)?;
+                // Only worth the extra round trips once we know it IS a
+                // repo — the diffstat on a non-repo is two failed calls.
+                Some((status, tuxflow_core::remote::git::query_diffstat(&location)))
+            }),
+            move |joined| {
+                let answer = joined.ok().flatten();
+                wrap(
+                    answer.as_ref().map(|(s, _)| s.clone()),
+                    answer.map(|(_, d)| d).unwrap_or_default(),
+                )
+            },
+        )
+    }
+
+    /// Poll git for the ACTIVE project on a worker — on switch and on
+    /// the 20 s tick. One project at a time; 24 parallel ssh polls would
+    /// be rude to the mux.
+    fn poll_git(&self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        if !matches!(project.phase, Phase::Ready) {
+            return Task::none();
+        }
+        let id = project.id;
+        Self::query_git_task(project.location.clone(), false, move |status, diffstat| {
+            Event::GitPolled {
+                project: id,
+                status,
+                diffstat,
+                fetched: false,
+            }
+        })
+    }
+
+    /// The chip refresh that can DISCOVER commits to pull: `poll_git`
+    /// alone reads `branch.ab` against the last-fetched upstream ref, so
+    /// without this the ↓ counter never appears on its own. Reports twice,
+    /// as GTK's refresh does — the plain poll lands local numbers
+    /// immediately, the fetch arm corrects them seconds later; reporting
+    /// only after the fetch would leave the chip claiming "1 to push" for
+    /// the seconds after a push already cleared it. Runs where GTK passes
+    /// `do_fetch: true`: on switch, on Ready, and on the 60 s cadence.
+    fn poll_git_fetch(&mut self) -> Task<Event> {
+        let plain = self.poll_git();
+        let Some(project) = self.active_project() else {
+            return plain;
+        };
+        if !matches!(project.phase, Phase::Ready) {
+            return plain;
+        }
+        let id = project.id;
+        let location = project.location.clone();
+        if !self.git_fetching.insert(id) {
+            return plain;
+        }
+        let fetch =
+            Self::query_git_task(location, true, move |status, diffstat| Event::GitPolled {
+                project: id,
+                status,
+                diffstat,
+                fetched: true,
+            });
+        Task::batch([plain, fetch])
+    }
+
+    /// The status-bar sync chip: fetch, ff-pull if behind, push if ahead.
+    /// One click, and every failure mode lands in a notice rather than
+    /// silently leaving the counters wrong.
+    fn start_git_sync(&mut self) -> Task<Event> {
+        let Some((id, location)) = self.active_project().map(|p| (p.id, p.location.clone())) else {
+            return Task::none();
+        };
+        if !self.git_syncing.insert(id) {
+            return Task::none();
+        }
+        let sync = Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::sync_with_remote(&location)
+            }),
+            move |joined| Event::GitSynced {
+                project: id,
+                result: joined.unwrap_or_else(|e| Err(e.to_string())),
+            },
+        );
+        // The spinner's frame chain. One serves however many syncs
+        // overlap, and if the previous chain is still winding down from a
+        // settle an instant ago, `start` refuses and that chain simply
+        // picks this sync up on its next frame.
+        match self.sync_spin.start() {
+            Some(generation) => Task::batch([sync, Task::done(Event::SyncSpinTick(generation))]),
+            None => sync,
+        }
+    }
+
+    /// GTK opens an AlertDialog here; the notice card is this shell's
+    /// equivalent — one message, one OK. Returns the modal grab (see
+    /// `ConfirmRequest`) — run it, or keys keep reaching the terminal
+    /// under the card.
+    fn notify_git_failure(&mut self, heading: &str, detail: &str) -> Task<Event> {
+        self.notice = Some((
+            heading.to_string(),
+            format!("{detail}\n\nOpen Git Changes to resolve it manually."),
+        ));
+        TerminalView::unfocus()
+    }
+
+    /// Open the Git Changes view on the active project, seeded from what
+    /// the status-bar poll already knows so it renders complete instead of
+    /// blank for a round trip.
+    fn open_git_changes(&mut self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        let seed = git_view::Seed {
+            ahead: project.git.as_ref().map_or(0, |g| g.ahead as usize),
+            behind: project.git.as_ref().map_or(0, |g| g.behind as usize),
+            branch: project.git.as_ref().map(|g| g.branch.clone()),
+        };
+        let (id, location) = (project.id, project.location.clone());
+        self.git_tick_stamp += 1;
+        let stamp = self.git_tick_stamp;
+        self.git_ui = Some(git_view::State::new(id, location, seed, stamp));
+        // Closing the other full-pane views keeps "what is the main area
+        // showing?" a single answer.
+        self.settings_ui = None;
+        Task::batch([
+            self.git_load_files(),
+            self.git_refresh_sync(true),
+            Task::perform(tokio::time::sleep(Duration::from_secs(2)), move |_| {
+                Event::GitMsg(git_view::Msg::Tick(stamp))
+            }),
+        ])
+    }
+
+    /// Reload the changed-file list. Clears the selection, because the
+    /// index it holds is about to mean a different file.
+    fn git_load_files(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.git_ui else {
+            return Task::none();
+        };
+        let generation = state.bump();
+        state.loading = state.files.is_empty();
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::changed_files(&location)
+            }),
+            move |joined| {
+                Event::GitMsg(git_view::Msg::Files {
+                    generation,
+                    files: joined.unwrap_or_default(),
+                })
+            },
+        )
+    }
+
+    /// Load the selected file's diff. Shares the file list's generation:
+    /// a reload invalidates a diff still in flight for the old list.
+    fn git_load_diff(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.git_ui else {
+            return Task::none();
+        };
+        let Some(file) = state.selected_file().cloned() else {
+            state.diff = None;
+            return Task::none();
+        };
+        let generation = state.generation;
+        state.diff_loading = true;
+        let location = state.location.clone();
+        let path = file.path.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                tuxflow_core::remote::git::load_diff(&location, &file)
+            }),
+            move |joined| {
+                Event::GitMsg(git_view::Msg::Diff {
+                    generation,
+                    path: path.clone(),
+                    diff: Box::new(joined.unwrap_or_default()),
+                })
+            },
+        )
+    }
+
+    /// Branch + ahead/behind + the porcelain hash the poll compares on.
+    /// `fetch` costs a network round trip, so it runs on open and every
+    /// ~30 s, not on every 2 s tick.
+    fn git_refresh_sync(&mut self, fetch: bool) -> Task<Event> {
+        let Some(state) = &self.git_ui else {
+            return Task::none();
+        };
+        let generation = state.generation;
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                use tuxflow_core::remote::git as g;
+                if fetch {
+                    g::fetch(&location);
+                }
+                (
+                    g::commits_ahead(&location),
+                    g::commits_behind(&location),
+                    g::current_branch(&location),
+                    g::status_hash(&location),
+                )
+            }),
+            move |joined| {
+                let (ahead, behind, branch, hash) = joined.unwrap_or((0, 0, None, 0));
+                Event::GitMsg(git_view::Msg::Sync {
+                    generation,
+                    ahead,
+                    behind,
+                    branch,
+                    hash,
+                })
+            },
+        )
+    }
+
+    /// A commit / push / pull from the view, all shaped the same: mark
+    /// busy, run it on a worker, report back under the current generation.
+    fn git_run(&mut self, action: git_view::Busy) -> Task<Event> {
+        let Some(state) = &mut self.git_ui else {
+            return Task::none();
+        };
+        if state.busy.is_some() {
+            return Task::none();
+        }
+        let message = state.commit_message();
+        if action == git_view::Busy::Commit && message.is_empty() {
+            return Task::none();
+        }
+        state.busy = Some(action);
+        state.error = None;
+        let location = state.location.clone();
+        Task::perform(
+            tokio::task::spawn_blocking(move || {
+                use tuxflow_core::remote::git as g;
+                match action {
+                    git_view::Busy::Commit => g::commit_all(&location, &message),
+                    git_view::Busy::Push => g::push(&location),
+                    git_view::Busy::Pull => g::pull(&location),
+                }
+            }),
+            move |joined| {
+                Event::GitMsg(git_view::Msg::Done {
+                    action,
+                    result: joined.unwrap_or_else(|e| Err(e.to_string())),
+                })
+            },
+        )
+    }
+
+    /// The add-project flow's workspace-touching half — duplicate checks,
+    /// the detection workers, and the persistence that GTK does inside
+    /// `Workspace::finalize_project`.
+    fn update_add_project(&mut self, msg: add_project::Msg) -> Task<Event> {
+        use add_project::Msg;
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        // A verify/detect captures the fields at submit and proceeds with
+        // those. Editing them underneath it would leave the next stage
+        // configuring the path that was submitted rather than the one on
+        // screen, so the inputs are frozen for its duration. The view greys
+        // the two text fields to match; this guard is what also covers the
+        // host picker, which iced gives no way to disable.
+        if state.busy.is_some()
+            && matches!(
+                msg,
+                Msg::HostChoice(_) | Msg::HostInput(_) | Msg::PathInput(_) | Msg::UseSuggestion(_)
+            )
+        {
+            return Task::none();
+        }
+        match msg {
+            Msg::Close => {
+                self.add_project = None;
+                self.focus_selected_terminal()
+            }
+            Msg::Back => {
+                match state.stage {
+                    // Back out of Configure to the picker that produced it,
+                    // keeping what was typed — the detection is cheap to redo
+                    // and a typo in the path is the reason to come back.
+                    add_project::Stage::Configure => {
+                        state.stage = add_project::Stage::Locate;
+                        state.configure = None;
+                        state.error = None;
+                    }
+                    _ => {
+                        state.stage = add_project::Stage::Choose;
+                        state.suggestions.clear();
+                        state.error = None;
+                        state.busy = None;
+                    }
+                }
+                // Whichever way we went, a probe or a listing requested from
+                // the stage we just left must not land on the one we are now
+                // on.
+                state.probe_stamp += 1;
+                state.stamp += 1;
+                Task::none()
+            }
+            Msg::Pick(kind) => {
+                state.enter(kind);
+                Task::none()
+            }
+            Msg::HostChoice(label) => {
+                // Selecting an alias fills the host field with the ALIAS, so
+                // ssh resolves ProxyJump/IdentityFile/User itself.
+                state.host_choice = label.clone();
+                state.host = match label == add_project::CUSTOM_HOST {
+                    true => String::new(),
+                    false => label,
+                };
+                state.suggestions.clear();
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::HostInput(value) => {
+                state.host = value;
+                // A hand-typed host no longer corresponds to the picked entry.
+                state.host_choice = add_project::CUSTOM_HOST.to_string();
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::PathInput(value) => {
+                state.path = value;
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::UseSuggestion(dir) => {
+                // Filling the field re-triggers completion one level deeper,
+                // which is what makes the list a browser rather than a
+                // one-shot guess.
+                state.path = dir;
+                state.error = None;
+                self.complete_path()
+            }
+            Msg::Suggestions { stamp, dirs } => {
+                // Drop a listing whose keystroke has already been superseded.
+                if stamp == state.stamp {
+                    state.suggestions = dirs;
+                }
+                Task::none()
+            }
+            Msg::Locate => self.locate_project(),
+            Msg::Detected(found) => {
+                state.configured(*found);
+                Task::none()
+            }
+            Msg::Failed { stamp, error } => {
+                if stamp == state.probe_stamp {
+                    state.busy = None;
+                    state.error = Some(error);
+                }
+                Task::none()
+            }
+            Msg::NameInput(value) => {
+                if let Some(c) = &mut state.configure {
+                    c.name = value;
+                }
+                Task::none()
+            }
+            Msg::Toggle(index, on) => {
+                if let Some(c) = &mut state.configure
+                    && let Some(slot) = c.selected.get_mut(index)
+                {
+                    *slot = on;
+                }
+                Task::none()
+            }
+            Msg::SetAll(on) => {
+                if let Some(c) = &mut state.configure {
+                    c.selected.iter_mut().for_each(|s| *s = on);
+                }
+                Task::none()
+            }
+            Msg::Confirm => self.finish_add_project(),
+        }
+    }
+
+    /// Ask for directory completions for what is in the path field now.
+    ///
+    /// The stamp is bumped per keystroke and checked on arrival, so a slow
+    /// listing can't paint over what is being typed now. The remote half is
+    /// debounced because each probe is an ssh round trip; the local half is a
+    /// `read_dir` and answers immediately.
+    fn complete_path(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        state.stamp += 1;
+        let stamp = state.stamp;
+        if !state.can_complete() {
+            state.suggestions.clear();
+            return Task::none();
+        }
+        let host = state.probe_host();
+        let prefix = state.path.trim().to_string();
+        let debounce = host.is_some();
+        Task::perform(
+            async move {
+                if debounce {
+                    tokio::time::sleep(SUGGEST_DEBOUNCE).await;
+                }
+                tokio::task::spawn_blocking(move || remote::fs::list_dirs(host.as_deref(), &prefix))
+                    .await
+                    .unwrap_or_default()
+            },
+            move |dirs| Event::AddProjectMsg(add_project::Msg::Suggestions { stamp, dirs }),
+        )
+    }
+
+    /// Commit the Locate stage: reject a duplicate, then detect. The remote
+    /// half verifies over ssh first (BatchMode, so it can never hang on an
+    /// auth prompt) — `probe_remote` does that as its own first step.
+    fn locate_project(&mut self) -> Task<Event> {
+        let Some(state) = &self.add_project else {
+            return Task::none();
+        };
+        if !state.can_locate() {
+            return Task::none();
+        }
+        let dir = state.path.trim().trim_end_matches('/').to_string();
+        let location = match state.probe_host() {
+            Some(host) => ProjectLocation::Ssh {
+                host,
+                dir: dir.clone(),
+            },
+            // Canonicalize so `/srv/app/.` and a symlinked path can't open
+            // the same project twice under two keys.
+            None => ProjectLocation::Local(
+                PathBuf::from(&dir)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(&dir)),
+            ),
+        };
+        let key = location.key();
+
+        // GTK silently drops a duplicate here, which reads as a dead button.
+        // Say so instead. Resolved before re-borrowing the form.
+        let duplicate = self
+            .projects
+            .iter()
+            .find(|p| p.key() == key)
+            .map(|p| p.name.clone());
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        if let Some(name) = duplicate {
+            state.error = Some(format!("Already open: {name}"));
+            return Task::none();
+        }
+        state.probe_stamp += 1;
+        let stamp = state.probe_stamp;
+
+        match location.clone() {
+            ProjectLocation::Local(path) => {
+                if !path.is_dir() {
+                    state.error = Some(format!("No such directory: {}", path.display()));
+                    return Task::none();
+                }
+                // Local detection is a handful of stats on one directory —
+                // the same call the startup path makes inline.
+                let (name, stacks, config_loaded) = detect_for_add(&path);
+                let found = add_project::Detected {
+                    stamp,
+                    key,
+                    location,
+                    name,
+                    stacks,
+                    config_loaded,
+                };
+                Task::done(Event::AddProjectMsg(add_project::Msg::Detected(Box::new(
+                    found,
+                ))))
+            }
+            ProjectLocation::Ssh { host, dir } => {
+                state.busy = Some(format!("Connecting to {host}\u{2026}"));
+                state.suggestions.clear();
+                let probe_host = host.clone();
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        // conservative = false: the add flow offers everything
+                        // detection can find, and persists the extras as
+                        // custom commands so they survive the next launch.
+                        remote::probe::probe_remote(&probe_host, &dir, false)
+                    }),
+                    move |joined| {
+                        let msg = match joined {
+                            Ok(Ok(probe)) => {
+                                let name = probe
+                                    .config
+                                    .as_ref()
+                                    .map(|c| c.project.name.clone())
+                                    .unwrap_or_else(|| location.base_name());
+                                let config_loaded = probe.config.is_some();
+                                let stacks = match config_loaded {
+                                    // An authored process list isn't a
+                                    // detected stack — nothing to choose.
+                                    true => Vec::new(),
+                                    false => probe.stacks,
+                                };
+                                add_project::Msg::Detected(Box::new(add_project::Detected {
+                                    stamp,
+                                    key: key.clone(),
+                                    location: location.clone(),
+                                    name,
+                                    stacks,
+                                    config_loaded,
+                                }))
+                            }
+                            Ok(Err(e)) => add_project::Msg::Failed {
+                                stamp,
+                                error: connect_hint(&host, &e),
+                            },
+                            Err(e) => add_project::Msg::Failed {
+                                stamp,
+                                error: e.to_string(),
+                            },
+                        };
+                        Event::AddProjectMsg(msg)
+                    },
+                )
+            }
+        }
+    }
+
+    /// Commit the Configure stage — where the project actually joins the
+    /// workspace.
+    ///
+    /// The persistence mirrors GTK's `finalize_project` exactly, and the two
+    /// halves of it are not symmetric. A DESELECTED process is marked deleted
+    /// so the loader keeps filtering it out. A SELECTED one usually needs
+    /// nothing — `open_project` re-detects and finds it again — EXCEPT when
+    /// it sits outside the conservative subset the startup loader re-detects,
+    /// in which case it has no source to come back from and is persisted as a
+    /// custom command instead.
+    fn finish_add_project(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.add_project else {
+            return Task::none();
+        };
+        let Some(c) = &state.configure else {
+            return Task::none();
+        };
+        let name = c.name.trim().to_string();
+        if name.is_empty() {
+            return Task::none();
+        }
+        let key = c.key.clone();
+        let default_dir = c.location.dir_str();
+        let conservative = detector::conservative_names(&c.stacks);
+
+        self.saved.add(&key);
+        if name != c.detected_name {
+            self.saved.set_name(&key, &name);
+        }
+        for (proc, keep) in c.flat().zip(c.selected.iter().copied()) {
+            if !keep {
+                self.saved.add_deleted_process(&key, &proc.name);
+                continue;
+            }
+            if !c.config_loaded && !conservative.contains(&proc.name) {
+                let mut pc = proc.clone();
+                if pc.working_dir.is_none() {
+                    pc.working_dir = Some(default_dir.clone());
+                }
+                self.saved.add_custom_command(&key, pc);
+            }
+        }
+        self.saved.save();
+
+        self.add_project = None;
+        let task = self.open_project(&key);
+        self.active = self.projects.len() - 1;
+        let git = self.poll_git_fetch();
+        Task::batch([task, git])
+    }
+
+    /// Raise the Edit Project view for a card — GTK's dialog. Ready
+    /// projects only: the union below needs the entries and the detection
+    /// list the load produced.
+    fn open_edit_project(&mut self, project: u64) -> Task<Event> {
+        let Some(pidx) = self.project_index(project) else {
+            return Task::none();
+        };
+        if !matches!(self.projects[pidx].phase, Phase::Ready) {
+            return Task::none();
+        }
+        // The form writes into the project it names; raising it from
+        // another card switches there first, as OpenAddCommand does.
+        let switched = self.active != pidx;
+        self.active = pidx;
+        let p = &self.projects[pidx];
+        let key = p.key();
+
+        // The pool the Hidden/Detected groups resolve from: the load-time
+        // config list, plus the FULL detection — live for a local project,
+        // so commands added since load appear (GTK's dialog behavior), and
+        // the probe's own full list for a remote one, where a live rerun
+        // would be an ssh round trip mid-form (GTK's staleness trade).
+        let mut pool = p.detected_configs.clone();
+        let full: Vec<ProcessConfig> = match &p.location {
+            ProjectLocation::Local(dir) => detector::detect_stacks(dir)
+                .into_iter()
+                .flat_map(|s| s.suggested_processes)
+                .collect(),
+            ProjectLocation::Ssh { .. } => p.detected_full.clone(),
+        };
+        for config in full {
+            if !pool.iter().any(|c| c.name == config.name) {
+                pool.push(config);
+            }
+        }
+        let active: Vec<ProcessConfig> = p.entries.iter().map(|e| e.config.clone()).collect();
+        let deleted = self
+            .saved
+            .deleted_processes
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let custom = self
+            .saved
+            .get_custom_commands(&key)
+            .cloned()
+            .unwrap_or_default();
+        let commands = edit_project::toggle_entries(&active, &deleted, &custom, &pool);
+
+        // Same epoch stride as the add forms: an icon fetch or listing in
+        // flight when this form closes must not land in the next one.
+        self.add_form_epoch += 1 << 32;
+        self.edit_project = Some(edit_project::State {
+            project,
+            name: p.name.clone(),
+            key,
+            remote: p.location.is_remote(),
+            icon: p
+                .icon
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            icon_path: String::new(),
+            suggestions: Vec::new(),
+            stamp: self.add_form_epoch,
+            fetch_stamp: self.add_form_epoch,
+            commands,
+            busy: None,
+            error: None,
+        });
+        self.add_command = None;
+        self.add_ssh = None;
+        self.add_project = None;
+        // Symmetric with OpenSettings: a hidden Git view would keep its
+        // 2 s (possibly ssh) poll running blind underneath.
+        self.git_ui = None;
+        if switched {
+            self.poll_git_fetch()
+        } else {
+            Task::none()
+        }
+    }
+
+    fn update_edit_project(&mut self, msg: edit_project::Msg) -> Task<Event> {
+        use edit_project::Msg;
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        match msg {
+            Msg::Close => {
+                self.edit_project = None;
+                self.focus_selected_terminal()
+            }
+            Msg::NameInput(value) => {
+                state.name = value;
+                state.error = None;
+                Task::none()
+            }
+            Msg::Toggle(index, on) => {
+                if let Some(entry) = state.commands.get_mut(index) {
+                    entry.on = on;
+                }
+                Task::none()
+            }
+            Msg::IconPathInput(value) => {
+                state.icon_path = value;
+                state.error = None;
+                self.complete_icon_path()
+            }
+            Msg::IconSuggestions { stamp, paths } => {
+                // Drop a listing whose keystroke has been superseded.
+                if stamp == state.stamp {
+                    state.suggestions = paths;
+                }
+                Task::none()
+            }
+            Msg::UseIconSuggestion(path) => {
+                let descend = path.ends_with('/');
+                state.icon_path = path;
+                state.error = None;
+                if descend {
+                    // A directory lists one level deeper — the browser
+                    // behavior, as in the add-project path field.
+                    self.complete_icon_path()
+                } else {
+                    self.commit_icon_path()
+                }
+            }
+            Msg::CommitIconPath => self.commit_icon_path(),
+            Msg::IconAutoDetect => self.icon_auto_detect(),
+            Msg::IconFetched { stamp, path } => {
+                if stamp != state.fetch_stamp {
+                    return Task::none();
+                }
+                state.busy = None;
+                match path {
+                    Some(local) => {
+                        state.icon = Some(local);
+                        state.error = None;
+                    }
+                    None => state.error = Some(String::from("No usable image found.")),
+                }
+                Task::none()
+            }
+            Msg::IconClear => {
+                state.icon = None;
+                Task::none()
+            }
+            Msg::CopyPath => {
+                let id = state.project;
+                match self.project_index(id) {
+                    Some(pidx) => {
+                        iced::clipboard::write(copyable_path(&self.projects[pidx].location))
+                    }
+                    None => Task::none(),
+                }
+            }
+            Msg::OpenEditor => {
+                let id = state.project;
+                self.update(Event::OpenInEditor(id))
+            }
+            Msg::OpenTerminal => {
+                // GTK's "Open Terminal Here" (Settings → Tools → Default
+                // Terminal), shared launcher in core. GTK hides the button
+                // for remote projects; here the terminal app opens an ssh
+                // shell on the host instead, since the cwd is over there.
+                let id = state.project;
+                if let Some(pidx) = self.project_index(id) {
+                    let location = self.projects[pidx].location.clone();
+                    std::thread::spawn(move || {
+                        tuxflow_core::util::terminal_app::open_terminal(&location)
+                    });
+                }
+                Task::none()
+            }
+            Msg::Save => self.save_edit_project(),
+            Msg::RemoveProject => {
+                let id = state.project;
+                self.update(Event::ConfirmRequest(ConfirmAction::RemoveProject(id)))
+            }
+        }
+    }
+
+    /// Ask for icon completions (directories to descend + image files) for
+    /// what is in the Edit Project path field now — the add-project
+    /// completion idiom over `list_icon_paths`, stamped and debounced the
+    /// same way.
+    fn complete_icon_path(&mut self) -> Task<Event> {
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        state.stamp += 1;
+        let stamp = state.stamp;
+        let prefix = state.icon_path.trim().to_string();
+        let id = state.project;
+        if !prefix.starts_with('/') {
+            state.suggestions.clear();
+            return Task::none();
+        }
+        let host = self
+            .project_index(id)
+            .and_then(|pidx| self.projects[pidx].location.host().map(String::from));
+        let debounce = host.is_some();
+        Task::perform(
+            async move {
+                if debounce {
+                    tokio::time::sleep(SUGGEST_DEBOUNCE).await;
+                }
+                tokio::task::spawn_blocking(move || {
+                    remote::fs::list_icon_paths(host.as_deref(), &prefix)
+                })
+                .await
+                .unwrap_or_default()
+            },
+            move |paths| Event::EditProjectMsg(edit_project::Msg::IconSuggestions { stamp, paths }),
+        )
+    }
+
+    /// Commit the icon field: a local path is checked and adopted as-is; a
+    /// remote one is pulled into the icon cache on a worker first — every
+    /// saved icon is a local file, which is what keeps Save synchronous
+    /// (GTK's picker runs the same `cache_remote_icon` at pick time).
+    fn commit_icon_path(&mut self) -> Task<Event> {
+        let (id, key) = match &self.edit_project {
+            Some(state) => (state.project, state.key.clone()),
+            None => return Task::none(),
+        };
+        let host = self
+            .project_index(id)
+            .and_then(|pidx| self.projects[pidx].location.host().map(String::from));
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        let path = state.icon_path.trim().to_string();
+        if !path.starts_with('/') || path.ends_with('/') {
+            state.error = Some(String::from("Enter the absolute path of an image file."));
+            return Task::none();
+        }
+        state.suggestions.clear();
+        match host {
+            None => {
+                if std::path::Path::new(&path).is_file() {
+                    state.icon = Some(path);
+                    state.error = None;
+                } else {
+                    state.error = Some(format!("No such file: {path}"));
+                }
+                Task::none()
+            }
+            Some(host) => {
+                state.fetch_stamp += 1;
+                let stamp = state.fetch_stamp;
+                state.busy = Some(format!("Fetching from {host}\u{2026}"));
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        // Own ssh permit, as the probe's fetch takes one.
+                        let _permit = remote::ssh_permit();
+                        remote::icon::cache_remote_icon(&host, &path, &key)
+                    }),
+                    move |joined| {
+                        Event::EditProjectMsg(edit_project::Msg::IconFetched {
+                            stamp,
+                            path: joined.ok().flatten(),
+                        })
+                    },
+                )
+            }
+        }
+    }
+
+    /// The icon row's Auto-detect: a local project scans its own disk
+    /// inline; a remote one reruns the probe's icon fetch on a worker —
+    /// which GTK's dialog never offered remotely (its scan is local-only),
+    /// the add-agent kind of deliberate improvement rather than a port.
+    fn icon_auto_detect(&mut self) -> Task<Event> {
+        let Some(id) = self.edit_project.as_ref().map(|s| s.project) else {
+            return Task::none();
+        };
+        let Some(pidx) = self.project_index(id) else {
+            return Task::none();
+        };
+        let location = self.projects[pidx].location.clone();
+        let Some(state) = &mut self.edit_project else {
+            return Task::none();
+        };
+        match location {
+            ProjectLocation::Local(dir) => {
+                match icon_detector::detect_icon(&dir) {
+                    Some(found) => {
+                        state.icon = Some(found);
+                        state.error = None;
+                    }
+                    None => state.error = Some(String::from("No icon found in the project.")),
+                }
+                Task::none()
+            }
+            ProjectLocation::Ssh { host, dir } => {
+                state.fetch_stamp += 1;
+                let stamp = state.fetch_stamp;
+                state.busy = Some(format!("Looking for an icon on {host}\u{2026}"));
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = remote::ssh_permit();
+                        remote::icon::fetch_remote_icon(&host, &dir)
+                    }),
+                    move |joined| {
+                        Event::EditProjectMsg(edit_project::Msg::IconFetched {
+                            stamp,
+                            path: joined.ok().flatten(),
+                        })
+                    },
+                )
+            }
+        }
+    }
+
+    /// Apply the Edit Project form — GTK's `EditProjectResult` handler in
+    /// `project_list.rs`, in iced terms: rename, icon, then the command
+    /// toggles.
+    fn save_edit_project(&mut self) -> Task<Event> {
+        let Some(state) = self.edit_project.take() else {
+            return Task::none();
+        };
+        let Some(pidx) = self.project_index(state.project) else {
+            return Task::none();
+        };
+        let name = state.name.trim().to_string();
+        if name.is_empty() {
+            // Refuse but KEEP the form, the add-command idiom: taking it
+            // down with everything set is worse than a red line.
+            let mut state = state;
+            state.error = Some(String::from("A name is required."));
+            self.edit_project = Some(state);
+            return Task::none();
+        }
+        let key = self.projects[pidx].key();
+
+        // Rename only when it happened — writing an unchanged name would
+        // pin a detected name as an override, and a later tuxflow.toml
+        // edit would then never show (the add flow's detected_name rule).
+        if name != self.projects[pidx].name {
+            self.projects[pidx].name = name.clone();
+            self.saved.set_name(&key, &name);
+        }
+
+        // The icon pick, mirrored into the card the way the load resolves
+        // it. `set_icon(None)` clears the entry — Reset to Initials.
+        self.saved.set_icon(&key, state.icon.clone());
+        self.projects[pidx].icon = usable_icon(state.icon.clone());
+
+        // Disables first, GTK's order — each is the full deletion the
+        // context menu's Delete Command performs (stop, drop the custom
+        // copy, record the deletion, remove the entry), found by NAME:
+        // every removal shifts the indices under the rest.
+        let (enabled, disabled) = edit_project::diff(&state.commands);
+        for gone in &disabled {
+            if let Some(index) = self.projects[pidx]
+                .entries
+                .iter()
+                .position(|e| &e.config.name == gone)
+            {
+                self.delete_process(pidx, index);
+            }
+        }
+
+        // Enables: unmark the deletion, persist as the custom command that
+        // overrides same-named detection on every future load (GTK saves
+        // every enable), and join the sidebar pal().stopped — enabling is not
+        // starting. The form lists by COMMAND, so an enabled row may carry
+        // a name the project already uses for something else (the
+        // detected `deploy` script beside a custom `deploy` that runs
+        // `make deploy`); it takes the next free one (`deploy-2`) — names
+        // stay unique, and the row is not silently dropped as it was.
+        let default_dir = self.projects[pidx].location.dir_str();
+        for mut config in enabled {
+            let taken: Vec<String> = self.projects[pidx]
+                .entries
+                .iter()
+                .map(|e| e.config.name.clone())
+                .collect();
+            let name = agents::unique_agent_name(&taken, &config.name);
+            if name == config.name {
+                self.saved.unmark_process_deleted(&key, &name);
+            }
+            config.name = name;
+            if config.working_dir.is_none() {
+                config.working_dir = Some(default_dir.clone());
+            }
+            self.saved.add_custom_command(&key, config.clone());
+            self.projects[pidx].entries.push(ProcessEntry::new(config));
+        }
+        self.focus_selected_terminal()
+    }
+
+    fn update_git_view(&mut self, msg: git_view::Msg) -> Task<Event> {
+        use git_view::Msg;
+        match msg {
+            Msg::Close => {
+                self.git_ui = None;
+                self.focus_selected_terminal()
+            }
+            Msg::Refresh => Task::batch([self.git_load_files(), self.git_refresh_sync(true)]),
+            Msg::SelectFile(index) => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                state.selected = Some(index);
+                self.git_load_diff()
+            }
+            Msg::MessageAction(action) => {
+                if let Some(state) = &mut self.git_ui {
+                    state.message.perform(action);
+                }
+                Task::none()
+            }
+            Msg::Commit => self.git_run(git_view::Busy::Commit),
+            Msg::Push => self.git_run(git_view::Busy::Push),
+            Msg::Pull => self.git_run(git_view::Busy::Pull),
+            Msg::DismissError => {
+                if let Some(state) = &mut self.git_ui {
+                    state.error = None;
+                }
+                Task::none()
+            }
+            Msg::Tick(stamp) => {
+                let Some(state) = &self.git_ui else {
+                    return Task::none();
+                };
+                // A stale chain from a previous open: let it die.
+                if state.stamp != stamp {
+                    return Task::none();
+                }
+                let ticks = state.ticks;
+                if let Some(state) = &mut self.git_ui {
+                    state.ticks = ticks.wrapping_add(1);
+                }
+                let next = Task::perform(tokio::time::sleep(Duration::from_secs(2)), move |_| {
+                    Event::GitMsg(Msg::Tick(stamp))
+                });
+                Task::batch([self.git_refresh_sync(ticks % 15 == 0), next])
+            }
+            Msg::Files { generation, files } => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                if state.generation != generation {
+                    return Task::none();
+                }
+                state.loading = false;
+                // Hold the selection on the same PATH, not the same index:
+                // a file leaving the list above the selected one would
+                // otherwise silently move the selection onto its neighbour.
+                let held = state.selected_file().map(|f| f.path.clone());
+                state.files = files;
+                state.selected = held
+                    .and_then(|path| state.files.iter().position(|f| f.path == path))
+                    .or(if state.files.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
+                self.git_load_diff()
+            }
+            Msg::Diff {
+                generation,
+                path,
+                diff,
+            } => {
+                // Generation gates cross-reload staleness (same file, older
+                // content); the path gates same-generation staleness (two
+                // quick clicks — SelectFile shares the list's generation).
+                // A dropped arrival leaves diff_loading alone: whichever
+                // newer load superseded this one is still on its way.
+                if let Some(state) = &mut self.git_ui
+                    && state.generation == generation
+                    && state.selected_file().map(|f| f.path.as_str()) == Some(path.as_str())
+                {
+                    state.diff_loading = false;
+                    state.diff = Some(*diff);
+                }
+                Task::none()
+            }
+            Msg::Sync {
+                generation,
+                ahead,
+                behind,
+                branch,
+                hash,
+            } => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                if state.generation != generation {
+                    return Task::none();
+                }
+                // A write action owns its own counter until it reports —
+                // repainting the pre-push number over a push in flight
+                // reads as "the push did nothing".
+                if state.busy.is_none() {
+                    state.ahead = ahead;
+                    state.behind = behind;
+                }
+                if branch.is_some() {
+                    state.branch = branch;
+                }
+                let changed = state.last_hash != 0 && state.last_hash != hash;
+                state.last_hash = hash;
+                if changed {
+                    self.git_load_files()
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::Done { action, result } => {
+                let Some(state) = &mut self.git_ui else {
+                    return Task::none();
+                };
+                // Gate on the busy flag, not the generation: only one write
+                // action is ever in flight, so "the action I'm waiting for"
+                // is the exact question — while a generation gate let ANY
+                // list reload (Refresh, or a mid-commit hash change on the
+                // 2 s tick) orphan `busy` and wedge the view in "Pushing…"
+                // with every button disabled. A Done surviving from a
+                // closed-and-reopened view finds busy == None and drops.
+                if state.busy != Some(action) {
+                    return Task::none();
+                }
+                state.busy = None;
+                match result {
+                    Ok(()) => {
+                        if action == git_view::Busy::Commit {
+                            state.message = iced::widget::text_editor::Content::new();
+                        }
+                        // The counters and the file list both moved; a
+                        // fetch isn't needed since we just talked to the
+                        // remote ourselves.
+                        Task::batch([
+                            self.git_load_files(),
+                            self.git_refresh_sync(false),
+                            // The status bar's chip is showing the numbers
+                            // from before this action.
+                            self.poll_git(),
+                        ])
+                    }
+                    Err(detail) => {
+                        state.error = Some((action.failure_heading().to_string(), detail));
+                        Task::none()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Move the selected process within its project and persist the order
+    /// — the keyboard stand-in for GTK's sidebar drag-and-drop.
+    fn move_selected(&mut self, delta: i32) -> Task<Event> {
+        let Some(project) = self.projects.get_mut(self.active) else {
+            return Task::none();
+        };
+        let from = project.selected;
+        let to = from as i32 + delta;
+        if to < 0 || to as usize >= project.entries.len() {
+            return Task::none();
+        }
+        project.entries.swap(from, to as usize);
+        project.selected = to as usize;
+        self.persist_process_order(self.active);
+        Task::none()
+    }
+
+    /// Write the project's live entry order as its saved `process_order`
+    /// — GTK's `save_process_order`, the one place the flat list is
+    /// built. Every caller has just changed what the order MEANS: a move
+    /// changed positions, a rename changed a name the saved list is keyed
+    /// by (a project with no saved order gets one here, or the renamed
+    /// process — a custom command now — appends after detection on the
+    /// next load).
+    fn persist_process_order(&mut self, pidx: usize) {
+        let project = &self.projects[pidx];
+        let key = project.key();
+        let order: Vec<String> = project
+            .entries
+            .iter()
+            .map(|e| e.config.name.clone())
+            .collect();
+        self.saved.set_process_order(&key, order);
+    }
+
+    /// Whether the live drag may drop on `target` — GTK's two DropTargets:
+    /// a project lands on another project's HEADER (the target sits on
+    /// `header_row`, so a card's process rows accept nothing), a process on
+    /// another row of the SAME project and category section.
+    fn drop_allowed(&self, target: (u64, Option<usize>)) -> bool {
+        let Some(drag) = &self.drag else {
+            return false;
+        };
+        match (drag.source, target) {
+            ((src, None), (tgt, None)) => src != tgt,
+            ((sp, Some(si)), (tp, Some(ti))) => {
+                sp == tp
+                    && si != ti
+                    && self.project_index(sp).is_some_and(|pidx| {
+                        let entries = &self.projects[pidx].entries;
+                        entries
+                            .get(si)
+                            .zip(entries.get(ti))
+                            .is_some_and(|(a, b)| a.config.category == b.config.category)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// The drop: dispatch on what was dragged (legality was settled while
+    /// aiming — see `drop_allowed`).
+    fn drop(&mut self, source: (u64, Option<usize>), target: (u64, Option<usize>), before: bool) {
+        match (source, target) {
+            ((src, None), (tgt, None)) => self.move_project(src, tgt, before),
+            ((sp, Some(si)), (tp, Some(ti))) if sp == tp => {
+                if let Some(pidx) = self.project_index(sp) {
+                    self.move_process(pidx, si, ti, before);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// GTK's `Workspace::reorder_project`: the MANUAL order is what moves —
+    /// `saved.directories`, the order recent-first sorting falls back on —
+    /// and the sidebar re-sorts by whichever rule is on. With recent-first
+    /// on that is usually no visible change (GTK re-applies the recency
+    /// sort right after the drop for the same reason); the saved order
+    /// still took the move, and shows once the setting is off.
+    fn move_project(&mut self, src: u64, tgt: u64, before: bool) {
+        let key_of = |id| self.project_index(id).map(|i| self.projects[i].key());
+        let (Some(src_key), Some(tgt_key)) = (key_of(src), key_of(tgt)) else {
+            return;
+        };
+        let mut order = self.saved.directories.clone();
+        let (Some(s), Some(t)) = (
+            order.iter().position(|k| k == &src_key),
+            order.iter().position(|k| k == &tgt_key),
+        ) else {
+            return;
+        };
+        let Some(dst) = dnd::drop_index(s, t, before) else {
+            return;
+        };
+        dnd::reorder(&mut order, s, dst);
+        let slot = self
+            .shown_projects()
+            .iter()
+            .position(|&i| self.projects[i].id == tgt);
+        self.saved.reorder_to_match(&order);
+        if self.settings.sidebar.recent_first {
+            self.sort_projects_recent_first();
+        } else {
+            self.sort_projects_manual();
+        }
+        // The pointer stays on the target header's TREE position through
+        // the drop, and iced carries a mouse_area's hover state by
+        // position: the header drawn there now — whichever card the new
+        // order put at that slot — inherits "hovered" without an enter ever
+        // firing, while the old target keeps wearing the cluster wherever
+        // it went. Reconcile by position. A header whose bounds changed
+        // re-evaluates on its own (mouse_area re-checks on a bounds
+        // change), so this only has to be right where nothing moved.
+        if let Some(k) = slot
+            && let Some(&pidx) = self.shown_projects().get(k)
+        {
+            self.hovered_row = Some((self.projects[pidx].id, None));
+        }
+    }
+
+    /// GTK's process drop — `reorder_process` + `save_process_order` — plus
+    /// the index-keyed state that has to follow the rows: the selection and
+    /// an open edit form. The hovered row needs nothing: the pointer stays
+    /// on the target's slot, and whatever the move put there now holds the
+    /// target's old index (pinned in dnd's tests). The two timers that used
+    /// to carry indices are keyed by terminal instead.
+    fn move_process(&mut self, pidx: usize, src: usize, tgt: usize, before: bool) {
+        let Some(dst) = dnd::drop_index(src, tgt, before) else {
+            return;
+        };
+        let project = &mut self.projects[pidx];
+        if src >= project.entries.len() || tgt >= project.entries.len() {
+            return;
+        }
+        dnd::reorder(&mut project.entries, src, dst);
+        project.selected = dnd::remap(project.selected, src, dst);
+        let project_id = project.id;
+        if let Some(form) = &mut self.add_command
+            && let Some((id, index)) = form.editing
+            && id == project_id
+        {
+            form.editing = Some((id, dnd::remap(index, src, dst)));
+        }
+        self.persist_process_order(pidx);
+    }
+
+    fn entry_for_term(&self, term_id: u64) -> Option<(usize, usize)> {
+        for (pidx, project) in self.projects.iter().enumerate() {
+            if let Some(eidx) = project
+                .entries
+                .iter()
+                .position(|e| e.term_id == Some(term_id))
+            {
+                return Some((pidx, eidx));
+            }
+        }
+        None
+    }
+
+    /// Feed the scanner (remote output arrives hard-wrapped at pane width),
+    /// keep a forward alive for every local port it has seen, and let
+    /// auto-open react to the new badge.
+    fn rescan_ports(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let project = &mut self.projects[pidx];
+        // GTK's skip_port_detection: agent and ssh terminals are prose
+        // surfaces, never scanned — a URL the model *mentions* is not an
+        // address this process serves.
+        if !port_detector::scans_ports(&project.entries[index].config.category) {
+            return Task::none();
+        }
+        let Some(term) = project.entries[index].terminal.as_ref() else {
+            return Task::none();
+        };
+        let name = project.entries[index].config.name.clone();
+        let dump = visible_text(term);
+        if project.location.is_remote() {
+            let cols = term.backend().renderable_content().terminal_size.columns();
+            project.ports.scan_output_wrapped(&name, &dump, cols);
+        } else {
+            project.ports.scan_output(&name, &dump);
+        }
+
+        if let Some(tunnels) = &mut project.tunnels {
+            for port in project.ports.all_local_ports(&name) {
+                if let Some(local) = tunnels.ensure(port) {
+                    project.port_map.insert(port, local);
+                }
+            }
+        }
+        self.maybe_auto_open(pidx, index)
+    }
+
+    /// The one-shot browser open: fires when the badge is final, or arms a
+    /// 5 s grace when only a provisional badge exists.
+    fn maybe_auto_open(&mut self, pidx: usize, index: usize) -> Task<Event> {
+        let project = &self.projects[pidx];
+        let entry = &project.entries[index];
+        let name = entry.config.name.clone();
+        if !entry.pending_auto_open || !project.ports.has_port(&name) {
+            return Task::none();
+        }
+        if project.ports.badge_final(&name) {
+            self.open_in_browser(pidx, index);
+            Task::none()
+        } else if !entry.auto_open_grace {
+            let Some(term) = entry.term_id else {
+                return Task::none();
+            };
+            self.projects[pidx].entries[index].auto_open_grace = true;
+            let generation = self.projects[pidx].entries[index].restart_generation;
+            Task::perform(tokio::time::sleep(AUTO_OPEN_GRACE), move |_| {
+                Event::AutoOpenDue { term, generation }
+            })
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Dispatch a matched app shortcut.
+    fn apply_action(&mut self, action: AppAction) -> Task<Event> {
+        match action {
+            // The widget's own Copy ran first at this chord and never
+            // captures; this covers the pane where it had no selection —
+            // on a remote project the selection the user SEES is tmux's
+            // (`explicit_remote_copy` checks both).
+            AppAction::Copy => self.explicit_remote_copy(),
+            // Reaching here means the widget's Paste found no pal().text — the
+            // clipboard holds an image (or nothing).
+            AppAction::Paste => self.paste_image(),
+            AppAction::TerminalSearch => {
+                self.search_open = true;
+                iced::widget::operation::focus(self.search_input.clone())
+            }
+            AppAction::CommandPalette => self.open_palette_with(""),
+            // GTK's `show_with_text`: the palette opened on a query that
+            // narrows it to one tier — the New rows, or the Switch rows.
+            AppAction::AddNew => self.open_palette_with("New "),
+            AppAction::QuickJump => self.open_palette_with("Switch "),
+            AppAction::FocusSidebar => self.set_sidebar(true),
+            AppAction::FocusTerminal => {
+                if self.palette_open {
+                    self.close_palette()
+                } else {
+                    self.focus_selected_terminal()
+                }
+            }
+            AppAction::ClearOutput => self.update(Event::ClearTerminal),
+            AppAction::ToggleProcess => match self.selected_target() {
+                Some((project, index)) => self.update(Event::ToggleProcessAt { project, index }),
+                None => Task::none(),
+            },
+            AppAction::RestartProcess => match self.selected_target() {
+                Some((project, index)) => self.update(Event::Restart { project, index }),
+                None => Task::none(),
+            },
+            AppAction::PrevProcess => self.step_process(-1),
+            AppAction::NextProcess => self.step_process(1),
+            AppAction::PrevProject => self.step_project(-1),
+            AppAction::NextProject => self.step_project(1),
+            AppAction::NewTerminal => match self.projects.get(self.active) {
+                Some(_) => self.add_terminal(self.active),
+                None => Task::none(),
+            },
+            AppAction::CloseProcess => self.close_selected_process(),
+            AppAction::FontIncrease => self.change_font(1.0),
+            AppAction::FontDecrease => self.change_font(-1.0),
+            AppAction::MoveProcessUp => self.move_selected(-1),
+            AppAction::MoveProcessDown => self.move_selected(1),
+            AppAction::Settings => {
+                self.settings_ui = Some(settings_ui::State::new(&self.settings));
+                Task::none()
+            }
+            AppAction::ToggleSidebar => self.set_sidebar(!self.sidebar_visible),
+            AppAction::FilterSidebar => self.toggle_filter(),
+            AppAction::SelectProcessN(n) => {
+                // Routed through SelectProcess rather than assigning here:
+                // crossing to another project has to refresh the git chip,
+                // and that rule belongs in one place.
+                match self.switch_targets().get(n as usize - 1) {
+                    Some(&(pidx, index)) => {
+                        let project = self.projects[pidx].id;
+                        self.update(Event::SelectProcess { project, index })
+                    }
+                    None => Task::none(),
+                }
+            }
+            AppAction::SelectProjectN(n) => self.activate_project(n as usize - 1),
+        }
+    }
+
+    /// Make project `idx` the active one — the Alt+N switcher and the
+    /// palette's GO TO rows: a switch re-polls git for the new card.
+    fn activate_project(&mut self, idx: usize) -> Task<Event> {
+        if idx < self.projects.len() && idx != self.active {
+            self.active = idx;
+            let git = self.poll_git_fetch();
+            return Task::batch([self.focus_selected_terminal(), git]);
+        }
+        Task::none()
+    }
+
+    /// (project id, entry index) of the selected process, for the chords
+    /// that act on the selection.
+    fn selected_target(&self) -> Option<(u64, usize)> {
+        let project = self.active_project()?;
+        project
+            .entries
+            .get(project.selected)
+            .map(|_| (project.id, project.selected))
+    }
+
+    /// Flip the sidebar and start its glide. A no-op when it is already
+    /// there OR already heading there — a rail button that reopens a
+    /// mid-expand sidebar must not restart the ramp and snap it back.
+    fn set_sidebar(&mut self, visible: bool) -> Task<Event> {
+        if self.sidebar_visible == visible {
+            return Task::none();
+        }
+        // Toggled mid-glide, the new ramp picks up where this one stands:
+        // reversed, the eased position `f` becomes `1 - f`, whichever way
+        // it was going (the two cases work out the same).
+        let resume = if self.sidebar_anim.settled() {
+            0.0
+        } else {
+            1.0 - self.sidebar_anim.eased()
+        };
+        self.sidebar_visible = visible;
+        let generation = self.sidebar_anim.restart_at(resume);
+        Task::perform(tokio::time::sleep(FRAME), move |_| {
+            Event::SidebarTick(generation)
+        })
+    }
+
+    /// GTK's search toggle: opening focuses the entry, closing clears the
+    /// query (the sidebar un-narrows) and hands focus back to the terminal.
+    fn toggle_filter(&mut self) -> Task<Event> {
+        self.filter_open = !self.filter_open;
+        if self.filter_open {
+            // The entry lives in the sidebar — filtering a collapsed
+            // sidebar reopens it (rail button / Ctrl+F while hidden).
+            let open = self.set_sidebar(true);
+            Task::batch([
+                open,
+                iced::widget::operation::focus(self.filter_input.clone()),
+            ])
+        } else {
+            self.filter_query.clear();
+            self.focus_selected_terminal()
+        }
+    }
+
+    fn step_process(&mut self, delta: i32) -> Task<Event> {
+        let Some(project) = self.projects.get_mut(self.active) else {
+            return Task::none();
+        };
+        let n = project.entries.len();
+        if n == 0 {
+            return Task::none();
+        }
+        project.selected = ((project.selected as i32 + delta).rem_euclid(n as i32)) as usize;
+        self.focus_selected_terminal()
+    }
+
+    fn step_project(&mut self, delta: i32) -> Task<Event> {
+        let n = self.projects.len();
+        if n == 0 {
+            return Task::none();
+        }
+        self.active = ((self.active as i32 + delta).rem_euclid(n as i32)) as usize;
+        let git = self.poll_git_fetch();
+        Task::batch([self.focus_selected_terminal(), git])
+    }
+
+    /// Close = GTK's "Close Agent/Terminal": ad-hoc terminals disappear,
+    /// anything else just stops.
+    fn close_selected_process(&mut self) -> Task<Event> {
+        let Some(project) = self.projects.get(self.active) else {
+            return Task::none();
+        };
+        let (pidx, index) = (self.active, project.selected);
+        let Some(entry) = self.projects[pidx].entries.get(index) else {
+            return Task::none();
+        };
+        let is_adhoc_terminal =
+            entry.config.category == ProcessCategory::Terminal && entry.config.auto_named;
+        self.stop(pidx, index);
+        if is_adhoc_terminal {
+            self.projects[pidx].entries.remove(index);
+            let n = self.projects[pidx].entries.len();
+            if n > 0 {
+                self.projects[pidx].selected = index.min(n - 1);
+            } else {
+                self.projects[pidx].selected = 0;
+            }
+        }
+        Task::none()
+    }
+
+    /// The terminal font per current settings. `Font::with_name` wants
+    /// `&'static str`; family changes are rare, so leaking one small
+    /// string per change is the accepted iced idiom.
+    fn term_font(&self) -> iced_term::settings::FontSettings {
+        let a = &self.settings.appearance;
+        let family = if a.font_family.is_empty() || a.font_family == "Monospace" {
+            iced::font::Family::Monospace
+        } else {
+            iced::font::Family::Name(Box::leak(a.font_family.clone().into_boxed_str()))
+        };
+        iced_term::settings::FontSettings {
+            size: (a.font_size as f32).clamp(6.0, 32.0),
+            // GTK's line_height 1.0 is "normal"; iced_term's normal is a
+            // 1.3 scale factor — map proportionally.
+            scale_factor: ((a.line_height as f32) * 1.3).clamp(1.0, 2.6),
+            font_type: iced::Font {
+                family,
+                weight: font_weight(a.font_weight),
+                ..iced::Font::MONOSPACE
+            },
+            // Fork patch 26: both were saved and read by nobody.
+            bold_weight: font_weight(a.bold_font_weight),
+            letter_spacing: (a.letter_spacing as f32).clamp(-2.0, 10.0),
+        }
+    }
+
+    /// Push the current font settings into every live terminal.
+    fn broadcast_font(&mut self) {
+        let font = self.term_font();
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if let Some(term) = entry.terminal.as_mut() {
+                    term.handle(iced_term::Command::ChangeFont(font.clone()));
+                }
+            }
+        }
+    }
+
+    /// Push the current terminal color scheme into every live terminal.
+    fn broadcast_theme(&mut self) {
+        let name = self.settings.appearance.terminal_theme.clone();
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if let Some(term) = entry.terminal.as_mut() {
+                    term.handle(iced_term::Command::ChangeTheme(Box::new(
+                        theme::terminal_palette(&name),
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Ctrl+= / Ctrl+- — persisted, so the size survives a relaunch (the
+    /// GTK app saves it from its settings dialog the same way).
+    fn change_font(&mut self, delta: f32) -> Task<Event> {
+        let a = &mut self.settings.appearance;
+        a.font_size = ((a.font_size as f32 + delta).clamp(8.0, 32.0)) as u32;
+        self.settings.save();
+        self.broadcast_font();
+        Task::none()
+    }
+
+    /// Route a search command to the active selected terminal and record
+    /// whether it found anything (the bar shows "no match").
+    fn send_search(&mut self, cmd: BackendCommand) {
+        let Some(project) = self.projects.get_mut(self.active) else {
+            return;
+        };
+        let selected = project.selected;
+        if let Some(term) = project
+            .entries
+            .get_mut(selected)
+            .and_then(|e| e.terminal.as_mut())
+        {
+            let action = term.handle(iced_term::Command::ProxyToBackend(cmd));
+            if let iced_term::actions::Action::SearchResult(found) = action {
+                self.search_hit = Some(found);
+            }
+        }
+    }
+
+    fn focus_selected_terminal(&self) -> Task<Event> {
+        match self
+            .projects
+            .get(self.active)
+            .and_then(|p| p.entries.get(p.selected))
+            .and_then(|e| e.terminal.as_ref())
+        {
+            Some(term) => TerminalView::focus(term.widget_id().clone()),
+            None => Task::none(),
+        }
+    }
+
+    /// Open the palette on `prefill` — GTK's `show_with_text`: the query
+    /// is set and the cursor lands at its end (iced's focus moves it
+    /// there), so the user keeps typing to narrow the tier it selected.
+    fn open_palette_with(&mut self, prefill: &str) -> Task<Event> {
+        self.palette_open = true;
+        self.palette_query = prefill.to_string();
+        self.palette_index = 0;
+        Task::batch([
+            iced::widget::operation::focus(self.palette_input.clone()),
+            self.palette_snap(),
+        ])
+    }
+
+    /// Take the palette down without moving focus — for the rows that go
+    /// on to raise a form, whose own focus must not race the terminal's.
+    fn dismiss_palette(&mut self) {
+        self.palette_open = false;
+        self.palette_query.clear();
+        self.palette_index = 0;
+    }
+
+    fn close_palette(&mut self) -> Task<Event> {
+        self.dismiss_palette();
+        self.focus_selected_terminal()
+    }
+
+    /// Keep the highlighted row in view. A relative offset of i/(n-1)
+    /// places row i inside the viewport whatever the row height: the
+    /// viewport top moves i/(n-1) of the way through the overflow while
+    /// the row sits i/(n-1) of the way through the content, so the two
+    /// never separate by more than the viewport minus a row.
+    fn palette_snap(&self) -> Task<Event> {
+        let n = self.palette_matches().len();
+        let y = match n {
+            0 | 1 => 0.0,
+            _ => self.palette_index as f32 / (n - 1) as f32,
+        };
+        iced::widget::operation::snap_to(
+            self.palette_scroll.clone(),
+            scrollable::RelativeOffset { x: 0.0, y },
+        )
+    }
+
+    /// Run a picked palette row. Process and project rows hand focus
+    /// back to the terminal; the New rows raise a form instead, and the
+    /// form's focus must not be fought over.
+    fn activate_palette(&mut self, entry: PaletteEntry) -> Task<Event> {
+        match entry {
+            PaletteEntry::Process { project, index } => {
+                let close = self.close_palette();
+                let select = self.update(Event::SelectProcess { project, index });
+                Task::batch([close, select])
+            }
+            PaletteEntry::Project(id) => {
+                let close = self.close_palette();
+                let select = match self.project_index(id) {
+                    Some(idx) => self.activate_project(idx),
+                    None => Task::none(),
+                };
+                Task::batch([close, select])
+            }
+            PaletteEntry::Action(action) => {
+                self.dismiss_palette();
+                // The per-project rows are only listed while a project is
+                // open (`palette_rows`), so `active` is Some for them.
+                let active = self.active_project().map(|p| p.id);
+                match (action, active) {
+                    (PaletteAction::NewAgent(preset), Some(project)) => {
+                        let open = self.update(Event::OpenAddCommand {
+                            project,
+                            agent: true,
+                        });
+                        let pick = self.update(Event::AgentPreset(preset));
+                        Task::batch([open, pick])
+                    }
+                    (PaletteAction::NewCustomAgent, Some(project)) => {
+                        self.update(Event::OpenAddCommand {
+                            project,
+                            agent: true,
+                        })
+                    }
+                    (PaletteAction::NewCommand, Some(project)) => {
+                        self.update(Event::OpenAddCommand {
+                            project,
+                            agent: false,
+                        })
+                    }
+                    (PaletteAction::NewTerminal, Some(project)) => {
+                        self.update(Event::AddTerminal(project))
+                    }
+                    (PaletteAction::NewSsh, Some(project)) => {
+                        self.update(Event::OpenAddSsh(project))
+                    }
+                    (PaletteAction::NewProject(kind), _) => {
+                        let open = self.update(Event::OpenAddProject);
+                        let pick = self.update(Event::AddProjectMsg(add_project::Msg::Pick(kind)));
+                        Task::batch([open, pick])
+                    }
+                    // GTK's palette acts on EVERY project here, unlike the
+                    // header cluster's per-card All buttons.
+                    (PaletteAction::StopAll, _) => {
+                        let ids: Vec<u64> = self.projects.iter().map(|p| p.id).collect();
+                        let tasks: Vec<Task<Event>> = ids
+                            .into_iter()
+                            .map(|id| self.update(Event::StopAll(id)))
+                            .collect();
+                        Task::batch(tasks)
+                    }
+                    (PaletteAction::RestartAll, _) => {
+                        let ids: Vec<u64> = self.projects.iter().map(|p| p.id).collect();
+                        let tasks: Vec<Task<Event>> = ids
+                            .into_iter()
+                            .map(|id| self.update(Event::RestartAll(id)))
+                            .collect();
+                        Task::batch(tasks)
+                    }
+                    (_, None) => self.focus_selected_terminal(),
+                }
+            }
+        }
+    }
+
+    /// What Ctrl+1..9 reaches, in the order the sidebar shows it: every
+    /// project in workspace order, each project's rows in category order,
+    /// RUNNING processes only — GTK's `switch_to_nth_global`.
+    ///
+    /// Three properties come from GTK and all three matter. The sequence is
+    /// GLOBAL, so the chords address the whole sidebar rather than restarting
+    /// per card; it is drawn order, not `entries` order, so the number on a
+    /// row matches counting rows down the screen (an agent sorts to the top
+    /// of its card whatever its saved index); and it skips everything not
+    /// running, because the switcher's job is to reach a live terminal and a
+    /// stopped row has none to focus. The same list draws the hints, so a
+    /// row can never advertise a chord that goes elsewhere.
+    fn switch_targets(&self) -> Vec<(usize, usize)> {
+        switch_targets_of(self.projects.iter().map(|p| p.entries.as_slice()))
+    }
+
+    /// Every palette row in GTK's order (command_palette.rs
+    /// `default_items` + the navigation/project items): the New tier —
+    /// one agent row per preset, then custom agent, command, terminal, the
+    /// two project kinds — Stop/Restart all, NAVIGATION (a "Switch to"
+    /// row per process, sidebar order), GO TO (one per project). The rows
+    /// that add to or act on a project are left out while none is open.
+    fn palette_rows(&self) -> Vec<PaletteRow> {
+        let action = |category: &'static str, label: &str, action: PaletteAction| PaletteRow {
+            category,
+            label: label.to_string(),
+            entry: PaletteEntry::Action(action),
+        };
+        let mut rows = Vec::new();
+        let has_project = !self.projects.is_empty();
+        if has_project {
+            for (i, preset) in agents::AGENT_PRESETS.iter().enumerate() {
+                rows.push(action(
+                    "AGENT",
+                    &format!("New {} agent", preset.label),
+                    PaletteAction::NewAgent(i),
+                ));
+            }
+            rows.push(action(
+                "AGENT",
+                "New custom agent",
+                PaletteAction::NewCustomAgent,
+            ));
+            rows.push(action("COMMAND", "New command", PaletteAction::NewCommand));
+            rows.push(action(
+                "TERMINAL",
+                "New terminal tab",
+                PaletteAction::NewTerminal,
+            ));
+            rows.push(action("SSH", "New SSH connection", PaletteAction::NewSsh));
+        }
+        rows.push(action(
+            "PROJECT",
+            "New project (open directory)",
+            PaletteAction::NewProject(add_project::Kind::Local),
+        ));
+        rows.push(action(
+            "PROJECT",
+            "New remote project (over SSH)",
+            PaletteAction::NewProject(add_project::Kind::Remote),
+        ));
+        if has_project {
+            rows.push(action(
+                "ACTIONS",
+                "Stop all processes",
+                PaletteAction::StopAll,
+            ));
+            rows.push(action(
+                "ACTIONS",
+                "Restart all processes",
+                PaletteAction::RestartAll,
+            ));
+        }
+        for project in &self.projects {
+            for i in sidebar_order(&project.entries) {
+                rows.push(PaletteRow {
+                    category: "NAVIGATION",
+                    label: format!(
+                        "Switch to {} {}",
+                        project.name, project.entries[i].config.name
+                    ),
+                    entry: PaletteEntry::Process {
+                        project: project.id,
+                        index: i,
+                    },
+                });
+            }
+        }
+        for project in &self.projects {
+            rows.push(PaletteRow {
+                category: "GO TO",
+                label: project.name.clone(),
+                entry: PaletteEntry::Project(project.id),
+            });
+        }
+        rows
+    }
+
+    /// The rows matching the palette query — GTK's rule: case-insensitive
+    /// substring over the label, untrimmed, which is what the "New " and
+    /// "Switch " prefills select a tier on.
+    fn palette_matches(&self) -> Vec<PaletteRow> {
+        let needle = self.palette_query.to_lowercase();
+        self.palette_rows()
+            .into_iter()
+            .filter(|row| needle.is_empty() || row.label.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    /// Ctrl+Shift+V with an image-only clipboard — the GTK app's flow,
+    /// verbatim: upload the PNG to the host's clipboard-shim slot; AGENT
+    /// terminals then get a real Ctrl+V (the agent "reads the clipboard"
+    /// through the shim and shows its native attachment UI), others get
+    /// the remote path typed. Local projects: agents get Ctrl+V (they can
+    /// read the real clipboard themselves), others get a temp-file path.
+    /// Clipboard read + encode + ssh all run on a worker.
+    fn paste_image(&mut self) -> Task<Event> {
+        let Some(project) = self.active_project() else {
+            return Task::none();
+        };
+        let Some(entry) = project.entries.get(project.selected) else {
+            return Task::none();
+        };
+        let (Some(term), true) = (entry.term_id, entry.is_running()) else {
+            return Task::none();
+        };
+        let run = entry.run_id;
+        let project_id = project.id;
+        let host = project.location.host().map(String::from);
+        let is_agent = entry.config.category == ProcessCategory::Agent;
+
+        Task::perform(
+            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                let image = arboard::Clipboard::new()
+                    .and_then(|mut cb| cb.get_image())
+                    .map_err(|e| format!("no image on clipboard: {e}"))?;
+                match (host, is_agent) {
+                    (None, true) => {
+                        // Local agent: it reads the real clipboard itself.
+                        Ok(vec![0x16])
+                    }
+                    (None, false) => {
+                        let png = encode_png(&image)?;
+                        let path = std::env::temp_dir()
+                            .join(format!(".tuxflow-img-{}.png", std::process::id()));
+                        std::fs::write(&path, png).map_err(|e| e.to_string())?;
+                        Ok(format!("{} ", path.display()).into_bytes())
+                    }
+                    (Some(host), agent) => {
+                        let png = encode_png(&image)?;
+                        let path = remote::upload_clipboard_image(&host, &png)?;
+                        log::info!("image paste: uploaded to {host}:{path}");
+                        if agent {
+                            Ok(vec![0x16])
+                        } else {
+                            Ok(format!("{path} ").into_bytes())
+                        }
+                    }
+                }
+            }),
+            move |joined| Event::ImagePasted {
+                project: project_id,
+                term,
+                run,
+                result: joined.unwrap_or_else(|e| Err(format!("paste worker died: {e}"))),
+            },
+        )
+    }
+
+    fn open_in_browser(&mut self, pidx: usize, index: usize) {
+        let name = self.projects[pidx].entries[index].config.name.clone();
+        self.projects[pidx].entries[index].pending_auto_open = false;
+        let Some(url) = browser_url(&self.projects[pidx], &name) else {
+            return;
+        };
+        log::info!("auto-open {url}");
+        if let Err(e) = open::that(&url) {
+            log::warn!("auto-open {url} failed: {e}");
+        }
+    }
+
+    fn update(&mut self, event: Event) -> Task<Event> {
+        // The Git Changes view belongs to ONE project. `self.active` moves
+        // from eight different places (row click, palette, digit switcher,
+        // close, reorder…), so this is checked here rather than chased
+        // through each of them — a stale view would otherwise sit in the
+        // main pane showing another project's repo while the sidebar and
+        // the status bar both say something else, and keep polling it.
+        if let Some(state) = &self.git_ui
+            && self.active_project().map(|p| p.id) != Some(state.project)
+        {
+            self.git_ui = None;
+        }
+        // Same contract for the Edit Project form: it edits ONE project,
+        // and a removal or a sidebar switch underneath it would leave a
+        // form whose Save writes into the wrong card.
+        if let Some(state) = &self.edit_project
+            && self.active_project().map(|p| p.id) != Some(state.project)
+        {
+            self.edit_project = None;
+        }
+        // Running-tier flips stamp last_used and re-sort the sidebar —
+        // checked here for the same reason as the git view above: the
+        // statuses move from many places (clicks, async exits, reattach).
+        self.refresh_recent_order();
+        // And the MCP snapshot tables, for the same reason: a status or a
+        // detected URL moves from as many places, and the agent asking
+        // must see the state the sidebar shows.
+        self.sync_mcp_snapshots();
+        match event {
+            Event::WindowResized(size) => {
+                self.window_size = size;
+                self.debounce_geometry_save()
+            }
+            Event::WindowMoved => self.debounce_geometry_save(),
+            Event::GeometrySettled(generation) => {
+                if generation != self.geometry_gen {
+                    return Task::none();
+                }
+                iced::window::latest().and_then(|id| {
+                    iced::window::is_maximized(id).then(move |maximized| {
+                        iced::window::position(id).map(move |position| Event::SaveGeometry {
+                            maximized,
+                            position,
+                        })
+                    })
+                })
+            }
+            Event::SaveGeometry {
+                maximized,
+                position,
+            } => {
+                self.save_window_state(maximized, position);
+                Task::none()
+            }
+            // WMs disagree on whether a requested position applies to the
+            // frame or to the client area (they differ by the decoration
+            // extents), so a fixed convention drifts on half of them.
+            // Measure where the frame actually landed and correct once by
+            // the delta — the GTK shell does the same 200 ms after map.
+            Event::RestoreSettle => iced::window::latest().and_then(|id| {
+                iced::window::position(id).map(move |actual| Event::RestoreMeasured { id, actual })
+            }),
+            Event::RestoreMaximize => {
+                iced::window::latest().and_then(|id| iced::window::maximize(id, true))
+            }
+            Event::RestoreMeasured { id, actual } => {
+                let w = &self.settings.window;
+                log::info!(
+                    "restore measure: actual {actual:?} saved ({:?},{:?})",
+                    w.x,
+                    w.y
+                );
+                if let (Some(sx), Some(sy), Some(actual), false) = (w.x, w.y, actual, w.maximized) {
+                    let (dx, dy) = (actual.x - sx as f32, actual.y - sy as f32);
+                    // Only correct frame-sized deltas. A large one means the
+                    // WM CLAMPED the restore (saved position from a monitor
+                    // that is gone, or a settings file that traveled between
+                    // machines) or the user is already dragging — mirroring
+                    // that delta would shove the window off-screen in the
+                    // opposite direction, and WMs honor explicit moves.
+                    let frame_sized = dx.abs() <= 100.0 && dy.abs() <= 100.0;
+                    if (dx != 0.0 || dy != 0.0) && frame_sized {
+                        log::info!("restore correction: delta ({dx},{dy})");
+                        return iced::window::move_to(
+                            id,
+                            iced::Point::new(sx as f32 - dx, sy as f32 - dy),
+                        );
+                    }
+                }
+                Task::none()
+            }
+            Event::OpenSettings => {
+                self.settings_ui = Some(settings_ui::State::new(&self.settings));
+                // Symmetric with `open_git_changes` clearing settings_ui:
+                // "what is the main area showing?" stays a single answer,
+                // and a hidden Git view would keep its 2 s (possibly ssh)
+                // poll chain running blind underneath.
+                self.git_ui = None;
+                Task::none()
+            }
+            Event::ToggleSidebar => self.set_sidebar(!self.sidebar_visible),
+            Event::ToggleFilter => self.toggle_filter(),
+            Event::FilterInput(query) => {
+                self.filter_query = query;
+                Task::none()
+            }
+            Event::SettingsMsg(msg) => self.handle_settings(msg),
+            Event::WindowCloseRequested(id) => {
+                // Maximized and the frame position are queryable only, so
+                // fetch both before saving.
+                iced::window::is_maximized(id).then(move |maximized| {
+                    iced::window::position(id).map(move |position| Event::WindowClose {
+                        id,
+                        maximized,
+                        position,
+                    })
+                })
+            }
+            Event::WindowClose {
+                id,
+                maximized,
+                position,
+            } => {
+                self.save_window_state(maximized, position);
+                // Remote processes deliberately outlive us, but the
+                // microphone bridge must not: it is the one thing that stays
+                // pointed at this machine's hardware. PDEATHSIG covers the
+                // exits that skip this (crash, SIGKILL, cargo watch).
+                remote::mic::shutdown();
+                // The MCP sockets go too — a socket file nothing answers on
+                // would have `tuxflow-mcp` connecting to a dead server.
+                for pidx in 0..self.projects.len() {
+                    self.stop_mcp(pidx);
+                }
+                tuxflow_core::mcp::remote::shutdown();
+                iced::window::close(id)
+            }
+            Event::Probed { project, result } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                match result {
+                    Ok(ProbeOk {
+                        name,
+                        configs,
+                        detected_full,
+                        live_sessions,
+                        icon,
+                    }) => {
+                        let key = self.projects[pidx].key();
+                        if self.saved.get_name(&key).is_none()
+                            && let Some(name) = name
+                        {
+                            self.projects[pidx].name = name;
+                        }
+                        // Remote projects have no local dir to scan — the icon
+                        // arrives already fetched into the cache by the probe.
+                        self.projects[pidx].icon = usable_icon(icon_detector::resolve_icon(
+                            &mut self.saved,
+                            &key,
+                            None,
+                            icon,
+                        ));
+                        self.projects[pidx].detected_configs = configs.clone();
+                        self.projects[pidx].detected_full = detected_full;
+                        let merged = processes::merge_saved(configs, &self.saved, &key);
+                        self.projects[pidx].entries = processes::entries_from(merged);
+                        self.projects[pidx].phase = Phase::Ready;
+                        let boot = self.boot_after_mic_bridge(pidx, live_sessions);
+                        // The chip shouldn't wait for the next 20 s tick —
+                        // and this is the first poll that can fetch, so ↓
+                        // is truthful from Ready on (GTK fetches from its
+                        // .git probe's answer the same way).
+                        let git = if pidx == self.active {
+                            self.poll_git_fetch()
+                        } else {
+                            Task::none()
+                        };
+                        Task::batch([boot, git])
+                    }
+                    Err((message, retryable)) => {
+                        self.projects[pidx].phase = Phase::Failed(message, retryable);
+                        Task::none()
+                    }
+                }
+            }
+            Event::RetryProbe(project) => match self.project_index(project) {
+                Some(pidx) => self.probe_task(pidx),
+                None => Task::none(),
+            },
+            Event::MicBridgeReady {
+                project,
+                live_sessions,
+                result,
+            } => {
+                // A project closed during the wait has nothing left to boot.
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                if let Err(reason) = result
+                    && let Some(host) = self.projects[pidx].location.host()
+                {
+                    notify::mic_bridge_failed(&self.settings.notifications, host, &reason);
+                }
+                self.boot_processes(pidx, &live_sessions)
+            }
+            Event::MicBridgeReport(failures) => {
+                for (host, reason) in failures {
+                    notify::mic_bridge_failed(&self.settings.notifications, &host, &reason);
+                }
+                Task::none()
+            }
+            Event::FilesChanged { project, paths } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let ProjectLocation::Local(dir) = &self.projects[pidx].location else {
+                    return Task::none();
+                };
+                let set =
+                    WatchSet::from_configs(self.projects[pidx].entries.iter().map(|e| &e.config));
+                let names: Vec<String> = set
+                    .matches_any(dir, &paths)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect();
+                let mut tasks = Vec::new();
+                for name in names {
+                    let Some(index) = self.projects[pidx]
+                        .entries
+                        .iter()
+                        .position(|e| e.config.name == name)
+                    else {
+                        continue;
+                    };
+                    // GTK's watcher restarts the process whatever its state,
+                    // a stopped one included. Deliberately narrower here: a
+                    // process the user pal().stopped stays stopped — a save must
+                    // not undo an explicit stop — while a crashed one comes
+                    // back (the save is usually the fix), and a running,
+                    // restarting or reconnecting one restarts.
+                    if matches!(self.projects[pidx].entries[index].status, Status::Stopped) {
+                        log::debug!(
+                            "file change matched '{name}', stopped by the user — left alone"
+                        );
+                        continue;
+                    }
+                    log::info!("file change matched '{name}', restarting");
+                    let allowed = self.should_notify(pidx, index);
+                    let ns = &self.settings.notifications;
+                    if ns.on_file_watch_restart && allowed {
+                        notify::file_watch_restart(
+                            ns,
+                            &self.projects[pidx].name,
+                            &name,
+                            self.projects[pidx].icon.as_deref(),
+                        );
+                    }
+                    if self.projects[pidx].entries[index].is_running() {
+                        self.stop(pidx, index);
+                    }
+                    tasks.push(self.start_fresh(pidx, index));
+                }
+                Task::batch(tasks)
+            }
+            Event::SelectProcess { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let switched = self.active != pidx;
+                self.active = pidx;
+                self.projects[pidx].selected = index;
+                let focus = match self.projects[pidx]
+                    .entries
+                    .get(index)
+                    .and_then(|e| e.terminal.as_ref())
+                {
+                    Some(term) => TerminalView::focus(term.widget_id().clone()),
+                    None => Task::none(),
+                };
+                if switched {
+                    let git = self.poll_git_fetch();
+                    Task::batch([focus, git])
+                } else {
+                    focus
+                }
+            }
+            Event::Start { project, index } | Event::Restart { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                if self.projects[pidx].entries[index].is_running() {
+                    self.stop(pidx, index);
+                }
+                self.start_fresh(pidx, index)
+            }
+            Event::Stop { project, index } => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.stop(pidx, index);
+                }
+                Task::none()
+            }
+            Event::McpCommand { project, request } => self.handle_mcp_command(project, request),
+            Event::StartAll(project) => {
+                // GTK's spawn_project_group: the marked processes only.
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                for index in 0..self.projects[pidx].entries.len() {
+                    let entry = &self.projects[pidx].entries[index];
+                    let idle = matches!(entry.status, Status::Stopped | Status::Crashed(_));
+                    if entry.config.start_with_project && idle {
+                        if self.projects[pidx].entries[index].is_running() {
+                            self.stop(pidx, index);
+                        }
+                        tasks.push(self.start_fresh(pidx, index));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Event::RestartAll(project) => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let mut tasks = Vec::new();
+                for index in 0..self.projects[pidx].entries.len() {
+                    if self.projects[pidx].entries[index].is_running() {
+                        self.stop(pidx, index);
+                        tasks.push(self.start_fresh(pidx, index));
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Event::StopAll(project) => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                for index in 0..self.projects[pidx].entries.len() {
+                    // Running, restarting and reconnecting alike — "stop
+                    // all" also cancels pending comebacks.
+                    let active = !matches!(
+                        self.projects[pidx].entries[index].status,
+                        Status::Stopped | Status::Crashed(_)
+                    );
+                    if active {
+                        self.stop(pidx, index);
+                    }
+                }
+                Task::none()
+            }
+            Event::RowEnter { project, index } => {
+                let target = Some((project, index));
+                if self.hovered_row == target {
+                    return Task::none();
+                }
+                self.hovered_row = target;
+                let generation = self.hover_anim.start();
+                Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::HoverTick(generation)
+                })
+            }
+            Event::RowExit { project, index } => {
+                // Enter of the next row may already have retargeted us —
+                // only clear if this exit still owns the state.
+                if self.hovered_row == Some((project, index)) {
+                    self.hovered_row = None;
+                }
+                // Same rule for the drop slot: the pointer left this row for
+                // a gap (or the pane), not for a row that already claimed it.
+                if let Some(drag) = &mut self.drag
+                    && drag.over.is_some_and(|(row, _)| row == (project, index))
+                {
+                    drag.over = None;
+                }
+                Task::none()
+            }
+            Event::CursorMoved(position) => {
+                self.cursor = position;
+                // A candidate becomes a drag once the pointer has travelled
+                // GTK's threshold; from here the ghost follows the pointer
+                // and the auto-scroll chain runs until the release.
+                if let Some(drag) = &mut self.drag
+                    && !drag.active
+                    && dnd::past_threshold(drag.origin, position)
+                {
+                    drag.active = true;
+                    self.drag_tick += 1;
+                    let generation = self.drag_tick;
+                    return Task::perform(tokio::time::sleep(FRAME), move |_| {
+                        Event::DragTick(generation)
+                    });
+                }
+                Task::none()
+            }
+            Event::ModifiersHeld(m) => {
+                self.ctrl_held = m.control();
+                self.shift_held = m.shift();
+                Task::none()
+            }
+            Event::WindowUnfocused => {
+                // Ctrl+Tab away and the release never arrives; without this
+                // the sidebar comes back still wearing its keycaps — and a
+                // drag in flight would keep its ghost until the next press.
+                self.ctrl_held = false;
+                self.shift_held = false;
+                self.drag = None;
+                self.window_focused = false;
+                Task::none()
+            }
+            Event::WindowFocused => {
+                self.window_focused = true;
+                Task::none()
+            }
+            Event::DragPress { row, grab } => {
+                // No modal gate needed: a backdrop layer captures the press
+                // before the sensor under it can see one.
+                self.drag = Some(Drag {
+                    source: row,
+                    origin: self.cursor,
+                    grab,
+                    active: false,
+                    over: None,
+                    edges: None,
+                });
+                Task::none()
+            }
+            Event::DragOver { row, over } => {
+                let legal = self.drop_allowed(row);
+                if let Some(drag) = &mut self.drag
+                    && drag.active
+                {
+                    drag.over = legal.then_some((row, over));
+                }
+                Task::none()
+            }
+            Event::DragEdges(edges) => {
+                if let Some(drag) = &mut self.drag {
+                    drag.edges = edges;
+                }
+                Task::none()
+            }
+            Event::SystemScheme(light) => {
+                self.system_light = Some(light);
+                self.apply_scheme();
+                Task::none()
+            }
+            Event::TerminalPressed => {
+                // GTK's rule (window.rs, the capture-phase gesture on the
+                // terminal stack): auto-hide on, sidebar showing, and no
+                // palette or search bar up — those take the click.
+                if self.settings.sidebar.auto_hide_sidebar
+                    && self.sidebar_visible
+                    && !self.palette_open
+                    && !self.search_open
+                    && self.drag.is_none()
+                {
+                    return self.set_sidebar(false);
+                }
+                Task::none()
+            }
+            Event::PointerReleased => {
+                let Some(drag) = self.drag.take() else {
+                    return Task::none();
+                };
+                if drag.active
+                    && let Some((target, over)) = drag.over
+                {
+                    self.drop(drag.source, target, over.before);
+                }
+                Task::none()
+            }
+            Event::DragTick(generation) => {
+                let Some(drag) = &self.drag else {
+                    return Task::none();
+                };
+                if !drag.active || generation != self.drag_tick {
+                    return Task::none();
+                }
+                let next = Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::DragTick(generation)
+                });
+                let step = dnd::autoscroll_step(drag.edges);
+                if step == 0.0 {
+                    return next;
+                }
+                // Scrolling moves the rows under a still pointer; the row
+                // sensors notice on the redraw this tick triggers and
+                // re-report the slot, so the indicator keeps up.
+                Task::batch([
+                    iced::widget::operation::scroll_by(
+                        self.sidebar_scroll.clone(),
+                        scrollable::AbsoluteOffset { x: 0.0, y: step },
+                    ),
+                    next,
+                ])
+            }
+            Event::OpenContextMenu { project, index } => {
+                // A right press mid-drag: the menu is a grab, and the left
+                // release will land under it — drop nothing.
+                self.drag = None;
+                self.context_menu = Some(MenuTarget {
+                    project,
+                    index,
+                    at: self.cursor,
+                });
+                // A modal grab, done the only way a Stack layer can: layers
+                // don't capture keyboard events, so a focused terminal
+                // underneath would keep eating them — Esc meant for the
+                // menu reaches a running agent as "interrupt". Dismissal
+                // refocuses.
+                TerminalView::unfocus()
+            }
+            Event::CloseContextMenu => {
+                self.context_menu = None;
+                self.focus_selected_terminal()
+            }
+            Event::MenuAction(inner) => {
+                self.context_menu = None;
+                let task = self.update(*inner);
+                // Hand focus back unless the action raised the next modal
+                // layer itself (Remove Project / Delete Command open the
+                // confirm card) — refocusing under THAT would re-open the
+                // key leak the unfocus exists to stop.
+                if self.confirm.is_none() && self.notice.is_none() {
+                    Task::batch([task, self.focus_selected_terminal()])
+                } else {
+                    task
+                }
+            }
+            Event::CopyText(text) => iced::clipboard::write(text),
+            Event::OpenInEditor(project) => {
+                if let Some(pidx) = self.project_index(project) {
+                    tuxflow_core::util::editor::open_in_editor(&self.projects[pidx].location);
+                }
+                Task::none()
+            }
+            Event::ToggleProcessAt { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let Some(entry) = self.projects[pidx].entries.get(index) else {
+                    return Task::none();
+                };
+                if entry.is_running() {
+                    self.stop(pidx, index);
+                    Task::none()
+                } else {
+                    if self.projects[pidx].entries[index].is_running() {
+                        self.stop(pidx, index);
+                    }
+                    self.start_fresh(pidx, index)
+                }
+            }
+            Event::ResumeAgentAt { project, index } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let Some(entry) = self.projects[pidx].entries.get(index) else {
+                    return Task::none();
+                };
+                let Some(resume) = resume_command_for(&entry.config.command) else {
+                    return Task::none();
+                };
+                // GTK's spawn_with_command_override: a running session is
+                // replaced, and the override lasts one spawn — a later
+                // crash restarts the configured command.
+                if self.projects[pidx].entries[index].is_running() {
+                    self.stop(pidx, index);
+                }
+                self.projects[pidx].entries[index].command_override = Some(resume);
+                self.projects[pidx].selected = index;
+                self.active = pidx;
+                self.start_fresh(pidx, index)
+            }
+            Event::EditProcessAt { project, index } => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.active = pidx;
+                    self.projects[pidx].selected = index;
+                    self.open_edit_form(pidx, index);
+                }
+                Task::none()
+            }
+            Event::ConfirmRequest(action) => {
+                self.confirm = Some(action);
+                // Same modal grab as the context menu: keys must answer the
+                // card, not the shell at the prompt underneath it.
+                TerminalView::unfocus()
+            }
+            Event::ConfirmCancel => {
+                self.confirm = None;
+                self.focus_selected_terminal()
+            }
+            Event::ConfirmProceed => {
+                match self.confirm.take() {
+                    Some(ConfirmAction::RemoveProject(project)) => {
+                        if let Some(pidx) = self.project_index(project) {
+                            self.close_project(pidx);
+                        }
+                    }
+                    Some(ConfirmAction::DeleteProcess { project, index }) => {
+                        if let Some(pidx) = self.project_index(project) {
+                            self.delete_process(pidx, index);
+                        }
+                    }
+                    None => {}
+                }
+                self.focus_selected_terminal()
+            }
+            Event::HoverTick(generation) => {
+                if self.hovered_row.is_none() || !self.hover_anim.tick(generation, HOVER_SLIDE_MS) {
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::HoverTick(generation)
+                })
+            }
+            Event::SidebarTick(generation) => {
+                if !self.sidebar_anim.tick(generation, SIDEBAR_SLIDE_MS) {
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(FRAME), move |_| {
+                    Event::SidebarTick(generation)
+                })
+            }
+            Event::ActivityTick => {
+                // Which agents are busy, on core's shared hysteresis. A
+                // card joins the sweep here; it only leaves at a pass
+                // boundary, so nothing blinks out mid-card.
+                for project in &mut self.projects {
+                    let working = project
+                        .entries
+                        .iter_mut()
+                        .fold(false, |any, entry| entry.sample_activity() | any);
+                    project.sweeping |= working;
+                }
+                // GTK's per-project ticker does both on this cadence: the
+                // working dot and the idle-silence fallback.
+                self.check_agent_silence();
+                let start = self
+                    .projects
+                    .iter()
+                    .any(|p| p.sweeping)
+                    .then(|| self.sweep.start())
+                    .flatten();
+                let next = Task::perform(tokio::time::sleep(activity::SAMPLE_INTERVAL), |_| {
+                    Event::ActivityTick
+                });
+                match start {
+                    Some(generation) => {
+                        Task::batch([next, Task::done(Event::SweepTick(generation))])
+                    }
+                    None => next,
+                }
+            }
+            Event::SweepTick(generation) => {
+                let Some(wrapped) = self.sweep.tick(generation) else {
+                    return Task::none();
+                };
+                if wrapped {
+                    for project in &mut self.projects {
+                        project.sweeping = project.agent_working();
+                    }
+                    if !self.projects.iter().any(|p| p.sweeping) {
+                        self.sweep.running = false;
+                        return Task::none();
+                    }
+                }
+                Task::perform(tokio::time::sleep(SWEEP_FRAME), move |_| {
+                    Event::SweepTick(generation)
+                })
+            }
+            Event::SyncSpinTick(generation) => {
+                if self.sync_spin.tick(generation).is_none() {
+                    return Task::none();
+                }
+                // Unlike the card sweep there is nothing to fade out at a
+                // pass boundary: when the last sync settles the chip stops
+                // drawing the spinner that same frame, so the chain just
+                // stops with it.
+                if self.git_syncing.is_empty() {
+                    self.sync_spin.running = false;
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(SWEEP_FRAME), move |_| {
+                    Event::SyncSpinTick(generation)
+                })
+            }
+            Event::AddTerminal(project) => match self.project_index(project) {
+                Some(pidx) => self.add_terminal(pidx),
+                None => Task::none(),
+            },
+            Event::ToggleExpanded(project) => {
+                if let Some(pidx) = self.project_index(project) {
+                    self.projects[pidx].expanded = !self.projects[pidx].expanded;
+                    // GTK parity: single-expand collapses the others when
+                    // one opens.
+                    if self.projects[pidx].expanded && self.settings.sidebar.single_project_expand {
+                        for (i, p) in self.projects.iter_mut().enumerate() {
+                            if i != pidx {
+                                p.expanded = false;
+                            }
+                        }
+                    }
+                    let key = self.projects[pidx].key();
+                    self.saved.set_expanded(&key, self.projects[pidx].expanded);
+                    self.saved.save();
+                }
+                Task::none()
+            }
+            Event::RestartDue { term, generation } => {
+                let Some((pidx, index)) = self.entry_for_term(term) else {
+                    return Task::none();
+                };
+                let due = self.projects[pidx].entries.get(index).is_some_and(|e| {
+                    e.restart_generation == generation
+                        && matches!(e.status, Status::Restarting(_) | Status::Reconnecting(_))
+                });
+                if due {
+                    self.start(pidx, index)
+                } else {
+                    Task::none()
+                }
+            }
+            Event::GitTick => {
+                // Every third tick fetches first — GTK's 60 s "poll git
+                // pull indicator" riding the existing 20 s local tick.
+                // Tick ONE fetches (GTK fetches the visible project at
+                // startup): a local project is Ready inline, so nothing
+                // else fetches for it until the first switch — the
+                // on-Ready fetch only covers probed (remote) projects.
+                self.git_ticks += 1;
+                let poll = if self.git_ticks % 3 == 1 {
+                    self.poll_git_fetch()
+                } else {
+                    self.poll_git()
+                };
+                let next = Task::perform(tokio::time::sleep(Duration::from_secs(20)), |_| {
+                    Event::GitTick
+                });
+                Task::batch([poll, next])
+            }
+            Event::GitPolled {
+                project,
+                status,
+                diffstat,
+                fetched,
+            } => {
+                if fetched {
+                    // Even when the project is gone — a leaked id would
+                    // block nothing (ids are never reused), but keep the
+                    // set honest.
+                    self.git_fetching.remove(&project);
+                }
+                if let Some(pidx) = self.project_index(project) {
+                    self.projects[pidx].git = status;
+                    self.projects[pidx].diffstat = diffstat;
+                }
+                Task::none()
+            }
+            Event::GitSync => self.start_git_sync(),
+            Event::GitSynced { project, result } => {
+                let active = self.active_project().map(|p| p.id) == Some(project);
+                let mut tasks = Vec::new();
+                if let Err(detail) = result {
+                    // A failure surfaces even if the user has moved on, but
+                    // then it must say WHOSE sync failed — an unattributed
+                    // notice reads as the active project's, and its "resolve
+                    // it manually" hint would open the wrong repo.
+                    let heading = match (active, self.project_index(project)) {
+                        (false, Some(pidx)) => {
+                            format!("Sync Failed \u{2014} {}", self.projects[pidx].name)
+                        }
+                        _ => String::from("Sync Failed"),
+                    };
+                    tasks.push(self.notify_git_failure(&heading, &detail));
+                }
+                // Repaint the counters from what the sync actually left
+                // behind, not from what we assumed it would — even a failed
+                // sync may have fetched. The id STAYS in `git_syncing` until
+                // this poll lands: released here, the chip redisplays the
+                // pre-sync ↓↑ for the second or two the refresh takes — "the
+                // sync did nothing", then a blink as they vanish. Aimed at
+                // the synced project's own location rather than through
+                // `poll_git`'s active-project read, so a sync finished in
+                // the background settles its own card too.
+                match self.project_index(project) {
+                    Some(pidx) => {
+                        let location = self.projects[pidx].location.clone();
+                        tasks.push(Self::query_git_task(
+                            location,
+                            false,
+                            move |status, diffstat| Event::GitSyncSettled {
+                                project,
+                                status,
+                                diffstat,
+                            },
+                        ));
+                    }
+                    // Closed mid-sync: nothing to settle, and a leftover id
+                    // would keep the spinner chain ticking for nobody.
+                    None => {
+                        self.git_syncing.remove(&project);
+                    }
+                }
+                Task::batch(tasks)
+            }
+            Event::GitSyncSettled {
+                project,
+                status,
+                diffstat,
+            } => {
+                // Only the settle poll releases the spinner — it hands over
+                // to the numbers landing in this same event, never to stale
+                // ones. A `GitPolled` arriving mid-sync keeps updating the
+                // (hidden) counters without ending the wait.
+                self.git_syncing.remove(&project);
+                if let Some(pidx) = self.project_index(project) {
+                    self.projects[pidx].git = status;
+                    self.projects[pidx].diffstat = diffstat;
+                }
+                Task::none()
+            }
+            Event::OpenGitChanges => self.open_git_changes(),
+            Event::NoticeDismiss => {
+                self.notice = None;
+                self.focus_selected_terminal()
+            }
+            Event::UpdateChecked(found) => {
+                // A pending restart already has the new version on disk;
+                // offering to download it again would be a step backwards.
+                if let Some((info, can_install)) = found
+                    && !matches!(self.update_badge, UpdateBadge::RestartRequired)
+                {
+                    log::info!("update available: v{}", info.latest_version);
+                    self.update_can_install = can_install;
+                    self.update_badge = UpdateBadge::Available(info);
+                }
+                Task::none()
+            }
+            Event::BinaryReplacedTick => {
+                if update::binary_replaced() {
+                    log::info!("binary replaced on disk; prompting for restart");
+                    self.update_badge = UpdateBadge::RestartRequired;
+                    // The poll stops on first hit: the answer can't change
+                    // back.
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(Duration::from_secs(30)), |_| {
+                    Event::BinaryReplacedTick
+                })
+            }
+            Event::OpenUpdateCard => {
+                let card = match &self.update_badge {
+                    UpdateBadge::Hidden => return Task::none(),
+                    UpdateBadge::Available(info) => UpdateCard::Available {
+                        info: info.clone(),
+                        can_install: self.update_can_install,
+                    },
+                    UpdateBadge::RestartRequired => UpdateCard::Installed,
+                };
+                self.update_card = Some(card);
+                // The modal grab, as for every card: keys answer the card,
+                // not the terminal under it.
+                TerminalView::unfocus()
+            }
+            Event::UpdateCardDismiss => {
+                // The install stage has no Later: the worker is mid-pkexec
+                // and nothing on this side can stop it.
+                if matches!(self.update_card, Some(UpdateCard::Installing)) {
+                    return Task::none();
+                }
+                self.update_card = None;
+                self.focus_selected_terminal()
+            }
+            Event::UpdateViewRelease => {
+                if let UpdateBadge::Available(info) = &self.update_badge
+                    && let Err(e) = open::that(&info.release_url)
+                {
+                    log::warn!("open release page: {e}");
+                }
+                self.update_card = None;
+                self.focus_selected_terminal()
+            }
+            Event::UpdateInstall => {
+                let Some(UpdateCard::Available {
+                    info,
+                    can_install: true,
+                }) = &self.update_card
+                else {
+                    return Task::none();
+                };
+                let Some(url) = info.deb_url.clone() else {
+                    return Task::none();
+                };
+                self.update_card = Some(UpdateCard::Installing);
+                // Download, then one polkit prompt; both block, so a worker.
+                Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        let path = update::download_deb(VERSION, &url)?;
+                        let result = update::install_deb(&path);
+                        let _ = std::fs::remove_file(&path);
+                        result
+                    }),
+                    |joined| {
+                        Event::UpdateInstalled(
+                            joined.unwrap_or_else(|e| Err(format!("Install thread failed: {e}"))),
+                        )
+                    },
+                )
+            }
+            Event::UpdateInstalled(result) => match result {
+                Ok(()) => {
+                    // Also what the chip means from now on, should the user
+                    // pick Later: the download already happened.
+                    self.update_badge = UpdateBadge::RestartRequired;
+                    self.update_card = Some(UpdateCard::Installed);
+                    Task::none()
+                }
+                Err(msg) => {
+                    self.update_card = None;
+                    self.notice = Some(("Update failed".into(), msg));
+                    Task::none()
+                }
+            },
+            Event::UpdateRestart => {
+                self.update_card = None;
+                match update::restart() {
+                    // The relauncher waits for this process to exit before
+                    // starting the new one, so quitting is what triggers it
+                    // — through the normal close path, so the window
+                    // geometry is saved and the mic bridge torn down.
+                    Ok(()) => iced::window::oldest().map(Event::UpdateQuit),
+                    // Surfaced, not just logged: a silent failure here reads
+                    // as the button doing nothing at all.
+                    Err(msg) => {
+                        log::error!("Restart failed: {msg}");
+                        self.notice = Some((
+                            "Could not restart".into(),
+                            format!(
+                                "{msg}\n\nThe update is installed — quit and start TuxFlow again to use it."
+                            ),
+                        ));
+                        Task::none()
+                    }
+                }
+            }
+            Event::UpdateQuit(id) => match id {
+                Some(id) => Task::done(Event::WindowCloseRequested(id)),
+                None => Task::none(),
+            },
+            Event::GitMsg(msg) => self.update_git_view(msg),
+            Event::ClearTerminal => {
+                if let Some(project) = self.projects.get_mut(self.active)
+                    && let Some(entry) = project.entries.get_mut(project.selected)
+                    && let Some(terminal) = entry.terminal.as_mut()
+                {
+                    terminal.clear();
+                }
+                Task::none()
+            }
+            Event::PortsPollTick(project) => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let sessions: Vec<String> = self.projects[pidx]
+                    .entries
+                    .iter()
+                    .filter(|e| e.is_running())
+                    .filter_map(|e| e.remote_session.clone())
+                    .collect();
+                let host = self.projects[pidx].location.host().map(String::from);
+                match (host, sessions.is_empty()) {
+                    (Some(host), false) => Task::perform(
+                        tokio::task::spawn_blocking(move || {
+                            remote::ports::session_ports(&host, &sessions)
+                        }),
+                        move |joined| Event::PortsPolled {
+                            project,
+                            session_ports: joined.unwrap_or_default(),
+                        },
+                    ),
+                    _ => {
+                        self.projects[pidx].poll_interval = POLL_SLOW;
+                        self.schedule_poll(pidx)
+                    }
+                }
+            }
+            Event::PortsPolled {
+                project,
+                session_ports,
+            } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                // Everything the host-side walk found forwards 1:1
+                // (ensure_exact): remote dev servers bake their own port
+                // into URLs they serve. A taken local port is a hard
+                // failure by design, not a remap.
+                let mut opened = false;
+                let proj = &mut self.projects[pidx];
+                for (session, ports) in &session_ports {
+                    let ours = proj
+                        .entries
+                        .iter()
+                        .any(|e| e.remote_session.as_deref() == Some(session));
+                    if !ours {
+                        continue;
+                    }
+                    for &port in ports {
+                        if proj.port_map.contains_key(&port) {
+                            continue;
+                        }
+                        if let Some(tunnels) = &mut proj.tunnels {
+                            match tunnels.ensure_exact(port) {
+                                Some(local) => {
+                                    proj.port_map.insert(port, local);
+                                    opened = true;
+                                    log::info!("exact forward {port} for {session}");
+                                }
+                                None => {
+                                    log::warn!("exact forward for {port} failed — local port taken")
+                                }
+                            }
+                        }
+                    }
+                }
+                proj.poll_interval = if opened {
+                    POLL_FAST
+                } else {
+                    (proj.poll_interval * 2).min(POLL_SLOW)
+                };
+                self.schedule_poll(pidx)
+            }
+            Event::TmuxClipPrimed { project, hash } => {
+                if let Some(pidx) = self.project_index(project)
+                    && let Some(hash) = hash
+                {
+                    self.projects[pidx].clip_seen = hash;
+                }
+                Task::none()
+            }
+            Event::TmuxClipFetched {
+                project,
+                route,
+                buf,
+            } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                let Some(buf) = buf else {
+                    log::debug!("clipboard bridge: no tmux buffer");
+                    return Task::none();
+                };
+                // The age and hash gates, shared with GTK through core: a
+                // gesture publishes only a buffer tmux made FOR it, never
+                // the same text twice; the explicit route takes any age
+                // and skips the record, exactly as GTK passes seen: None.
+                let seen = match route {
+                    remote::ClipRoute::Selection => Some(self.projects[pidx].clip_seen),
+                    remote::ClipRoute::ExplicitCopy => None,
+                };
+                let Some(hash) = remote::tmux_buffer_publishable(&buf, route, seen) else {
+                    log::debug!(
+                        "clipboard bridge: not publishing ({}s old, {route:?})",
+                        buf.age.as_secs()
+                    );
+                    return Task::none();
+                };
+                if route == remote::ClipRoute::Selection {
+                    self.projects[pidx].clip_seen = hash;
+                }
+                log::debug!(
+                    "clipboard bridge: copied {} bytes ({route:?})",
+                    buf.text.len()
+                );
+                // A selection belongs in PRIMARY too — that's where a
+                // local drag puts it, so middle-click paste behaves the
+                // same on a remote pane as on a local one.
+                let mut tasks = vec![iced::clipboard::write(buf.text.clone())];
+                if route == remote::ClipRoute::Selection {
+                    tasks.push(iced::clipboard::write_primary(buf.text));
+                }
+                Task::batch(tasks)
+            }
+            Event::AutoOpenDue { term, generation } => {
+                let Some((pidx, index)) = self.entry_for_term(term) else {
+                    return Task::none();
+                };
+                let due = self.projects[pidx]
+                    .entries
+                    .get(index)
+                    .is_some_and(|e| e.restart_generation == generation && e.pending_auto_open);
+                let name = self.projects[pidx]
+                    .entries
+                    .get(index)
+                    .map(|e| e.config.name.clone())
+                    .unwrap_or_default();
+                if due && self.projects[pidx].ports.has_port(&name) {
+                    self.open_in_browser(pidx, index);
+                }
+                Task::none()
+            }
+            Event::Hotkey(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                // Hotkey capture owns the keyboard while recording.
+                if let Some(state) = &mut self.settings_ui
+                    && let Some(action) = state.capturing
+                {
+                    return self.finish_capture(action, &key, modifiers);
+                }
+                // Esc peels overlays top-down: notice, confirmation card,
+                // context menu, then the full-pane views like the other
+                // panels.
+                if matches!(
+                    key.as_ref(),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                ) {
+                    if self.notice.is_some() {
+                        self.notice = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.update_card.is_some() {
+                        return self.update(Event::UpdateCardDismiss);
+                    }
+                    if self.confirm.is_some() {
+                        self.confirm = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.context_menu.is_some() {
+                        self.context_menu = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.settings_ui.is_some() {
+                        self.settings_ui = None;
+                        return Task::none();
+                    }
+                    // The commit box is a text_editor, which — like the
+                    // filter's text_input — eats the first Esc to unfocus
+                    // itself. The second reaches here and closes the view.
+                    if self.git_ui.is_some() {
+                        self.git_ui = None;
+                        return self.focus_selected_terminal();
+                    }
+                    // The two add forms are full-pane views like the ones
+                    // above, so Esc closes them the same way. Their text
+                    // fields eat the first Esc to unfocus, as everywhere
+                    // else in this shell.
+                    if self.add_project.is_some() {
+                        self.add_project = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.add_command.is_some() {
+                        self.add_command = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.add_ssh.is_some() {
+                        self.add_ssh = None;
+                        return self.focus_selected_terminal();
+                    }
+                    if self.edit_project.is_some() {
+                        self.edit_project = None;
+                        return self.focus_selected_terminal();
+                    }
+                }
+                // While a modal layer is up, the remaining chords stay
+                // dead: they act on the SELECTION, and reordering or
+                // closing processes under a "Delete 'dev'?" card silently
+                // retargets what Proceed is about to delete. GTK's popover
+                // and AlertDialog are grabs; this is that grab's keyboard
+                // half (the unfocus on raise is the terminal half).
+                if self.notice.is_some()
+                    || self.update_card.is_some()
+                    || self.confirm.is_some()
+                    || self.context_menu.is_some()
+                {
+                    return Task::none();
+                }
+                // Palette navigation first (its input consumes typing but
+                // not Esc/arrows).
+                if self.palette_open {
+                    // GTK's FocusTerminal hides the palette first; so does
+                    // its chord here (Ctrl+Right by default).
+                    if self.app_keys.action_for(&key, modifiers) == Some(AppAction::FocusTerminal) {
+                        return self.close_palette();
+                    }
+                    return match key.as_ref() {
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => {
+                            self.close_palette()
+                        }
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp) => {
+                            self.palette_index = self.palette_index.saturating_sub(1);
+                            self.palette_snap()
+                        }
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown) => {
+                            let max = self.palette_matches().len().saturating_sub(1);
+                            self.palette_index = (self.palette_index + 1).min(max);
+                            self.palette_snap()
+                        }
+                        _ => Task::none(),
+                    };
+                }
+                if self.search_open
+                    && matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    )
+                {
+                    return self.update(Event::SearchClose);
+                }
+                if self.filter_open
+                    && matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    )
+                {
+                    return self.toggle_filter();
+                }
+                if let Some(action) = self.app_keys.action_for(&key, modifiers) {
+                    return self.apply_action(action);
+                }
+                match key.as_ref() {
+                    // GTK's hardcoded branch beside the configurable Paste
+                    // chord (`AppAction::Paste` above): plain Ctrl+V on a
+                    // remote AGENT terminal, where start() rebinds it to
+                    // the widget's Paste. Reaching here means the widget
+                    // found no pal().text to paste — the clipboard holds an image
+                    // (or nothing); the guard keeps a stray unfocused chord
+                    // from typing into a terminal it was never aimed at.
+                    iced::keyboard::Key::Character(c)
+                        if c.eq_ignore_ascii_case("v")
+                            && modifiers.control()
+                            && !modifiers.shift()
+                            && self.remote_agent_selected() =>
+                    {
+                        self.paste_image()
+                    }
+                    _ => Task::none(),
+                }
+            }
+            Event::Hotkey(_) => Task::none(),
+            Event::SearchQueryChanged(query) => {
+                self.search_query = query;
+                if self.search_query.is_empty() {
+                    self.search_hit = None;
+                    self.send_search(BackendCommand::SearchClear);
+                } else {
+                    let cmd = BackendCommand::SearchNext(
+                        self.search_query.clone(),
+                        SearchDirection::Left,
+                    );
+                    self.send_search(cmd);
+                }
+                Task::none()
+            }
+            Event::SearchStep(direction) => {
+                if !self.search_query.is_empty() {
+                    let cmd = BackendCommand::SearchNext(self.search_query.clone(), direction);
+                    self.send_search(cmd);
+                }
+                Task::none()
+            }
+            Event::SearchSubmit => {
+                // GTK's terminal_search: Enter = next, Shift+Enter = previous.
+                // iced's text_input publishes one submit with no modifiers,
+                // so Shift is read off the tracked modifier state instead.
+                let direction = if self.shift_held {
+                    SearchDirection::Right
+                } else {
+                    SearchDirection::Left
+                };
+                log::debug!("search submit: {direction:?} (shift {})", self.shift_held);
+                self.update(Event::SearchStep(direction))
+            }
+            Event::SearchClose => {
+                self.search_open = false;
+                self.search_query.clear();
+                self.search_hit = None;
+                self.send_search(BackendCommand::SearchClear);
+                self.focus_selected_terminal()
+            }
+            Event::PaletteInput(value) => {
+                self.palette_query = value;
+                self.palette_index = 0;
+                Task::none()
+            }
+            Event::PaletteSubmit => {
+                // Ctrl+Return is GTK's focus-terminal alias, and its window
+                // controller runs in the capture phase — so in the palette
+                // it hides the palette without picking anything. Here the
+                // text_input has already turned the chord into a submit.
+                if self.ctrl_held {
+                    return self.close_palette();
+                }
+                let target = self
+                    .palette_matches()
+                    .get(self.palette_index)
+                    .map(|row| row.entry.clone());
+                match target {
+                    Some(entry) => self.activate_palette(entry),
+                    None => self.close_palette(),
+                }
+            }
+            Event::PaletteActivate(entry) => self.activate_palette(entry),
+            Event::ImagePasted {
+                project,
+                term,
+                run,
+                result,
+            } => {
+                match result {
+                    Ok(bytes) => {
+                        // Only if the run that asked is still the one on the
+                        // other end — a restart between paste and upload
+                        // must not type a stale path into the fresh run.
+                        let target = self.project_index(project).and_then(|pidx| {
+                            self.projects[pidx]
+                                .entries
+                                .iter_mut()
+                                .find(|e| e.term_id == Some(term) && e.run_id == run)
+                                .filter(|e| e.is_running())
+                                .and_then(|e| e.terminal.as_mut())
+                        });
+                        if let Some(terminal) = target {
+                            terminal.handle(iced_term::Command::ProxyToBackend(
+                                BackendCommand::Write(bytes),
+                            ));
+                        }
+                    }
+                    Err(e) => log::error!("image paste failed: {e}"),
+                }
+                Task::none()
+            }
+            Event::ComposerChanged(value) => {
+                self.composer = value;
+                Task::none()
+            }
+            Event::ComposerSend => {
+                // Ctrl+Return: GTK's capture-phase focus-terminal alias wins
+                // over the composer's own Enter, so it leaves the draft in
+                // place and moves focus.
+                if self.ctrl_held {
+                    return self.focus_selected_terminal();
+                }
+                // The composer types into the selected terminal like the
+                // GTK composer_bar does via feed_child — local input beats
+                // ssh typing latency for remote agents.
+                if !self.composer.is_empty() {
+                    let selected = self
+                        .projects
+                        .get_mut(self.active)
+                        .and_then(|p| p.entries.get_mut(p.selected))
+                        .and_then(|e| e.terminal.as_mut());
+                    if let Some(term) = selected {
+                        let mut bytes = self.composer.clone().into_bytes();
+                        bytes.push(b'\r');
+                        term.handle(iced_term::Command::ProxyToBackend(BackendCommand::Write(
+                            bytes,
+                        )));
+                        self.composer.clear();
+                    }
+                }
+                Task::none()
+            }
+            Event::OpenBadge => {
+                if let Some(project) = self.active_project()
+                    && let Some(entry) = project.entries.get(project.selected)
+                {
+                    open_badge(project, entry);
+                }
+                Task::none()
+            }
+            Event::OpenBadgeFor { project, index } => {
+                if let Some(pidx) = self.project_index(project)
+                    && let Some(entry) = self.projects[pidx].entries.get(index)
+                {
+                    open_badge(&self.projects[pidx], entry);
+                }
+                Task::none()
+            }
+            Event::OpenAddProject => {
+                // The host list is read once per raise, not per frame — it is
+                // a file read, and the picker is rebuilt on every keystroke.
+                //
+                // The epoch stride keeps this instance's stamps disjoint from
+                // every earlier one's: in-flight listings and probes outlive
+                // a closed form, and with counters restarting at 0 a reopened
+                // form would accept the abandoned instance's replies as its
+                // own — up to and including a Configure stage for the
+                // previously typed project.
+                self.add_form_epoch += 1 << 32;
+                self.add_project = Some(add_project::State::new(
+                    ssh::parse_ssh_config(),
+                    self.add_form_epoch,
+                ));
+                self.add_command = None;
+                self.add_ssh = None;
+                self.edit_project = None;
+                Task::none()
+            }
+            Event::AddProjectMsg(msg) => self.update_add_project(msg),
+            Event::OpenAddCommand { project, agent } => {
+                let Some(pidx) = self.project_index(project) else {
+                    return Task::none();
+                };
+                // Submit adds to the ACTIVE project, so raising the form on
+                // another card has to switch to it first (as selecting one
+                // of its processes would).
+                let switched = self.active != pidx;
+                self.active = pidx;
+                self.add_command = Some(ProcessForm {
+                    name: String::new(),
+                    command: String::new(),
+                    working_dir: String::new(),
+                    agent,
+                    name_touched: false,
+                    start_with_project: false,
+                    auto_restart: false,
+                    open_in_browser: false,
+                    watch: String::new(),
+                    editing: None,
+                    original_category: if agent {
+                        ProcessCategory::Agent
+                    } else {
+                        ProcessCategory::Command
+                    },
+                    error: None,
+                });
+                // Mutually exclusive with the other form panes (see
+                // `open_edit_form`).
+                self.add_project = None;
+                self.add_ssh = None;
+                self.edit_project = None;
+                if switched {
+                    self.poll_git_fetch()
+                } else {
+                    Task::none()
+                }
+            }
+            Event::OpenEditProcess => {
+                if let Some(project) = self.active_project() {
+                    let (pidx, index) = (self.active, project.selected);
+                    self.open_edit_form(pidx, index);
+                }
+                Task::none()
+            }
+            Event::FormWorkingDir(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.working_dir = v;
+                }
+                Task::none()
+            }
+            Event::FormWatch(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.watch = v;
+                }
+                Task::none()
+            }
+            Event::FormToggleStartWith(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.start_with_project = v;
+                }
+                Task::none()
+            }
+            Event::FormToggleAutoRestart(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.auto_restart = v;
+                }
+                Task::none()
+            }
+            Event::FormToggleOpenBrowser(v) => {
+                if let Some(form) = &mut self.add_command {
+                    form.open_in_browser = v;
+                }
+                Task::none()
+            }
+            Event::DeleteProcess => {
+                let Some(form) = self.add_command.take() else {
+                    return Task::none();
+                };
+                let Some((project_id, index)) = form.editing else {
+                    return Task::none();
+                };
+                let Some(pidx) = self.project_index(project_id) else {
+                    return Task::none();
+                };
+                self.delete_process(pidx, index);
+                Task::none()
+            }
+            Event::AddCommandName(value) => {
+                if let Some(form) = &mut self.add_command {
+                    // An emptied field goes back to being the preset's to
+                    // fill, so clearing it and picking another agent works.
+                    form.name_touched = !value.trim().is_empty();
+                    form.name = value;
+                    form.error = None;
+                }
+                Task::none()
+            }
+            Event::AgentPreset(index) => {
+                let taken: Vec<String> = self
+                    .active_project()
+                    .map(|p| p.entries.iter().map(|e| e.config.name.clone()).collect())
+                    .unwrap_or_default();
+                if let Some(form) = &mut self.add_command
+                    && let Some(preset) = agents::AGENT_PRESETS.get(index)
+                {
+                    form.command = preset.command.to_string();
+                    if !form.name_touched {
+                        form.name = agents::unique_agent_name(&taken, preset.slug);
+                    }
+                }
+                Task::none()
+            }
+            Event::AddCommandCommand(value) => {
+                if let Some(form) = &mut self.add_command {
+                    form.command = value;
+                    form.error = None;
+                }
+                Task::none()
+            }
+            Event::AddCommandCancel => {
+                self.add_command = None;
+                Task::none()
+            }
+            Event::OpenAddSsh(project) => self.open_add_ssh(project),
+            Event::AddSshMsg(msg) => self.update_add_ssh(msg),
+            Event::OpenEditProject(project) => self.open_edit_project(project),
+            Event::EditProjectMsg(msg) => self.update_edit_project(msg),
+            Event::AddCommandSubmit => {
+                let Some(form) = self.add_command.take() else {
+                    return Task::none();
+                };
+                if let Some((project_id, index)) = form.editing {
+                    // Edit: persist as the custom command that overrides
+                    // same-named detection on every future load.
+                    let Some(pidx) = self.project_index(project_id) else {
+                        return Task::none();
+                    };
+                    if self.projects[pidx].entries.get(index).is_none() {
+                        return Task::none();
+                    }
+                    let name = form.name.trim().to_string();
+                    let command = form.command.trim().to_string();
+                    if name.is_empty() || command.is_empty() {
+                        let mut form = form;
+                        form.error = Some(String::from("A name and a command are both required."));
+                        self.add_command = Some(form);
+                        return Task::none();
+                    }
+                    let taken = self.projects[pidx]
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .any(|(i, e)| i != index && e.config.name == name);
+                    if taken {
+                        let mut form = form;
+                        form.error = Some(format!(
+                            "A process named \u{201c}{name}\u{201d} already exists in this project."
+                        ));
+                        self.add_command = Some(form);
+                        return Task::none();
+                    }
+                    let wd = form.working_dir.trim();
+                    let working_dir = if wd.is_empty() {
+                        None
+                    } else {
+                        Some(wd.to_string())
+                    };
+                    let mut config = self.projects[pidx].entries[index].config.clone();
+                    let old_name = config.name.clone();
+                    let name_changed = old_name != name;
+                    // GTK's edit handler kills a running process before the
+                    // edit and respawns it after, on every Save. Ported for
+                    // the edits a running process cannot absorb — its name
+                    // (a remote session is NAMED after it), command and
+                    // working directory. A flag flip alone leaves it be:
+                    // toggling "Restart on crash" on a busy agent must not
+                    // kill its session. Restart-backoff and reconnect count
+                    // as live too — their timer would otherwise respawn
+                    // under the new name and orphan the host-side session.
+                    let respawn = name_changed
+                        || config.command != command
+                        || config.working_dir != working_dir;
+                    let live = !matches!(
+                        self.projects[pidx].entries[index].status,
+                        Status::Stopped | Status::Crashed(_)
+                    );
+                    if live && respawn {
+                        self.stop(pidx, index);
+                    }
+                    config.name = name.clone();
+                    config.command = command;
+                    config.working_dir = working_dir;
+                    config.start_with_project = form.start_with_project;
+                    config.auto_restart = form.auto_restart;
+                    config.open_in_browser = form.open_in_browser;
+                    // A pattern edit needs no respawn: the watcher
+                    // subscription is keyed on the patterns and rebuilds
+                    // itself on the next frame.
+                    config.restart_when_changed = watch::parse_patterns(&form.watch);
+                    let key = self.projects[pidx].key();
+                    if name_changed {
+                        // GTK's mark_process_deleted + save_custom_command:
+                        // the old name's custom copy goes, and its deletion
+                        // record keeps detection from resurrecting the old
+                        // name beside the renamed one on the next load.
+                        // The new name stops being "deleted" (a detected
+                        // process removed earlier) — it is present now —
+                        // and stops being auto-named: the user chose it.
+                        self.saved.remove_custom_command(&key, &old_name);
+                        self.saved.add_deleted_process(&key, &old_name);
+                        self.saved.unmark_process_deleted(&key, &name);
+                        self.projects[pidx].ports.rename(&old_name, &name);
+                        config.auto_named = false;
+                    }
+                    self.saved.add_custom_command(&key, config.clone());
+                    self.projects[pidx].entries[index].config = config;
+                    if name_changed {
+                        self.persist_process_order(pidx);
+                    }
+                    if live && respawn {
+                        return self.start_fresh(pidx, index);
+                    }
+                    return Task::none();
+                }
+                let (name, command) = (form.name.trim().to_string(), form.command.trim());
+                if name.is_empty() || command.is_empty() {
+                    let mut form = form;
+                    form.error = Some(String::from("A name and a command are both required."));
+                    self.add_command = Some(form);
+                    return Task::none();
+                }
+                let pidx = self.active;
+                let Some(project) = self.projects.get(pidx) else {
+                    // No project to add to — nothing the form can do.
+                    return Task::none();
+                };
+                if project.entries.iter().any(|e| e.config.name == name) {
+                    // Refuse, but KEEP the form: taking it down here threw
+                    // away everything typed, with no hint why.
+                    let mut form = form;
+                    form.error = Some(format!(
+                        "A process named \u{201c}{name}\u{201d} already exists in this project."
+                    ));
+                    self.add_command = Some(form);
+                    return Task::none();
+                }
+                let wd = form.working_dir.trim();
+                let config = ProcessConfig {
+                    name,
+                    command: command.to_string(),
+                    working_dir: if wd.is_empty() {
+                        None
+                    } else {
+                        Some(wd.to_string())
+                    },
+                    start_with_project: form.start_with_project,
+                    auto_restart: form.auto_restart,
+                    open_in_browser: form.open_in_browser,
+                    restart_when_changed: watch::parse_patterns(&form.watch),
+                    env: Default::default(),
+                    category: if form.agent {
+                        ProcessCategory::Agent
+                    } else {
+                        ProcessCategory::Command
+                    },
+                    auto_named: false,
+                    display_name: None,
+                };
+                // Persist as a custom command — survives restarts and
+                // overrides same-named detection, like the GTK dialogs.
+                let key = self.projects[pidx].key();
+                self.saved.add_custom_command(&key, config.clone());
+                self.projects[pidx].entries.push(ProcessEntry::new(config));
+                let index = self.projects[pidx].entries.len() - 1;
+                self.start_fresh(pidx, index)
+            }
+            Event::Terminal(iced_term::Event::BackendCall(term_id, cmd)) => {
+                let Some((pidx, index)) = self.entry_for_term(term_id) else {
+                    return Task::none();
+                };
+
+                let mut side_task = Task::none();
+                let mut rescan = false;
+                if let BackendCommand::ProcessAlacrittyEvent(run, ev) = &cmd {
+                    // A terminal spans runs, so the queue can still hold a
+                    // PREVIOUS run's events — most damagingly its ChildExit/
+                    // Exit, parked there when a child died right as the user
+                    // hit restart. Unstamped, that flipped the fresh run to
+                    // Crashed and fed a crash banner into its running grid.
+                    let current = self.projects[pidx].entries[index]
+                        .terminal
+                        .as_ref()
+                        .map(|t| t.backend().run_generation());
+                    if current != Some(*run) {
+                        return Task::none();
+                    }
+                    match ev {
+                        AEvent::Wakeup => {
+                            rescan = true;
+                            // The repaint signal the working-agent sweep
+                            // reads — VTE's contents-changed on GTK.
+                            let entry = &mut self.projects[pidx].entries[index];
+                            entry.activity_burst = entry.activity_burst.saturating_add(1);
+                            entry.last_activity = Some(Instant::now());
+                            entry.idle_notified = false;
+                        }
+                        AEvent::ChildExit(code) => {
+                            self.projects[pidx].entries[index].last_exit = Some(*code);
+                        }
+                        AEvent::Bell => {
+                            // The primary "agent waiting for input" signal
+                            // — GTK's `connect_bell` on agent VTEs. The
+                            // fork's backend files the event as Ignore, so
+                            // this is the only place it is read; the run
+                            // stamp above already dropped a stale run's.
+                            log::debug!(
+                                "bell from {}",
+                                self.projects[pidx].entries[index].config.name
+                            );
+                            self.notify_agent_idle(pidx, index);
+                        }
+                        AEvent::ClipboardStore(ty, data) if !data.is_empty() => {
+                            // OSC 52 — agents' and tmux's copies; empty
+                            // clears are ignored (multiplex emits them).
+                            side_task = match ty {
+                                ClipboardType::Clipboard => iced::clipboard::write(data.clone()),
+                                ClipboardType::Selection => {
+                                    iced::clipboard::write_primary(data.clone())
+                                }
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+
+                let action = {
+                    let entry = &mut self.projects[pidx].entries[index];
+                    match entry.terminal.as_mut() {
+                        Some(term) => term.handle(iced_term::Command::ProxyToBackend(cmd)),
+                        None => iced_term::actions::Action::Ignore,
+                    }
+                };
+
+                let action_task = match action {
+                    iced_term::actions::Action::ChangeTitle(title) => {
+                        self.projects[pidx].entries[index].title = Some(title);
+                        Task::none()
+                    }
+                    iced_term::actions::Action::Shutdown => self.finalize_exit(pidx, index),
+                    iced_term::actions::Action::PublishSelection(text) => {
+                        // Copy-on-select: a finished widget selection lands
+                        // on CLIPBOARD and PRIMARY both — what GTK's
+                        // selection-changed handler does for local panes,
+                        // and the tmux bridge for remote ones.
+                        Task::batch([
+                            iced::clipboard::write(text.clone()),
+                            iced::clipboard::write_primary(text),
+                        ])
+                    }
+                    iced_term::actions::Action::HoldRepeat => {
+                        self.hold_repeat(pidx, index, term_id);
+                        Task::none()
+                    }
+                    iced_term::actions::Action::HoldRelease => {
+                        if let Some(relay) = self.hold_relays.remove(&term_id) {
+                            relay.stop();
+                        }
+                        Task::none()
+                    }
+                    iced_term::actions::Action::ReportedSelectionGesture => {
+                        // The pane's app owns the mouse, so the selection
+                        // this gesture made — if any — lives on the HOST
+                        // (tmux's paste buffer). A local pane reporting
+                        // (vim with mouse on) has no host and no bridge;
+                        // fetch_tmux_clip returns none for it.
+                        self.fetch_tmux_clip(pidx, remote::ClipRoute::Selection)
+                    }
+                    iced_term::actions::Action::OpenUrl(url) => {
+                        // Ctrl+click: the terminal shows the HOST's port —
+                        // rewrite through the tunnel map, creating/reviving
+                        // the forward the click is about to use.
+                        let project = &mut self.projects[pidx];
+                        let tunnels = &mut project.tunnels;
+                        let port_map = &mut project.port_map;
+                        let rewritten = rewrite_clicked_url(&url, |port| {
+                            let local = tunnels.as_mut()?.ensure(port)?;
+                            port_map.insert(port, local);
+                            Some(local)
+                        });
+                        log::info!("open link {rewritten}");
+                        if let Err(e) = open::that(&rewritten) {
+                            log::warn!("open {rewritten} failed: {e}");
+                        }
+                        Task::none()
+                    }
+                    _ => Task::none(),
+                };
+
+                let scan_task = if rescan {
+                    self.rescan_ports(pidx, index)
+                } else {
+                    Task::none()
+                };
+
+                Task::batch([side_task, action_task, scan_task])
+            }
+        }
+    }
+
+    fn view(&'_ self) -> Element<'_, Event> {
+        let mut body = row![].height(Length::Fill);
+        if self.sidebar_visible || !self.sidebar_anim.settled() {
+            // Mid-glide the sidebar keeps its own content, clipped to the
+            // animated width. The rail is a different layout — the same
+            // four icons stacked instead of in a row — so swapping to it
+            // before the collapse lands reads as a flicker, not a slide.
+            body = body.push(self.view_sidebar()).push(vline());
+        } else {
+            // Collapsed: the cluster survives as a slim icon rail, so the
+            // toggle (and everything else) stays reachable by mouse.
+            body = body.push(self.view_rail()).push(vline());
+        }
+        body = body.push(
+            container(self.view_main())
+                .width(Length::Fill)
+                .height(Length::Fill),
+        );
+
+        let base: Element<'_, Event> = column![body, hline(), self.view_status_bar()].into();
+
+        // Overlay order: palette, then a context menu, then a pending
+        // confirmation, then a notice on the very top — a notice reports
+        // something that already happened, so it outranks a question.
+        let mut layers = vec![base];
+        // The lifted row and the drop rule ride above the base while a
+        // drag is active.
+        if self.dragging() {
+            layers.push(self.view_drag_layer());
+        }
+        if self.palette_open {
+            layers.push(self.view_palette());
+        }
+        if self.context_menu.is_some() {
+            layers.push(self.view_context_menu());
+        }
+        if self.confirm.is_some() {
+            layers.push(self.view_confirm());
+        }
+        if let Some(card) = &self.update_card {
+            layers.push(self.view_update_card(card));
+        }
+        if let Some((heading, body)) = &self.notice {
+            layers.push(self.view_notice(heading, body));
+        }
+        // ALWAYS a Stack, even with nothing over the base. Returning the base
+        // directly when there are no overlays would change the ROOT widget's
+        // type as soon as one opens (Column -> Stack), and iced diffs the
+        // tree by widget tag: a tag mismatch at the root discards the whole
+        // subtree's state and rebuilds it. Every scrollable under it snaps
+        // back to the top — right-clicking a project at the bottom of a long
+        // sidebar scrolled it to the first card. A one-child Stack lays out
+        // identically and costs nothing, and it keeps the base at
+        // `children[0]` whether or not a layer sits above it.
+        iced::widget::Stack::with_children(layers).into()
+    }
+
+    /// The GTK sidebar popovers, rebuilt: a click-away backdrop plus an
+    /// item card at the right-click position.
+    fn view_context_menu(&'_ self) -> Element<'_, Event> {
+        // None = separator; (label, event, destructive) otherwise.
+        type Item = Option<(&'static str, Event, bool)>;
+
+        let target = match self.context_menu {
+            Some(t) => t,
+            None => return column![].into(),
+        };
+        let mut items: Vec<Item> = Vec::new();
+        if let Some(pidx) = self.projects.iter().position(|p| p.id == target.project) {
+            let project = &self.projects[pidx];
+            match target.index {
+                // Project header — mirrors GTK's project_row menu.
+                None => {
+                    items.push(Some(("Start All", Event::StartAll(project.id), false)));
+                    items.push(Some(("Stop All", Event::StopAll(project.id), false)));
+                    items.push(Some(("Restart All", Event::RestartAll(project.id), false)));
+                    items.push(None);
+                    items.push(Some((
+                        "New Terminal",
+                        Event::AddTerminal(project.id),
+                        false,
+                    )));
+                    // GTK keeps these two in the command palette; here the
+                    // pane toolbar was their only home, so they join the
+                    // other creator on the project's own menu.
+                    items.push(Some((
+                        "New Command",
+                        Event::OpenAddCommand {
+                            project: project.id,
+                            agent: false,
+                        },
+                        false,
+                    )));
+                    items.push(Some((
+                        "New Agent",
+                        Event::OpenAddCommand {
+                            project: project.id,
+                            agent: true,
+                        },
+                        false,
+                    )));
+                    items.push(Some((
+                        "New SSH Connection",
+                        Event::OpenAddSsh(project.id),
+                        false,
+                    )));
+                    items.push(Some((
+                        "Open in Editor",
+                        Event::OpenInEditor(project.id),
+                        false,
+                    )));
+                    // GTK's slot, between the editor and Copy Path. Only
+                    // once the probe delivered — the form's command union
+                    // needs the entries and the detection list.
+                    if matches!(project.phase, Phase::Ready) {
+                        items.push(Some((
+                            "Edit Project",
+                            Event::OpenEditProject(project.id),
+                            false,
+                        )));
+                    }
+                    items.push(Some((
+                        "Copy Path",
+                        Event::CopyText(copyable_path(&project.location)),
+                        false,
+                    )));
+                    items.push(None);
+                    items.push(Some((
+                        "Remove Project",
+                        Event::ConfirmRequest(ConfirmAction::RemoveProject(project.id)),
+                        true,
+                    )));
+                }
+                // Process row — mirrors GTK's process_row menu (minus
+                // Clear Output / Redraw Terminal: no backend command yet).
+                Some(index) => {
+                    if let Some(entry) = project.entries.get(index) {
+                        items.push(Some((
+                            "Start / Stop",
+                            Event::ToggleProcessAt {
+                                project: project.id,
+                                index,
+                            },
+                            false,
+                        )));
+                        items.push(Some((
+                            "Restart",
+                            Event::Restart {
+                                project: project.id,
+                                index,
+                            },
+                            false,
+                        )));
+                        if entry.config.category == ProcessCategory::Agent
+                            && resume_command_for(&entry.config.command).is_some()
+                        {
+                            items.push(Some((
+                                "Resume Session",
+                                Event::ResumeAgentAt {
+                                    project: project.id,
+                                    index,
+                                },
+                                false,
+                            )));
+                        }
+                        if browser_url(project, &entry.config.name).is_some() {
+                            items.push(None);
+                            items.push(Some((
+                                "Open in Browser",
+                                Event::OpenBadgeFor {
+                                    project: project.id,
+                                    index,
+                                },
+                                false,
+                            )));
+                        }
+                        items.push(None);
+                        items.push(Some((
+                            "Edit Command",
+                            Event::EditProcessAt {
+                                project: project.id,
+                                index,
+                            },
+                            false,
+                        )));
+                        items.push(Some((
+                            "Copy Command",
+                            Event::CopyText(entry.config.command.clone()),
+                            false,
+                        )));
+                        items.push(None);
+                        items.push(Some((
+                            "Delete Command",
+                            Event::ConfirmRequest(ConfirmAction::DeleteProcess {
+                                project: project.id,
+                                index,
+                            }),
+                            true,
+                        )));
+                    }
+                }
+            }
+        }
+
+        const MENU_WIDTH: f32 = 190.0;
+        let mut height = 8.0; // card padding
+        let mut col = column![].width(Length::Fill);
+        for item in items {
+            match item {
+                Some((label, event, destructive)) => {
+                    height += 27.0;
+                    col = col.push(
+                        button(text(label).size(12.5))
+                            .width(Length::Fill)
+                            .padding([5, 12])
+                            .style(theme::menu_item(destructive))
+                            .on_press(Event::MenuAction(Box::new(event))),
+                    );
+                }
+                None => {
+                    height += 7.0;
+                    col = col.push(container(hline()).padding([3, 6]));
+                }
+            }
+        }
+        let menu = container(col)
+            .width(MENU_WIDTH)
+            .padding(4)
+            .style(theme::menu_card);
+
+        // Open at the pointer, nudged inside the window edges.
+        let x = target
+            .at
+            .x
+            .min(self.window_size.width - MENU_WIDTH - 8.0)
+            .max(0.0);
+        let y = target
+            .at
+            .y
+            .min(self.window_size.height - height - 8.0)
+            .max(0.0);
+        let placed = container(menu)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: y,
+                left: x,
+                right: 0.0,
+                bottom: 0.0,
+            });
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_press(Event::CloseContextMenu)
+        .on_right_press(Event::CloseContextMenu);
+
+        iced::widget::stack![backdrop, placed].into()
+    }
+
+    /// GTK's AlertDialog for destructive sidebar actions: dimmed ground,
+    /// centered card, Cancel default.
+    fn view_confirm(&'_ self) -> Element<'_, Event> {
+        let Some(action) = self.confirm else {
+            return column![].into();
+        };
+        let (heading, body, verb) = match action {
+            ConfirmAction::RemoveProject(project) => {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                (
+                    format!("Remove '{name}'?"),
+                    "This will remove the project and all its processes from the sidebar.",
+                    "Remove",
+                )
+            }
+            ConfirmAction::DeleteProcess { project, index } => {
+                let name = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project)
+                    .and_then(|p| p.entries.get(index))
+                    .map(|e| e.config.name.clone())
+                    .unwrap_or_default();
+                (
+                    format!("Delete '{name}'?"),
+                    "This will stop the process and remove it from the sidebar.",
+                    "Delete",
+                )
+            }
+        };
+
+        let card = container(
+            column![
+                text(heading).size(15).font(bold()).color(pal().text),
+                text(body).size(12).color(pal().text_secondary),
+                container(
+                    row![
+                        button(text("Cancel").size(12))
+                            .padding([6, 16])
+                            .style(theme::pill_button(LOCAL_ACCENT))
+                            .on_press(Event::ConfirmCancel),
+                        button(text(verb).size(12))
+                            .padding([6, 16])
+                            .style(theme::danger())
+                            .on_press(Event::ConfirmProceed),
+                    ]
+                    .spacing(8),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(380)
+        .style(theme::form_card);
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::ConfirmCancel);
+
+        let placed = container(card)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+
+        iced::widget::stack![backdrop, placed].into()
+    }
+
+    /// GTK's update dialog as a card: the notes stage, the blocking
+    /// install stage, the restart offer. Same furniture as the
+    /// confirmation; the notes scroll under a cap like GTK's scroller.
+    fn view_update_card<'a>(&'a self, card: &'a UpdateCard) -> Element<'a, Event> {
+        let later = |label: &'static str| {
+            button(text(label).size(12))
+                .padding([6, 16])
+                .style(theme::pill_button(LOCAL_ACCENT))
+                .on_press(Event::UpdateCardDismiss)
+        };
+        let (heading, body, buttons): (String, Element<'a, Event>, Element<'a, Event>) = match card
+        {
+            UpdateCard::Available { info, can_install } => {
+                let notes = info.notes.trim();
+                let body: Element<'a, Event> = if notes.is_empty() {
+                    column![].into()
+                } else {
+                    scrollable(
+                        container(text(notes).size(12).color(pal().text_secondary))
+                            .width(Length::Fill)
+                            .padding(iced::Padding::ZERO.right(12)),
+                    )
+                    .height(Length::Shrink)
+                    .style(theme::overlay_scrollbar)
+                    .into()
+                };
+                let mut buttons = row![
+                    later("Later"),
+                    button(text("View release").size(12))
+                        .padding([6, 16])
+                        .style(theme::pill_button(LOCAL_ACCENT))
+                        .on_press(Event::UpdateViewRelease),
+                ]
+                .spacing(8);
+                // Installing in place only works for a dpkg-owned binary; a
+                // tarball or `cargo run` build has nothing for apt to upgrade.
+                if *can_install {
+                    buttons = buttons.push(
+                        button(text("Install and restart").size(12).font(bold()))
+                            .padding([6, 16])
+                            .style(theme::primary(LOCAL_ACCENT))
+                            .on_press(Event::UpdateInstall),
+                    );
+                }
+                (
+                    format!("TuxFlow v{} is available", info.latest_version),
+                    body,
+                    buttons.into(),
+                )
+            }
+            UpdateCard::Installing => (
+                "Installing update".into(),
+                text("Downloading\u{2026}").size(12).color(pal().text_secondary).into(),
+                row![].into(),
+            ),
+            UpdateCard::Installed => (
+                "Update installed".into(),
+                text("Restart TuxFlow to run the new version. Remote processes keep running while it restarts.")
+                    .size(12)
+                    .color(pal().text_secondary)
+                    .into(),
+                row![
+                    later("Later"),
+                    button(text("Restart now").size(12).font(bold()))
+                        .padding([6, 16])
+                        .style(theme::primary(LOCAL_ACCENT))
+                        .on_press(Event::UpdateRestart),
+                ]
+                .spacing(8)
+                .into(),
+            ),
+        };
+
+        let card = container(
+            column![
+                text(heading).size(15).font(bold()).color(pal().text),
+                container(body).max_height(320),
+                container(buttons)
+                    .width(Length::Fill)
+                    .align_x(iced::Alignment::End),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(460)
+        .style(theme::form_card);
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::UpdateCardDismiss);
+
+        iced::widget::stack![
+            backdrop,
+            container(card)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .into()
+    }
+
+    /// Report-only card: what GTK opens an AlertDialog for when something
+    /// failed and there is nothing to decide. Same furniture as the
+    /// confirmation, one button.
+    fn view_notice<'a>(&'a self, heading: &'a str, body: &'a str) -> Element<'a, Event> {
+        let card = container(
+            column![
+                text(heading).size(15).font(bold()).color(pal().text),
+                text(body).size(12).color(pal().text_secondary),
+                container(
+                    button(text("OK").size(12))
+                        .padding([6, 16])
+                        .style(theme::pill_button(LOCAL_ACCENT))
+                        .on_press(Event::NoticeDismiss),
+                )
+                .width(Length::Fill)
+                .align_x(iced::Alignment::End),
+            ]
+            .spacing(12),
+        )
+        .padding(18)
+        .width(380)
+        .style(theme::form_card);
+
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::NoticeDismiss);
+
+        iced::widget::stack![
+            backdrop,
+            container(card)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        ]
+        .into()
+    }
+
+    /// GTK's command palette: one list, category chip on the left of each
+    /// row, the New tier first, then Switch to / GO TO. The list scrolls
+    /// under GTK's 400 px cap with the highlighted row kept in view by
+    /// `palette_snap`; the footer hints are GTK's verbatim.
+    fn view_palette(&'_ self) -> Element<'_, Event> {
+        let matches = self.palette_matches();
+        let mut list = column![].spacing(1);
+        for (row_i, palette_row) in matches.iter().enumerate() {
+            let category = text(palette_row.category)
+                .size(10)
+                .color(pal().dim)
+                .width(84);
+            let (accent, content): (iced::Color, Element<'_, Event>) = match &palette_row.entry {
+                PaletteEntry::Process { project, index } => {
+                    let Some(project) = self.projects.iter().find(|p| p.id == *project) else {
+                        continue;
+                    };
+                    let Some(entry) = project.entries.get(*index) else {
+                        continue;
+                    };
+                    let accent = accent_for(project.location.is_remote());
+                    let dot_color = match entry.status {
+                        Status::Running => accent,
+                        Status::Stopped => pal().stopped,
+                        Status::Crashed(_) => CRASHED,
+                        Status::Restarting(_) | Status::Reconnecting(_) => pal().restarting,
+                    };
+                    (
+                        accent,
+                        row![
+                            text("\u{25cf}").size(10).color(dot_color),
+                            text(&project.name).size(12).color(pal().dim),
+                            text(&entry.config.name).size(13).color(pal().text),
+                        ]
+                        .spacing(9)
+                        .align_y(iced::Alignment::Center)
+                        .into(),
+                    )
+                }
+                PaletteEntry::Project(id) => {
+                    let remote = self
+                        .projects
+                        .iter()
+                        .find(|p| p.id == *id)
+                        .is_some_and(|p| p.location.is_remote());
+                    (
+                        accent_for(remote),
+                        text(palette_row.label.clone())
+                            .size(13)
+                            .color(pal().text)
+                            .into(),
+                    )
+                }
+                PaletteEntry::Action(_) => (
+                    LOCAL_ACCENT,
+                    text(palette_row.label.clone())
+                        .size(13)
+                        .color(pal().text)
+                        .into(),
+                ),
+            };
+            list = list.push(
+                button(
+                    row![category, content, iced::widget::space::horizontal()]
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding([6, 12])
+                .style(theme::process_row(accent, row_i == self.palette_index))
+                .on_press(Event::PaletteActivate(palette_row.entry.clone())),
+            );
+        }
+        if matches.is_empty() {
+            list =
+                list.push(container(text("No matches").size(12).color(pal().dim)).padding([6, 12]));
+        }
+
+        let hint = |key: &'static str, what: &'static str| {
+            row![
+                text(key).size(11).color(pal().text_secondary),
+                text(what).size(11).color(pal().dim),
+            ]
+            .spacing(5)
+        };
+        let footer = row![
+            hint("\u{2191} \u{2193}", "navigate"),
+            hint("\u{21b5}", "select"),
+            hint("esc", "close"),
+        ]
+        .spacing(16);
+
+        let card = container(
+            column![
+                text_input(
+                    "New command, terminal, or agent\u{2026}",
+                    &self.palette_query
+                )
+                .id(self.palette_input.clone())
+                .on_input(Event::PaletteInput)
+                .on_submit(Event::PaletteSubmit)
+                .style(theme::input(LOCAL_ACCENT))
+                .padding([8, 14])
+                .size(14),
+                container(
+                    scrollable(list)
+                        .id(self.palette_scroll.clone())
+                        .style(theme::overlay_scrollbar)
+                )
+                .max_height(400.0),
+                footer,
+            ]
+            .spacing(10)
+            .width(560),
+        )
+        .padding(12)
+        .style(theme::form_card);
+
+        container(card)
+            .center_x(Length::Fill)
+            .padding(iced::Padding {
+                top: 90.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.4,
+                ))),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    /// The GTK header bar's button cluster: sidebar toggle, sidebar
+    /// filter, settings, add — the same four Adwaita symbolic icons in the
+    /// same order, flat until hovered, washed while toggled on. Lives at
+    /// the top of the sidebar; `vertical` renders the collapsed rail.
+    fn header_cluster(&'_ self, vertical: bool) -> Element<'_, Event> {
+        let kb = &self.settings.keybindings;
+        // A collapsed rail's tooltips open away from the edge they hug.
+        let position = if vertical {
+            iced::widget::tooltip::Position::Right
+        } else {
+            iced::widget::tooltip::Position::Bottom
+        };
+        let btn = |icon: &'static [u8], active: bool, tip: String, event: Event| {
+            iced::widget::tooltip(
+                button(symbolic(icon, 16.0, pal().text))
+                    .padding(7)
+                    .style(theme::toolbar_icon(active))
+                    .on_press(event),
+                text(tip).size(11),
+                position,
+            )
+            .gap(4)
+            .padding(7)
+            .style(theme::tooltip)
+        };
+        let buttons = [
+            btn(
+                ICON_SIDEBAR,
+                self.sidebar_visible,
+                format!("Toggle Sidebar ({})", kb.toggle_sidebar),
+                Event::ToggleSidebar,
+            ),
+            btn(
+                ICON_FIND,
+                self.filter_open,
+                format!("Filter Sidebar ({})", kb.filter_processes),
+                Event::ToggleFilter,
+            ),
+            btn(
+                ICON_GEAR,
+                self.settings_ui.is_some(),
+                format!("Settings ({})", kb.settings),
+                Event::OpenSettings,
+            ),
+            btn(
+                ICON_ADD,
+                self.add_project.is_some(),
+                String::from("Add Project"),
+                Event::OpenAddProject,
+            ),
+        ];
+        if vertical {
+            let mut col = column![].spacing(2).align_x(iced::Alignment::Center);
+            for b in buttons {
+                col = col.push(b);
+            }
+            col.into()
+        } else {
+            let mut r = row![].spacing(4).align_y(iced::Alignment::Center);
+            for b in buttons {
+                r = r.push(b);
+            }
+            r.into()
+        }
+    }
+
+    /// The hidden-sidebar stand-in: the same four buttons as a slim
+    /// vertical rail on the window edge.
+    fn view_rail(&'_ self) -> Element<'_, Event> {
+        // Pinned to SIDEBAR_RAIL rather than left to its content: that
+        // constant is the floor the collapse glide aims at, and a rail
+        // even a pixel off it would jump on arrival.
+        container(self.header_cluster(true))
+            .width(SIDEBAR_RAIL)
+            .height(Length::Fill)
+            .padding([6, 4])
+            .style(theme::ground)
+            .into()
+    }
+
+    /// The sidebar's full width — GTK's quarter-of-the-window rule.
+    fn sidebar_width(&self) -> f32 {
+        (self.window_size.width * SIDEBAR_FRACTION).clamp(SIDEBAR_MIN, SIDEBAR_MAX)
+    }
+
+    /// How wide the sidebar column is drawn right now: rail width at one
+    /// end of the glide, full width at the other.
+    fn sidebar_extent(&self) -> f32 {
+        let f = self.sidebar_anim.eased();
+        let open = if self.sidebar_visible { f } else { 1.0 - f };
+        SIDEBAR_RAIL + (self.sidebar_width() - SIDEBAR_RAIL) * open
+    }
+
+    /// The sidebar filter's query while one is narrowing the list.
+    fn sidebar_filter(&self) -> Option<String> {
+        let query = self.filter_query.trim().to_lowercase();
+        (self.filter_open && !query.is_empty()).then_some(query)
+    }
+
+    /// Whether a card is drawn under the filter: a project matching by
+    /// name keeps all its rows, otherwise it needs a matching process row.
+    fn project_shown(project: &ProjectState, filter: Option<&str>) -> bool {
+        let Some(q) = filter else {
+            return true;
+        };
+        project.name.to_lowercase().contains(q)
+            || project
+                .entries
+                .iter()
+                .any(|e| e.config.name.to_lowercase().contains(q))
+    }
+
+    /// The cards the sidebar draws, in order — the list the view walks, so
+    /// a drop can reconcile the hovered row by tree position.
+    fn shown_projects(&self) -> Vec<usize> {
+        let filter = self.sidebar_filter();
+        (0..self.projects.len())
+            .filter(|&i| Self::project_shown(&self.projects[i], filter.as_deref()))
+            .collect()
+    }
+
+    fn view_sidebar(&'_ self) -> Element<'_, Event> {
+        // The filter narrows the whole sidebar (GTK semantics): a project
+        // matching by name keeps all its rows; otherwise only matching
+        // process rows stay, and a project with no match hides entirely.
+        let query = self.sidebar_filter();
+        let filter = query.as_deref();
+
+        // Numbered over the whole workspace, not per visible card: a filter
+        // hides rows but does not rebind the chords, so the hint a row keeps
+        // is still the one that reaches it.
+        let targets = self.switch_targets();
+
+        let mut col = column![].spacing(10).padding([12, 10]);
+        for pidx in self.shown_projects() {
+            let project = &self.projects[pidx];
+            col = col.push(self.view_project_block(pidx, project, filter, &targets));
+        }
+
+        let mut inner = column![
+            container(self.header_cluster(false)).padding(iced::Padding {
+                top: 6.0,
+                right: 8.0,
+                bottom: 2.0,
+                left: 8.0,
+            })
+        ];
+        if self.filter_open {
+            inner = inner.push(
+                container(
+                    text_input("Filter projects & processes\u{2026}", &self.filter_query)
+                        .id(self.filter_input.clone())
+                        .on_input(Event::FilterInput)
+                        .style(theme::input(LOCAL_ACCENT))
+                        .padding([6, 12])
+                        .size(12),
+                )
+                .padding(iced::Padding {
+                    top: 6.0,
+                    right: 10.0,
+                    bottom: 0.0,
+                    left: 10.0,
+                }),
+            );
+        }
+        // The list root is a drag sensor too: while a drag is active it
+        // reports how close the pointer is to the visible edges, which is
+        // what auto-scroll runs on. Always wrapped, so the tree's shape is
+        // the same with or without a drag.
+        let mut list = dnd::DragArea::new(col);
+        if self.dragging() {
+            list = list.on_track(Event::DragEdges);
+        }
+        inner = inner.push(
+            scrollable(list)
+                .id(self.sidebar_scroll.clone())
+                .direction(scrollable::Direction::Vertical(
+                    scrollable::Scrollbar::new().width(4).scroller_width(4),
+                ))
+                .style(theme::overlay_scrollbar)
+                .height(Length::Fill)
+                .width(Length::Fill),
+        );
+
+        // Two boxes on purpose: the inner one holds the content at the
+        // sidebar's FULL width so the glide reveals a finished layout,
+        // while the outer one carries the animated width and clips it.
+        // Laying the content out at the animated width instead would
+        // re-wrap every clipped label and re-flow every card each frame —
+        // the cards would visibly rearrange themselves mid-slide.
+        container(container(inner).width(self.sidebar_width()))
+            .width(self.sidebar_extent())
+            .height(Length::Fill)
+            .clip(true)
+            .style(theme::ground)
+            .into()
+    }
+
+    /// One floating project card; the active one is lit by its accent
+    /// gradient. A filter query forces the card open on its matching rows
+    /// (all of them when the project matched by name).
+    fn view_project_block<'a>(
+        &'a self,
+        pidx: usize,
+        project: &'a ProjectState,
+        filter: Option<&str>,
+        targets: &[(usize, usize)],
+    ) -> Element<'a, Event> {
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
+        let active = pidx == self.active;
+
+        // 26px avatar: the project's own artwork, or an initials square —
+        // the shared drawing, so the Edit Project preview can't disagree.
+        let icon: Element<'a, Event> =
+            widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0);
+
+        // GTK's hover controls on the project row: start the marked set,
+        // restart the running, stop everything. They take the counter
+        // pill's seat while the pointer is on the header.
+        // GTK's `.project-has-running .project-name`: the title lights up in
+        // the project's accent while anything inside is up, alongside the
+        // card's border ring. Idle cards keep the plain title.
+        let running = project.has_running();
+        let row_id = (project.id, None);
+        let pointed = self.hovered_row == Some(row_id);
+        let dragging = self.dragging();
+        // No hover chrome under a drag (GTK applies none during DnD): a
+        // pointer crossing rows is aiming, not pointing.
+        let hovered = pointed && !dragging;
+        let slot = self.drop_slot(row_id);
+        let lifted = self.drag_source() == Some(row_id);
+        let title_ink = if running { accent } else { pal().text };
+        let title_ink = if lifted {
+            theme::alpha(title_ink, theme::LIFTED_ALPHA)
+        } else {
+            title_ink
+        };
+        let mut title = row![
+            icon,
+            clipped_label(text(&project.name).size(13).font(bold()).color(title_ink)),
+        ]
+        .spacing(9)
+        .align_y(iced::Alignment::Center);
+        if !hovered {
+            let counter = format!("{}/{}", project.running(), project.entries.len());
+            title = title.push(
+                container(text(counter).size(10))
+                    .padding([2, 8])
+                    .style(theme::pill),
+            );
+        }
+        let mut header = row![
+            button(title)
+                .width(Length::Fill)
+                .padding([2, 4])
+                .style(theme::header_title)
+                .on_press(Event::ToggleExpanded(project.id)),
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center);
+        if hovered {
+            let p = self.hover_progress();
+            let cluster = row![
+                row_action(
+                    ICON_PLAY,
+                    theme::alpha(LOCAL_ACCENT, p),
+                    String::from("Start all marked processes"),
+                    Event::StartAll(project.id),
+                ),
+                row_action(
+                    ICON_RESTART,
+                    theme::alpha(pal().text_secondary, p),
+                    String::from("Restart all running processes"),
+                    Event::RestartAll(project.id),
+                ),
+                row_action(
+                    ICON_STOP,
+                    theme::alpha(CRASHED, p),
+                    String::from("Stop all"),
+                    Event::StopAll(project.id),
+                ),
+            ]
+            .spacing(1)
+            .align_y(iced::Alignment::Center);
+            header = header.push(self.slide_in(cluster));
+        }
+        // No ✕ here: removing a project lives in the right-click menu
+        // behind a confirmation, like GTK.
+        // The wash marks the pointed header — or, under a drag, the header
+        // a drop would land on (GTK's `.drop-target-*` background).
+        let header = container(header)
+            .width(Length::Fill)
+            .style(theme::project_header(
+                accent,
+                pointed && (!dragging || slot.is_some()),
+            ));
+        let header = iced::widget::mouse_area(header)
+            .on_enter(Event::RowEnter {
+                project: project.id,
+                index: None,
+            })
+            .on_exit(Event::RowExit {
+                project: project.id,
+                index: None,
+            })
+            .on_right_press(Event::OpenContextMenu {
+                project: project.id,
+                index: None,
+            });
+        let header = self.drag_row(header.into(), row_id, slot);
+
+        let mut block = column![header].spacing(2);
+
+        let name_match = filter.is_some_and(|q| project.name.to_lowercase().contains(q));
+        if project.expanded || filter.is_some() {
+            // The header is a group of its own, so it gets the same gap
+            // under it that separates the categories below. Without it the
+            // title sits tighter to the first row than the rows sit to each
+            // other (the header's button padding is 2 against their 5), and
+            // a hovered header's tint touches the selected row's.
+            block = block.push(group_gap());
+            match &project.phase {
+                Phase::Loading => {
+                    block = block.push(
+                        container(text("Connecting\u{2026}").size(11).color(pal().dim))
+                            .padding([3, 10]),
+                    );
+                }
+                Phase::Failed(_, retryable) => {
+                    let mut r = row![text("Unreachable").size(11).color(CRASHED)].spacing(8);
+                    if *retryable {
+                        r = r.push(
+                            button(text("Retry").size(10))
+                                .padding([1, 8])
+                                .style(theme::pill_button(accent))
+                                .on_press(Event::RetryProbe(project.id)),
+                        );
+                    }
+                    block = block.push(container(r).padding([3, 10]));
+                }
+                Phase::Ready => {
+                    // The gap leads each category rather than trailing it:
+                    // a separator after the last one is padding, and it made
+                    // the card bottom-heavy against the 8px above the header.
+                    let mut first = true;
+                    for category in SIDEBAR_CATEGORIES {
+                        let members: Vec<usize> = (0..project.entries.len())
+                            .filter(|&i| project.entries[i].config.category == category)
+                            .filter(|&i| match filter {
+                                Some(q) if !name_match => {
+                                    project.entries[i].config.name.to_lowercase().contains(q)
+                                }
+                                _ => true,
+                            })
+                            .collect();
+                        if members.is_empty() {
+                            continue;
+                        }
+                        if !first {
+                            block = block.push(group_gap());
+                        }
+                        first = false;
+                        for i in members {
+                            block = block.push(self.view_row(pidx, i, targets));
+                        }
+                    }
+                }
+            }
+        }
+
+        let sweep = project.sweeping.then_some(self.sweep.phase);
+        container(block)
+            .width(Length::Fill)
+            .padding(8)
+            .style(theme::project_card(accent, running, active, sweep))
+            .into()
+    }
+
+    fn view_row(
+        &'_ self,
+        pidx: usize,
+        index: usize,
+        targets: &[(usize, usize)],
+    ) -> Element<'_, Event> {
+        let project = &self.projects[pidx];
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
+        let entry = &project.entries[index];
+
+        let row_id = (project.id, Some(index));
+        let hovered = self.hovered_row == Some(row_id) && !self.dragging();
+        let slot = self.drop_slot(row_id);
+        let lifted = self.drag_source() == Some(row_id);
+        let selected = pidx == self.active && index == project.selected;
+        let fade = |c: iced::Color| {
+            if lifted {
+                theme::alpha(c, theme::LIFTED_ALPHA)
+            } else {
+                c
+            }
+        };
+        let dot_color = fade(dot_color(&entry.status, accent));
+        // The light rides the card sweep's phase instead of keeping one of
+        // its own: every working row turns in step, and a busy agent still
+        // costs exactly one timer no matter how many rows are lit.
+        let working = entry.working.then_some(self.sweep.phase);
+        let name = entry
+            .config
+            .display_name
+            .as_deref()
+            .unwrap_or(&entry.config.name);
+
+        // GTK hangs the command off the whole row (`set_tooltip_text` in
+        // sidebar/process_row.rs); here it rides the NAME instead, because
+        // iced opens a parent's card *and* a child's at once where GTK
+        // lets the innermost win — over the row it would collide with the
+        // lifecycle glyphs, whose tooltips sit at the same edge.
+        // The name is the row's Fill element, so that is everything but
+        // the dot and the trailing pills anyway.
+        // The lifted row's ink fades like its dot; at rest the button's own
+        // text colour applies (selected or not), so it is only set here
+        // when fading.
+        let label_text = || {
+            let t = text(name).size(12.5);
+            if lifted {
+                t.color(fade(if selected {
+                    pal().text
+                } else {
+                    pal().text_secondary
+                }))
+            } else {
+                t
+            }
+        };
+        let label = match entry.config.command.trim() {
+            // A plain terminal carries no command (it spawns a login
+            // shell); an empty card is worse than no card.
+            "" => clipped_label(label_text()),
+            // Nor mid-drag: rows crossed while aiming would pop their
+            // commands (GTK shows no tooltips during DnD either).
+            _ if self.dragging() => clipped_label(label_text()),
+            command => tip_after(
+                clipped_label(label_text()),
+                command.to_string(),
+                iced::widget::tooltip::Position::Bottom,
+                // Instant is right for a glyph you had to aim at; this
+                // one covers most of the row, so without the delay it
+                // fires on every row the pointer crosses on its way
+                // somewhere else. GTK's own tooltip timeout, near enough.
+                Duration::from_millis(500),
+            ),
+        };
+
+        // Fixed content height: hover swaps elements in and out (hint ↔
+        // glyph cluster), and the row must measure the same with any of
+        // them or the rows below shift while the pointer moves.
+        let mut content = row![status_dot(dot_color, working), label]
+            .spacing(8)
+            .height(17)
+            .align_y(iced::Alignment::Center);
+
+        // Ctrl+1..9 keycaps, revealed only while Ctrl is actually down.
+        //
+        // Numbered off the very list the switcher indexes into — the label
+        // is a lookup, never a count of its own, so the two cannot drift.
+        // Standing hints were the wrong shape for what this became: the
+        // sequence is global and skips stopped rows, so it is at most nine
+        // marks scattered over the whole sidebar, and holding a slot on
+        // every row to show them was paying full chrome for a sparse
+        // overlay. On the modifier the sparseness is the point — only the
+        // reachable rows answer.
+        //
+        // The cap carries the digit alone. `⌃` is the half of the chord
+        // that never varies, it is illegible at this size, and while the
+        // reveal is running the modifier is being held anyway.
+        //
+        // Still yields to the lifecycle glyphs under the pointer: they
+        // share this slot, and the row's fixed height is what keeps that
+        // swap from re-flowing the rows below.
+        if self.ctrl_held
+            && !hovered
+            && self.settings.sidebar.show_keybind_hints
+            && let Some(slot) = targets.iter().position(|&t| t == (pidx, index))
+        {
+            content = content.push(
+                container(text(slot + 1).size(10))
+                    .padding([0, 4])
+                    .style(theme::keycap),
+            );
+        }
+
+        match entry.status {
+            Status::Restarting(attempt) => {
+                content = content.push(
+                    text(format!(
+                        "Retry {attempt}/{}",
+                        processes::MAX_RESTART_ATTEMPTS
+                    ))
+                    .size(9)
+                    .color(pal().restarting),
+                );
+            }
+            Status::Reconnecting(attempt) => {
+                content = content.push(
+                    text(format!("Reconnect {attempt}"))
+                        .size(9)
+                        .color(pal().restarting),
+                );
+            }
+            _ => {}
+        }
+
+        // The lifecycle glyphs (design round F): bare icons sliding in
+        // while the pointer is on the row — play when idle, restart+stop
+        // when running, stop-as-cancel while coming back.
+        if hovered {
+            let p = self.hover_progress();
+            let mut cluster = row![].spacing(1).align_y(iced::Alignment::Center);
+            match entry.status {
+                Status::Stopped | Status::Crashed(_) => {
+                    cluster = cluster.push(row_action(
+                        ICON_PLAY,
+                        theme::alpha(LOCAL_ACCENT, p),
+                        entry.config.command.clone(),
+                        Event::Start {
+                            project: project.id,
+                            index,
+                        },
+                    ));
+                }
+                Status::Running => {
+                    cluster = cluster
+                        .push(row_action(
+                            ICON_RESTART,
+                            theme::alpha(pal().text_secondary, p),
+                            String::from("Restart"),
+                            Event::Restart {
+                                project: project.id,
+                                index,
+                            },
+                        ))
+                        .push(row_action(
+                            ICON_STOP,
+                            theme::alpha(CRASHED, p),
+                            String::from("Stop"),
+                            Event::Stop {
+                                project: project.id,
+                                index,
+                            },
+                        ));
+                }
+                Status::Restarting(_) | Status::Reconnecting(_) => {
+                    cluster = cluster.push(row_action(
+                        ICON_STOP,
+                        theme::alpha(CRASHED, p),
+                        String::from("Cancel"),
+                        Event::Stop {
+                            project: project.id,
+                            index,
+                        },
+                    ));
+                }
+            }
+            content = content.push(self.slide_in(cluster));
+        }
+
+        let base = button(content)
+            .width(Length::Fill)
+            .padding([5, 9])
+            .style(theme::process_row(accent, selected))
+            .on_press(Event::SelectProcess {
+                project: project.id,
+                index,
+            });
+
+        let area = iced::widget::mouse_area(base)
+            .on_enter(Event::RowEnter {
+                project: project.id,
+                index: Some(index),
+            })
+            .on_exit(Event::RowExit {
+                project: project.id,
+                index: Some(index),
+            })
+            .on_right_press(Event::OpenContextMenu {
+                project: project.id,
+                index: Some(index),
+            });
+        self.drag_row(area.into(), row_id, slot)
+    }
+
+    /// A drag is past its threshold: the ghost is up and rows are targets.
+    fn dragging(&self) -> bool {
+        self.drag.as_ref().is_some_and(|d| d.active)
+    }
+
+    /// The row a live drag lifted, drawn faded in its seat.
+    fn drag_source(&self) -> Option<(u64, Option<usize>)> {
+        self.drag.as_ref().filter(|d| d.active).map(|d| d.source)
+    }
+
+    /// Which half of `row` the drop indicator marks, if the live drag is
+    /// over it: Some(true) = above, Some(false) = below.
+    fn drop_slot(&self, row: (u64, Option<usize>)) -> Option<bool> {
+        self.drag
+            .as_ref()
+            .filter(|d| d.active)
+            .and_then(|d| d.over)
+            .filter(|(r, _)| *r == row)
+            .map(|(_, over)| over.before)
+    }
+
+    /// A sidebar row wired for drag-and-drop: the press/half sensor around
+    /// it, inside a container that opens GTK's 4px gap on the targeted edge
+    /// (`.drop-target-*`: 2px border + 2px padding). The gap is the half of
+    /// the indicator that survives under the ghost — rows below shift, so
+    /// the slot reads even where the rule itself is covered. The rule is
+    /// drawn in the drag layer (see `view_drag_layer`). Both wrappers are
+    /// ALWAYS in the tree: a wrapper that comes and goes changes the tree's
+    /// shape and resets what it wraps (the overlay-root lesson, per row).
+    fn drag_row<'a>(
+        &'a self,
+        row: Element<'a, Event>,
+        row_id: (u64, Option<usize>),
+        slot: Option<bool>,
+    ) -> Element<'a, Event> {
+        let mut area =
+            dnd::DragArea::new(row).on_press(move |grab| Event::DragPress { row: row_id, grab });
+        if self.dragging() {
+            area = area.on_over(move |over| Event::DragOver { row: row_id, over });
+        }
+        let (top, bottom) = match slot {
+            Some(true) => (DROP_GAP, 0.0),
+            Some(false) => (0.0, DROP_GAP),
+            None => (0.0, 0.0),
+        };
+        container(area)
+            .width(Length::Fill)
+            .padding(iced::Padding {
+                top,
+                bottom,
+                left: 0.0,
+                right: 0.0,
+            })
+            .into()
+    }
+
+    /// The drag layer: the lifted row following the pointer — GTK's drag
+    /// icon (a WidgetPaintable of the row) as a card in the row's own
+    /// colours, sized to the row it left and offset by the grab point, so
+    /// it never jumps at lift-off — with the drop rule above it.
+    fn view_drag_layer(&'_ self) -> Element<'_, Event> {
+        let Some(drag) = self.drag.as_ref().filter(|d| d.active) else {
+            return column![].into();
+        };
+        let Some(pidx) = self.project_index(drag.source.0) else {
+            return column![].into();
+        };
+        let project = &self.projects[pidx];
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
+        let size = drag.grab.size;
+        // The header button pads [2, 4] and a process row [5, 9]; matching
+        // them keeps the ghost's text exactly over where the row's was.
+        let (content, padding): (Element<'_, Event>, iced::Padding) = match drag.source.1 {
+            None => (
+                row![
+                    widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0),
+                    clipped_label(text(&project.name).size(13).font(bold()).color(pal().text)),
+                ]
+                .spacing(9)
+                .align_y(iced::Alignment::Center)
+                .into(),
+                [2, 4].into(),
+            ),
+            Some(index) => {
+                let Some(entry) = project.entries.get(index) else {
+                    return column![].into();
+                };
+                let name = entry
+                    .config
+                    .display_name
+                    .as_deref()
+                    .unwrap_or(&entry.config.name);
+                (
+                    row![
+                        status_dot(dot_color(&entry.status, accent), None),
+                        clipped_label(text(name).size(12.5).color(pal().text)),
+                    ]
+                    .spacing(8)
+                    .height(17)
+                    .align_y(iced::Alignment::Center)
+                    .into(),
+                    [5, 9].into(),
+                )
+            }
+        };
+        let card = container(content)
+            .width(size.width)
+            .height(size.height)
+            .padding(padding)
+            .align_y(iced::alignment::Vertical::Center)
+            .style(theme::drag_ghost(accent));
+        let x = (self.cursor.x - drag.grab.offset.x)
+            .min(self.window_size.width - size.width)
+            .max(0.0);
+        let y = (self.cursor.y - drag.grab.offset.y)
+            .min(self.window_size.height - size.height)
+            .max(0.0);
+        let ghost = container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: y,
+                left: x,
+                right: 0.0,
+                bottom: 0.0,
+            });
+        // GTK's 2px accent rule marking the slot, drawn HERE rather than on
+        // the target row: the ghost is grabbed wherever the row was pressed,
+        // so a rule on the row's edge sits under it more often than not.
+        // Placed from the pointer and the offset the row reported, in the
+        // gap the target opened (`drag_row`), in the TARGET's accent.
+        let mut layer = iced::widget::stack![ghost];
+        if let Some((row, over)) = drag.over
+            && let Some(tpidx) = self.project_index(row.0)
+        {
+            let target_accent = accent_for(self.projects[tpidx].location.is_remote());
+            let top = self.cursor.y - over.offset.y;
+            let rule_y = if over.before {
+                top - DROP_GAP + 1.0
+            } else {
+                top + over.size.height + 1.0
+            };
+            let rule = container(column![])
+                .width(over.size.width)
+                .height(2)
+                .style(theme::drop_line(target_accent));
+            layer = layer.push(
+                container(rule)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(iced::Padding {
+                        top: rule_y.max(0.0),
+                        left: (self.cursor.x - over.offset.x).max(0.0),
+                        right: 0.0,
+                        bottom: 0.0,
+                    }),
+            );
+        }
+        layer.into()
+    }
+
+    /// Eased slide progress (0..1) of the current hover reveal.
+    fn hover_progress(&self) -> f32 {
+        self.hover_anim.eased()
+    }
+
+    /// F's glide: the cluster starts 6px right of its seat and settles,
+    /// swapping padding side for side so total width never changes (a
+    /// varying width would wobble the clipped name next to it).
+    fn slide_in<'a>(&self, cluster: iced::widget::Row<'a, Event>) -> Element<'a, Event> {
+        let p = self.hover_progress();
+        container(cluster)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 6.0 * p,
+                bottom: 0.0,
+                left: 6.0 * (1.0 - p),
+            })
+            .into()
+    }
+
+    fn view_main(&'_ self) -> Element<'_, Event> {
+        if let Some(state) = &self.settings_ui {
+            return settings_ui::view(state, &self.settings).map(Event::SettingsMsg);
+        }
+        if let Some(state) = &self.git_ui {
+            return git_view::view(state).map(Event::GitMsg);
+        }
+        if let Some(form) = &self.add_command {
+            return self.view_add_command(form);
+        }
+        if let Some(state) = &self.add_ssh {
+            let accent = self
+                .active_project()
+                .map(|p| accent_for(p.location.is_remote()))
+                .unwrap_or(LOCAL_ACCENT);
+            return add_ssh::view(state, accent).map(Event::AddSshMsg);
+        }
+        if let Some(state) = &self.add_project {
+            return add_project::view(state).map(Event::AddProjectMsg);
+        }
+        if let Some(state) = &self.edit_project {
+            return edit_project::view(state).map(Event::EditProjectMsg);
+        }
+
+        let Some(project) = self.active_project() else {
+            return container(
+                column![
+                    text("No projects yet").size(14).color(pal().dim),
+                    button(text("+ Add Project").size(13))
+                        .padding([7, 16])
+                        .style(theme::primary(LOCAL_ACCENT))
+                        .on_press(Event::OpenAddProject),
+                ]
+                .spacing(14)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(theme::pane)
+            .into();
+        };
+        let remote = project.location.is_remote();
+        let accent = accent_for(remote);
+
+        match &project.phase {
+            Phase::Loading => {
+                return container(
+                    text(format!("Connecting to {}\u{2026}", project.key()))
+                        .size(14)
+                        .color(pal().dim),
+                )
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(theme::pane)
+                .into();
+            }
+            Phase::Failed(message, retryable) => {
+                let mut col = column![text(message).size(14).color(CRASHED)]
+                    .spacing(14)
+                    .align_x(iced::Alignment::Center);
+                if *retryable {
+                    col = col.push(
+                        button(text("\u{27f3} Retry").size(12))
+                            .padding([6, 14])
+                            .style(theme::primary(accent))
+                            .on_press(Event::RetryProbe(project.id)),
+                    );
+                }
+                return container(col)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .style(theme::pane)
+                    .into();
+            }
+            Phase::Ready => {}
+        }
+
+        let Some(entry) = project.entries.get(project.selected) else {
+            return container(
+                column![
+                    text("No processes").size(14).color(pal().dim),
+                    row![
+                        button(text("+ Command").size(12))
+                            .padding([6, 14])
+                            .style(theme::primary(accent))
+                            .on_press(Event::OpenAddCommand {
+                                project: project.id,
+                                agent: false,
+                            }),
+                        button(text("+ Agent").size(12))
+                            .padding([6, 14])
+                            .style(theme::primary(accent))
+                            .on_press(Event::OpenAddCommand {
+                                project: project.id,
+                                agent: true,
+                            }),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(14)
+                .align_x(iced::Alignment::Center),
+            )
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(theme::pane)
+            .into();
+        };
+
+        let body: Element<'_, Event> = match &entry.terminal {
+            // Flush, like VTE in the GTK shell — padding here frames any
+            // program that repaints its own background (the grid carries
+            // the color, the padding keeps the pane's) in a visible band.
+            // The widget marks its own focus state (dim, a line, a ring —
+            // Settings → Appearance) — the cursor can't say so under an
+            // agent TUI, which hides it. See `theme::focus_mark`.
+            // The press sensor is `dnd::DragArea`, which peeks at the press
+            // BEFORE delegating: the terminal captures every press, and a
+            // stock mouse_area returns before its own handlers on a
+            // captured event — it would never see the click.
+            Some(term) => dnd::DragArea::new(
+                container(
+                    TerminalView::show_marked(
+                        term,
+                        theme::focus_mark(
+                            &self.settings.appearance.focus_indicator,
+                            accent,
+                            &self.settings.appearance.terminal_theme,
+                        ),
+                    )
+                    .map(Event::Terminal),
+                )
+                .style(theme::terminal_pane(
+                    &self.settings.appearance.terminal_theme,
+                )),
+            )
+            .on_press(|_| Event::TerminalPressed)
+            .into(),
+            // Only before a process's FIRST run: from then on its terminal
+            // stays for good, showing what the last run printed — and its
+            // exit banner, which is where the status is spelled out.
+            None => {
+                let label = match entry.status {
+                    Status::Crashed(_) => {
+                        String::from("Could not start \u{2014} check the command")
+                    }
+                    _ => String::from("Not running"),
+                };
+                container(text(label).size(13).color(pal().dim))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .style(theme::pane)
+                    .into()
+            }
+        };
+
+        // No strip above the terminal: the process name, its OSC title and
+        // its status live in the window title bar and the sidebar row, and
+        // the actions that were pills here are on the row's hover cluster
+        // and its context menu.
+        let mut col = column![];
+
+        if self.search_open {
+            let hint: Element<'_, Event> = match self.search_hit {
+                Some(false) => text("No matches").size(11).color(CRASHED).into(),
+                _ => text("").size(11).into(),
+            };
+            col = col
+                .push(
+                    container(
+                        row![
+                            text_input("Search scrollback (regex)\u{2026}", &self.search_query)
+                                .id(self.search_input.clone())
+                                .on_input(Event::SearchQueryChanged)
+                                .on_submit(Event::SearchSubmit)
+                                .style(theme::input(accent))
+                                .padding([5, 12])
+                                .size(12.5),
+                            hint,
+                            button(text("\u{25b4}").size(12))
+                                .padding([3, 9])
+                                .style(theme::pill_button(accent))
+                                .on_press(Event::SearchStep(SearchDirection::Left)),
+                            button(text("\u{25be}").size(12))
+                                .padding([3, 9])
+                                .style(theme::pill_button(accent))
+                                .on_press(Event::SearchStep(SearchDirection::Right)),
+                            button(text("\u{00d7}").size(11))
+                                .padding([3, 8])
+                                .style(theme::ghost(CRASHED))
+                                .on_press(Event::SearchClose),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .padding([6, 10])
+                    .style(theme::chrome),
+                )
+                .push(hline());
+        }
+
+        col = col.push(container(body).width(Length::Fill).height(Length::Fill));
+
+        if entry.config.category == ProcessCategory::Agent
+            && entry.is_running()
+            && self.settings.tools.agent_composer
+        {
+            let placeholder = format!("Message to {}\u{2026}", entry.config.name);
+            col = col.push(hline()).push(
+                container(
+                    row![
+                        text_input(&placeholder, &self.composer)
+                            .on_input(Event::ComposerChanged)
+                            .on_submit(Event::ComposerSend)
+                            .style(theme::input(accent))
+                            .padding([7, 14])
+                            .size(13),
+                        button(text("Send").size(12).font(bold()))
+                            .padding([7, 16])
+                            .style(theme::primary(accent))
+                            .on_press(Event::ComposerSend),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding([8, 10])
+                .style(theme::chrome),
+            );
+        }
+
+        col.into()
+    }
+
+    fn view_add_command<'a>(&'a self, form: &'a ProcessForm) -> Element<'a, Event> {
+        let accent = self
+            .active_project()
+            .map(|p| accent_for(p.location.is_remote()))
+            .unwrap_or(LOCAL_ACCENT);
+        let editing = form.editing.is_some();
+        // The category rides the TITLE while editing — it is the one thing
+        // the form cannot change. It used to sit as a bare "Command" label
+        // beside the Name field, where it read as that field's caption:
+        // a Makefile target is detected with its name EQUAL to its command,
+        // so both inputs showed "make deploy" and the only word in sight
+        // said the first one was the command. A rename typed into the
+        // second field then rewrote the command and left the name alone.
+        let title = match (editing, form.agent, &form.original_category) {
+            (true, _, ProcessCategory::Agent) => "Edit Agent",
+            (true, _, ProcessCategory::Terminal) => "Edit Terminal",
+            (true, _, ProcessCategory::SSH) => "Edit SSH Connection",
+            (true, _, ProcessCategory::Command) => "Edit Command",
+            (false, true, _) => "Add Agent",
+            (false, false, _) => "Add Command",
+        };
+        // GTK's EntryRows carry their titles ("Name", "Command") inside the
+        // field; iced's text_input has only a placeholder, which vanishes
+        // the moment the field holds a value — on the edit form, always.
+        let caption = |label: &'static str| {
+            text(label)
+                .size(11.5)
+                .font(bold())
+                .color(pal().text_secondary)
+        };
+        let labeled = |label: &'static str, input: Element<'a, Event>| -> Element<'a, Event> {
+            column![caption(label), input].spacing(6).into()
+        };
+
+        // GTK's edit dialog is the add form pre-filled, Name row included
+        // — a rename is an edit like any other.
+        let name_row = labeled(
+            "Name",
+            text_input("e.g. web", &form.name)
+                .on_input(Event::AddCommandName)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into(),
+        );
+
+        let mut col = column![text(title).size(16).font(bold())].spacing(14);
+
+        // Picking an agent is choosing WHICH one first; the fields below are
+        // the starting point it fills in, all still editable. Only offered
+        // when creating — an existing process's command is the thing being
+        // edited, and a preset row would silently overwrite it.
+        if form.agent && !editing {
+            let typed = form.command.trim();
+            let mut list = column![].spacing(0);
+            for (i, preset) in agents::AGENT_PRESETS.iter().enumerate() {
+                let picked = typed == preset.command;
+                list = list.push(
+                    button(
+                        row![
+                            text(preset.label).size(12.5).color(pal().text),
+                            iced::widget::space::horizontal(),
+                            text(preset.command).size(11).color(pal().dim),
+                        ]
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([6, 12])
+                    .style(theme::process_row(accent, picked))
+                    .on_press(Event::AgentPreset(i)),
+                );
+            }
+            col = col.push(
+                column![
+                    caption("Agent"),
+                    container(list)
+                        .padding([4, 0])
+                        .style(theme::settings_card)
+                        .width(Length::Fill),
+                ]
+                .spacing(6),
+            );
+        }
+
+        col = col.push(name_row).push(labeled(
+            "Command",
+            text_input(
+                match form.agent {
+                    true => "e.g. claude --model opus",
+                    false => "e.g. npm run dev",
+                },
+                &form.command,
+            )
+            .on_input(Event::AddCommandCommand)
+            .on_submit(Event::AddCommandSubmit)
+            .style(theme::input(accent))
+            .padding([8, 14])
+            .size(13)
+            .into(),
+        ));
+        col = col.push(labeled(
+            "Working directory",
+            text_input("Optional, defaults to the project", &form.working_dir)
+                .on_input(Event::FormWorkingDir)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into(),
+        ));
+        col = col
+            .push(
+                iced::widget::checkbox(form.start_with_project)
+                    .label("Start with project")
+                    .on_toggle(Event::FormToggleStartWith)
+                    .size(16)
+                    .text_size(12.5),
+            )
+            .push(
+                iced::widget::checkbox(form.auto_restart)
+                    .label("Restart on crash")
+                    .on_toggle(Event::FormToggleAutoRestart)
+                    .size(16)
+                    .text_size(12.5),
+            );
+        // An agent serves no port, so "open in browser when a port appears"
+        // is dead weight on this form. The stored flag is left alone rather
+        // than forced off, so nothing changes under an existing process.
+        if !form.agent {
+            col = col.push(
+                iced::widget::checkbox(form.open_in_browser)
+                    .label("Open in browser when a port appears")
+                    .on_toggle(Event::FormToggleOpenBrowser)
+                    .size(16)
+                    .text_size(12.5),
+            );
+            // GTK's "Watch Patterns" row. Agents are left out like the
+            // browser flag: a file save killing an agent's session is
+            // never what anyone wants, and GTK's agent flow has no
+            // options at all.
+            col = col.push(labeled(
+                "Watch patterns",
+                text_input(
+                    "Comma-separated globs that restart it, e.g. src/**/*.rs, config/*.toml",
+                    &form.watch,
+                )
+                .on_input(Event::FormWatch)
+                .style(theme::input(accent))
+                .padding([8, 14])
+                .size(13)
+                .into(),
+            ));
+        }
+        if let Some(error) = &form.error {
+            col = col.push(text(error).size(12).color(CRASHED));
+        }
+
+        let mut buttons = row![
+            button(
+                text(if editing { "Save" } else { "Add & Start" })
+                    .size(12)
+                    .font(bold()),
+            )
+            .padding([7, 16])
+            .style(theme::primary(accent))
+            .on_press(Event::AddCommandSubmit),
+            button(text("Cancel").size(12))
+                .padding([7, 16])
+                .style(theme::pill_button(accent))
+                .on_press(Event::AddCommandCancel),
+        ]
+        .spacing(8);
+        if editing {
+            buttons = buttons.push(iced::widget::space::horizontal()).push(
+                button(text("Delete Process").size(12))
+                    .padding([7, 16])
+                    .style(theme::pill_intent(accent, CRASHED))
+                    .on_press(Event::DeleteProcess),
+            );
+        }
+        col = col.push(buttons);
+
+        form_card(col)
+    }
+
+    /// The bottom bar, GTK's `status_bar.rs` laid out in the same order:
+    /// remote hint + per-project counter + across-projects total on the
+    /// left, the git chips and the action buttons on the right.
+    fn view_status_bar(&'_ self) -> Element<'_, Event> {
+        let project = self.active_project();
+
+        let mut bar = row![].spacing(8).align_y(iced::Alignment::Center);
+
+        // ── Left: where and how much is running ─────────────────────────
+        if let Some(hint) = project.and_then(|p| remote_hint(&p.location)) {
+            bar = bar.push(tip(
+                symbolic(ICON_REMOTE, 13.0, pal().dim).into(),
+                hint,
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
+        if let Some(p) = project {
+            let label = if p.entries.is_empty() {
+                p.name.clone()
+            } else {
+                format!("{} {}/{}", p.name, p.running(), p.entries.len())
+            };
+            bar = bar.push(text(label).size(11).color(pal().text_secondary));
+        }
+
+        // Across every open project — the counter that says something is
+        // still running in a project you aren't looking at.
+        let total: usize = self.projects.iter().map(|p| p.entries.len()).sum();
+        if total > 0 {
+            let running: usize = self.projects.iter().map(|p| p.running()).sum();
+            if project.is_some() {
+                bar = bar.push(text("\u{00b7}").size(11).color(pal().dim));
+            }
+            let counter = text(format!("Total {running}/{total}"))
+                .size(11)
+                .color(pal().dim);
+            bar = match self.running_summary() {
+                Some(summary) => bar.push(tip(
+                    counter.into(),
+                    summary,
+                    iced::widget::tooltip::Position::Top,
+                )),
+                None => bar.push(counter),
+            };
+        }
+
+        // GTK's update chip: amber caption text in the left cluster, two
+        // states behind one click (`OpenUpdateCard` dispatches on the
+        // badge, as GTK's single handler does).
+        let chip = match &self.update_badge {
+            UpdateBadge::Hidden => None,
+            UpdateBadge::Available(info) => Some((
+                format!("Update available: v{}", info.latest_version),
+                "See what changed and install",
+            )),
+            UpdateBadge::RestartRequired => Some((
+                "Restart to finish updating".to_string(),
+                "A newer TuxFlow is installed; this window is still running the old one",
+            )),
+        };
+        if let Some((label, hint)) = chip {
+            bar = bar.push(tip(
+                button(text(label).size(11).font(bold()).color(pal().update_chip))
+                    .padding([2, 6])
+                    .style(theme::ghost(pal().update_chip))
+                    .on_press(Event::OpenUpdateCard)
+                    .into(),
+                hint.to_string(),
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
+
+        bar = bar.push(iced::widget::space::horizontal());
+
+        // ── Right: git chips, then the actions ──────────────────────────
+        if let Some(chip) = self.view_git_sync_chip() {
+            bar = bar.push(chip);
+        }
+        if let Some(chip) = self.view_git_changes_chip() {
+            bar = bar.push(chip);
+        }
+
+        // GTK's browser button: icon-only, the URL on hover (its `Open
+        // {url}` tooltip verbatim). A text chip sat here first — a real
+        // URL is wide enough to crowd out the actions beside it. Ahead of
+        // Focus (GTK puts it after) on Nikola's ask: it comes and goes
+        // with the badge, and appearing between two standing buttons made
+        // the whole right end jump.
+        let url = project.and_then(|p| {
+            p.entries
+                .get(p.selected)
+                .and_then(|e| browser_url(p, &e.config.name))
+        });
+        if let Some(url) = url {
+            bar = bar.push(tip(
+                button(symbolic(ICON_EXTERNAL, 13.0, pal().text_secondary))
+                    .padding([3, 7])
+                    .style(theme::toolbar_icon(false))
+                    .on_press(Event::OpenBadge)
+                    .into(),
+                format!("Open {url}"),
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
+
+        bar = bar.push(tip(
+            button(symbolic(ICON_FOCUS, 13.0, pal().text_secondary))
+                .padding([3, 7])
+                .style(theme::toolbar_icon(!self.sidebar_visible))
+                .on_press(Event::ToggleSidebar)
+                .into(),
+            String::from("Focus"),
+            iced::widget::tooltip::Position::Top,
+        ));
+
+        // Clear / Stop / Restart act on the SELECTED process, so they are
+        // dead without one. Stop is hidden rather than disabled when it
+        // isn't running — you can't stop what isn't going (GTK parity).
+        let selected = project.and_then(|p| {
+            p.entries
+                .get(p.selected)
+                .map(|e| (p.id, p.selected, e.is_running()))
+        });
+        if let Some((id, index, running)) = selected {
+            bar = bar.push(tip(
+                button(symbolic(ICON_CLEAR, 13.0, pal().text_secondary))
+                    .padding([3, 7])
+                    .style(theme::toolbar_icon(false))
+                    .on_press(Event::ClearTerminal)
+                    .into(),
+                String::from("Clear"),
+                iced::widget::tooltip::Position::Top,
+            ));
+            if running {
+                bar = bar.push(tip(
+                    button(symbolic(ICON_STOP, 13.0, CRASHED))
+                        .padding([3, 7])
+                        .style(theme::toolbar_icon(false))
+                        .on_press(Event::Stop { project: id, index })
+                        .into(),
+                    String::from("Stop"),
+                    iced::widget::tooltip::Position::Top,
+                ));
+            }
+            bar = bar.push(tip(
+                button(symbolic(ICON_RESTART, 13.0, pal().text_secondary))
+                    .padding([3, 7])
+                    .style(theme::toolbar_icon(false))
+                    .on_press(Event::Restart { project: id, index })
+                    .into(),
+                String::from("Restart"),
+                iced::widget::tooltip::Position::Top,
+            ));
+        }
+
+        container(bar)
+            .padding([5, 12])
+            .width(Length::Fill)
+            .style(theme::chrome)
+            .into()
+    }
+
+    /// "project: proc, proc" per project, for the total counter's tooltip.
+    /// None when nothing is running — an empty tooltip is worse than none.
+    fn running_summary(&self) -> Option<String> {
+        let lines: Vec<String> = self
+            .projects
+            .iter()
+            .filter_map(|p| {
+                let names: Vec<&str> = p
+                    .entries
+                    .iter()
+                    .filter(|e| e.is_running())
+                    .map(|e| e.config.name.as_str())
+                    .collect();
+                (!names.is_empty()).then(|| format!("{}: {}", p.name, names.join(", ")))
+            })
+            .collect();
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+
+    /// Branch + ↓ to pull / ↑ to push; one click syncs both ways. Needs a
+    /// branch as well as a repo — a detached HEAD has nothing to pull to
+    /// or push from, so the whole chip goes away.
+    fn view_git_sync_chip(&'_ self) -> Option<Element<'_, Event>> {
+        let project = self.active_project()?;
+        let git = project.git.as_ref()?;
+        if git.branch.is_empty() || git.branch == "(detached)" {
+            return None;
+        }
+        // THIS project's sync, not anyone's: a sync started on another card
+        // must not dress this chip in a spinner it didn't ask for.
+        let syncing = self.git_syncing.contains(&project.id);
+
+        let mut content = row![text(format!("\u{2387} {}", git.branch)).size(10.5)]
+            .spacing(5)
+            .align_y(iced::Alignment::Center);
+        // While a sync runs the counters stand down: the pre-sync numbers
+        // sitting next to a spinner read as "the sync did nothing". The
+        // spinner holds through the settle window too (`GitSyncSettled`),
+        // so it hands over to fresh numbers, never a stale flash.
+        if syncing {
+            content = content.push(spinner(pal().text_secondary, self.sync_spin.phase));
+        } else {
+            if git.behind > 0 {
+                content = content.push(
+                    text(format!("\u{2193}{}", git.behind))
+                        .size(10.5)
+                        .color(pal().git_behind),
+                );
+            }
+            if git.ahead > 0 {
+                content = content.push(
+                    text(format!("\u{2191}{}", git.ahead))
+                        .size(10.5)
+                        .color(pal().git_added),
+                );
+            }
+        }
+
+        let hint = match (git.ahead, git.behind) {
+            _ if syncing => String::from("Syncing\u{2026}"),
+            (0, 0) => String::from("Pull & Push (in sync \u{2014} click to fetch)"),
+            (a, 0) => format!("Pull & Push ({a} to push)"),
+            (0, b) => format!("Pull & Push ({b} to pull)"),
+            (a, b) => format!("Pull & Push ({a} to push, {b} to pull)"),
+        };
+
+        let mut chip = button(content)
+            .padding([3, 9])
+            .style(theme::pill_button(pal().text_secondary));
+        if !syncing {
+            chip = chip.on_press(Event::GitSync);
+        }
+        Some(tip(chip.into(), hint, iced::widget::tooltip::Position::Top))
+    }
+
+    /// Working-tree `+N −M`; click opens the Git Changes view. Text only,
+    /// and shown only while the tree is dirty: a clean repo has nothing to
+    /// see there, and the sync chip beside it already says where the
+    /// branch stands. `changes_chip_parts` decides what it carries.
+    fn view_git_changes_chip(&'_ self) -> Option<Element<'_, Event>> {
+        let project = self.active_project()?;
+        project.git.as_ref()?;
+        let stat = project.diffstat;
+
+        let mut content = row![].spacing(5).align_y(iced::Alignment::Center);
+        for (label, color) in changes_chip_parts(stat)? {
+            content = content.push(text(label).size(10.5).color(color));
+        }
+
+        // Exact numbers live in the tooltip; the chip carries the compact
+        // ones. Untracked files can't show in the line counts — git diff
+        // doesn't see them — so they are named here instead.
+        let mut parts = Vec::new();
+        if stat.files > 0 {
+            parts.push(format!(
+                "{} files: +{} \u{2212}{}",
+                stat.files, stat.added, stat.removed
+            ));
+        }
+        if stat.untracked > 0 {
+            parts.push(format!("{} untracked", stat.untracked));
+        }
+        let hint = if parts.is_empty() {
+            String::from("Git Changes")
+        } else {
+            format!("Git Changes ({})", parts.join(", "))
+        };
+
+        Some(tip(
+            button(content)
+                .padding([3, 9])
+                .style(theme::pill_button(pal().text_secondary))
+                .on_press(Event::OpenGitChanges)
+                .into(),
+            hint,
+            iced::widget::tooltip::Position::Top,
+        ))
+    }
+
+    /// Arm (or re-arm) the debounced geometry save: one write ~1 s after
+    /// the last move/resize. Without it, only a clean close would save —
+    /// and `make dev-iced` (cargo watch) kills the process on rebuild.
+    fn debounce_geometry_save(&mut self) -> Task<Event> {
+        self.geometry_gen += 1;
+        let generation = self.geometry_gen;
+        Task::perform(tokio::time::sleep(Duration::from_secs(1)), move |_| {
+            Event::GeometrySettled(generation)
+        })
+    }
+
+    /// A capture-mode keypress from the hotkeys page: bind it, or report
+    /// the conflict, GTK-style.
+    fn finish_capture(
+        &mut self,
+        action: tuxflow_core::config::keybindings::ShortcutAction,
+        key: &iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> Task<Event> {
+        use iced::keyboard::Key;
+        let Some(state) = &mut self.settings_ui else {
+            return Task::none();
+        };
+        // Esc cancels; lone modifiers keep listening.
+        if matches!(key.as_ref(), Key::Named(iced::keyboard::key::Named::Escape)) {
+            state.capturing = None;
+            return Task::none();
+        }
+        let Some(display) = keys::chord_string(key, modifiers) else {
+            return Task::none();
+        };
+        // Conflict: some *other* action already holds this chord.
+        let conflict = tuxflow_core::config::keybindings::action_metadata()
+            .into_iter()
+            .find(|(other, _, _)| {
+                *other != action && self.settings.keybindings.get(*other) == display
+            });
+        if let Some((_, holder, _)) = conflict {
+            state.capturing = None;
+            state.conflict = Some((action, holder));
+            return Task::none();
+        }
+        state.capturing = None;
+        state.conflict = None;
+        self.settings.keybindings.set(action, display);
+        self.settings.save();
+        self.rebuild_keys();
+        Task::none()
+    }
+
+    /// New chords take effect now: rebuild the matcher and re-reserve in
+    /// every live terminal. Reservations are additive: the OLD chord's
+    /// Passthrough stays in terminals open at the time, so that chord is
+    /// swallowed there (neither typed nor acted on) until the terminal is
+    /// respawned; a stale Copy/Paste row keeps the widget's own action,
+    /// which is what the stock table had there anyway.
+    fn rebuild_keys(&mut self) {
+        self.app_keys = AppKeys::from_settings(&self.settings.keybindings);
+        let reservations = self.app_keys.reservations();
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if let Some(term) = entry.terminal.as_mut() {
+                    term.handle(iced_term::Command::AddBindings(reservations.clone()));
+                }
+            }
+        }
+    }
+
+    /// One settings change: mutate, save immediately (GTK-dialog manners),
+    /// and apply live wherever this shell has the consumer.
+    fn handle_settings(&mut self, msg: settings_ui::Msg) -> Task<Event> {
+        use settings_ui::Msg;
+        // Interacting clears stale capture feedback.
+        if let Some(state) = &mut self.settings_ui
+            && !matches!(msg, Msg::Capture(_))
+        {
+            state.conflict = None;
+        }
+        match msg {
+            Msg::Close => {
+                self.settings_ui = None;
+                return self.focus_selected_terminal();
+            }
+            Msg::Page(page) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.page = page;
+                    state.capturing = None;
+                    state.copied = None;
+                    state.sound_error = None;
+                }
+                return Task::none();
+            }
+            Msg::ColorScheme(label) => {
+                self.settings.appearance.theme = label.to_lowercase();
+                self.apply_scheme();
+            }
+            Msg::AccentApp(label) => {
+                self.settings.appearance.accent_color = accent_name_for_label(label);
+            }
+            Msg::AccentLocal(label) => {
+                self.settings.appearance.local_accent_color = accent_name_for_label(label);
+                self.apply_accents();
+            }
+            Msg::AccentRemote(label) => {
+                self.settings.appearance.remote_accent_color = accent_name_for_label(label);
+                self.apply_accents();
+            }
+            Msg::FocusIndicator(label) => {
+                // Read by the view each frame — nothing to broadcast.
+                if let Some((name, _)) = tuxflow_core::config::settings::FOCUS_INDICATOR_CHOICES
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                {
+                    self.settings.appearance.focus_indicator = name.to_string();
+                }
+            }
+            Msg::TermTheme(label) => {
+                let idx = tuxflow_core::config::palette::theme_choices()
+                    .iter()
+                    .position(|l| *l == label)
+                    .unwrap_or(0);
+                self.settings.appearance.terminal_theme =
+                    tuxflow_core::config::palette::theme_name(idx as u32).to_string();
+                self.broadcast_theme();
+            }
+            Msg::FontFamilyDraft(value) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.font_family_draft = value;
+                }
+                return Task::none();
+            }
+            Msg::FontFamilyApply => {
+                if let Some(state) = &self.settings_ui {
+                    let family = state.font_family_draft.trim();
+                    self.settings.appearance.font_family = if family.is_empty() {
+                        String::from("Monospace")
+                    } else {
+                        family.to_string()
+                    };
+                }
+                self.broadcast_font();
+            }
+            Msg::FontSize(v) => {
+                self.settings.appearance.font_size = v;
+                self.broadcast_font();
+            }
+            Msg::FontWeight(v) => {
+                self.settings.appearance.font_weight = v;
+                self.broadcast_font();
+            }
+            Msg::BoldWeight(v) => {
+                self.settings.appearance.bold_font_weight = v;
+                self.broadcast_font();
+            }
+            Msg::LineHeight(v) => {
+                self.settings.appearance.line_height = v;
+                self.broadcast_font();
+            }
+            Msg::LetterSpacing(v) => {
+                self.settings.appearance.letter_spacing = v;
+                self.broadcast_font();
+            }
+            Msg::Scrollback(v) => {
+                self.settings.appearance.scrollback_lines = v;
+            }
+            Msg::SingleExpand(v) => {
+                self.settings.sidebar.single_project_expand = v;
+                if v {
+                    self.collapse_all_but_active();
+                }
+            }
+            Msg::AutoHide(v) => self.settings.sidebar.auto_hide_sidebar = v,
+            Msg::KeybindHints(v) => self.settings.sidebar.show_keybind_hints = v,
+            Msg::RecentFirst(v) => {
+                self.settings.sidebar.recent_first = v;
+                // Both directions re-sort — GTK's set_recent_first applies
+                // the manual order when switched OFF, not a freeze of
+                // whatever recency had produced.
+                if v {
+                    self.sort_projects_recent_first();
+                } else {
+                    self.sort_projects_manual();
+                }
+            }
+            Msg::NotifyCrash(v) => self.settings.notifications.on_crash = v,
+            Msg::NotifyRestart(v) => self.settings.notifications.on_auto_restart = v,
+            Msg::NotifyFileWatch(v) => self.settings.notifications.on_file_watch_restart = v,
+            Msg::NotifyFinish(v) => self.settings.notifications.on_process_finish = v,
+            Msg::NotifyAgentIdle(v) => self.settings.notifications.on_agent_idle = v,
+            Msg::NotifySilenceFallback(v) => {
+                self.settings.notifications.on_agent_idle_silence_fallback = v;
+            }
+            Msg::IdleThreshold(v) => self.settings.notifications.agent_idle_silence_seconds = v,
+            Msg::SuppressFocused(v) => self.settings.notifications.suppress_when_focused = v,
+            Msg::SoundEnabled(v) => self.settings.notifications.sound_enabled = v,
+            Msg::Sound(label) => {
+                if let Some(id) = sound_id_for_label(label) {
+                    self.settings.notifications.sound_name = id;
+                }
+            }
+            Msg::AgentSound(agent, label) => {
+                let value = sound_id_for_label(label);
+                match agent {
+                    0 => self.settings.notifications.claude_sound_name = value,
+                    1 => self.settings.notifications.codex_sound_name = value,
+                    _ => self.settings.notifications.gemini_sound_name = value,
+                }
+            }
+            Msg::TestNotification => {
+                notify::test(&self.settings.notifications);
+                return Task::none();
+            }
+            Msg::PreviewSound(agent) => {
+                let n = &self.settings.notifications;
+                let id = match agent {
+                    Some(0) => n.claude_sound_name.clone(),
+                    Some(1) => n.codex_sound_name.clone(),
+                    Some(_) => n.gemini_sound_name.clone(),
+                    None => None,
+                }
+                .unwrap_or_else(|| n.sound_name.clone());
+                let result = tuxflow_core::util::sounds::play_sound(&id);
+                if let Some(state) = &mut self.settings_ui {
+                    state.sound_error = result.err();
+                }
+                return Task::none();
+            }
+            Msg::Capture(action) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.conflict = None;
+                    state.capturing = Some(action);
+                }
+                return Task::none();
+            }
+            Msg::ResetKeys => {
+                self.settings.keybindings =
+                    tuxflow_core::config::keybindings::KeybindingsSettings::default();
+                self.rebuild_keys();
+            }
+            Msg::Composer(v) => self.settings.tools.agent_composer = v,
+            Msg::RemoteMic(v) => {
+                self.settings.tools.remote_microphone = v;
+                // Applies live, to projects that are already open, in both
+                // directions — on bridges them, off tears every bridge down.
+                remote::mic::set_enabled(v);
+                // Flipping this on is the one moment the user is actually
+                // looking for a result, so report failures instead of only
+                // logging them. Saves here because the arm returns early.
+                if v {
+                    self.settings.save();
+                    return Task::perform(
+                        tokio::task::spawn_blocking(remote::mic::wait_ready_all),
+                        |joined| Event::MicBridgeReport(joined.unwrap_or_default()),
+                    );
+                }
+            }
+            Msg::Editor(label) => {
+                if let Some((cmd, _)) = tuxflow_core::config::settings::EDITOR_CHOICES
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                {
+                    self.settings.tools.default_editor = cmd.to_string();
+                }
+            }
+            Msg::ReuseEditor(v) => self.settings.tools.reuse_editor_window = v,
+            Msg::TerminalApp(label) => {
+                if let Some((cmd, _)) = tuxflow_core::config::settings::TERMINAL_CHOICES
+                    .iter()
+                    .find(|(_, l)| *l == label)
+                {
+                    self.settings.tools.default_terminal = cmd.to_string();
+                }
+            }
+            Msg::McpEnabled(v) => {
+                self.settings.integrations.mcp_enabled = v;
+                // Live, both ways, on every Ready project — GTK's switch
+                // needs a restart to rebind. Processes already running keep
+                // the socket path they were born with (a deterministic path,
+                // so it is right again the moment the server is back).
+                self.settings.save();
+                let tasks: Vec<Task<Event>> = (0..self.projects.len())
+                    .map(|pidx| {
+                        if v {
+                            self.start_mcp(pidx)
+                        } else {
+                            self.stop_mcp(pidx);
+                            Task::none()
+                        }
+                    })
+                    .collect();
+                return Task::batch(tasks);
+            }
+            Msg::ToggleSetup(idx) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.setup_open = if state.setup_open == Some(idx) {
+                        None
+                    } else {
+                        Some(idx)
+                    };
+                    state.copied = None;
+                }
+                return Task::none();
+            }
+            Msg::CopySetup(tool, config) => {
+                if let Some(state) = &mut self.settings_ui {
+                    state.copied = Some(tool);
+                }
+                return iced::clipboard::write(config.to_string());
+            }
+            Msg::OpenSource => {
+                if let Err(e) = open::that("https://github.com/markovic-nikola/tuxflow") {
+                    log::warn!("open source url: {e}");
+                }
+                return Task::none();
+            }
+        }
+        self.settings.save();
+        Task::none()
+    }
+
+    /// Make the palette match Settings → Color Scheme (System follows the
+    /// portal). Live: every view helper reads `theme::pal()` per frame.
+    fn apply_scheme(&mut self) {
+        theme::set_scheme(effective_light(
+            &self.settings.appearance.theme,
+            self.system_light,
+        ));
+    }
+
+    fn apply_accents(&mut self) {
+        theme::set_accents(
+            &self.settings.appearance.local_accent_color,
+            &self.settings.appearance.remote_accent_color,
+        );
+    }
+
+    /// Single-expand just switched on: only the active project stays open.
+    fn collapse_all_but_active(&mut self) {
+        for (i, project) in self.projects.iter_mut().enumerate() {
+            project.expanded = i == self.active;
+        }
+    }
+
+    /// GTK's sidebar order (`sort_project_rows` in project_list.rs), not a
+    /// flat recency sort: TWO TIERS. Projects with something running sit on
+    /// top in stable start order (`last_used` ASCENDING — a newly started
+    /// project appends BELOW the already-running, so their positions hold
+    /// still), stopped ones below it most-recently-used first, and
+    /// never-used projects tie at zero and keep the manual order at the
+    /// bottom. "Used" is the last tier FLIP, start or stop — see
+    /// [`Self::refresh_recent_order`]. Project ids keep timers safe — only
+    /// the vec order changes.
+    fn sort_projects_recent_first(&mut self) {
+        let active_id = self.projects.get(self.active).map(|p| p.id);
+        let saved = &self.saved;
+        let keys: HashMap<u64, (std::cmp::Reverse<bool>, i64, usize)> = self
+            .projects
+            .iter()
+            .map(|p| {
+                let key = p.key();
+                let manual = saved
+                    .directories
+                    .iter()
+                    .position(|d| d == &key)
+                    .unwrap_or(usize::MAX);
+                (
+                    p.id,
+                    recent_order_key(p.has_running(), saved.get_last_used(&key), manual),
+                )
+            })
+            .collect();
+        self.projects.sort_by_key(|p| keys[&p.id]);
+        if let Some(id) = active_id
+            && let Some(idx) = self.projects.iter().position(|p| p.id == id)
+        {
+            self.active = idx;
+        }
+    }
+
+    /// The order with recent-first OFF: the manual (saved) one — GTK's
+    /// `desired = order` branch. Turning the setting off must actually go
+    /// back, not freeze whatever recency had produced.
+    fn sort_projects_manual(&mut self) {
+        let active_id = self.projects.get(self.active).map(|p| p.id);
+        let saved = &self.saved;
+        let keys: HashMap<u64, usize> = self
+            .projects
+            .iter()
+            .map(|p| {
+                let key = p.key();
+                let manual = saved
+                    .directories
+                    .iter()
+                    .position(|d| d == &key)
+                    .unwrap_or(usize::MAX);
+                (p.id, manual)
+            })
+            .collect();
+        self.projects.sort_by_key(|p| keys[&p.id]);
+        if let Some(id) = active_id
+            && let Some(idx) = self.projects.iter().position(|p| p.id == id)
+        {
+            self.active = idx;
+        }
+    }
+
+    /// Stamp and re-sort on running-tier FLIPS — GTK's
+    /// `refresh_project_running_state`, centralized: both edges stamp
+    /// `last_used` (starting floats the project to the bottom of the
+    /// running tier, stopping slots it at the TOP of the stopped tier —
+    /// stamping only on start would order stopped projects by when they
+    /// were last STARTED, so stopping the one you started first would drop
+    /// it below projects you had already stopped). Runs at the top of
+    /// `update()`, the git-view invalidation idiom, so no status-mutation
+    /// site can be missed — exits arrive async, and stop/start/restart are
+    /// eight call sites. The event AFTER the mutating one applies the
+    /// order (a release always follows a press), which is also GTK's
+    /// deferred-to-idle timing.
+    /// The socket a process of this project should be told about — the
+    /// host-side one for a remote project (where the agent runs), the local
+    /// one otherwise; `None` while the server is switched off.
+    fn mcp_socket_for(&self, pidx: usize) -> Option<String> {
+        if !self.settings.integrations.mcp_enabled {
+            return None;
+        }
+        let project = &self.projects[pidx];
+        Some(if project.location.is_remote() {
+            tuxflow_core::mcp::remote::remote_socket_path(&project.name)
+        } else {
+            tuxflow_core::mcp::server::socket_path(&project.name)
+        })
+    }
+
+    /// Bring the project's MCP server up (setting on, not already up):
+    /// its own bridge and socket, and for a remote project the reverse
+    /// forward that puts that socket on the host. Returns the task that
+    /// turns the agent's commands into events; it ends when the server's
+    /// last sender is dropped and is aborted by [`Self::stop_mcp`].
+    fn start_mcp(&mut self, pidx: usize) -> Task<Event> {
+        use tuxflow_core::mcp::{bridge::McpBridge, remote as mcp_remote, server};
+        if !self.settings.integrations.mcp_enabled || self.projects[pidx].mcp.is_some() {
+            return Task::none();
+        }
+        let (bridge, rx) = McpBridge::isolated();
+        let project = &self.projects[pidx];
+        let handle =
+            server::start_mcp_server(&project.name, &project.location.dir_str(), bridge.clone());
+        if let ProjectLocation::Ssh { host, dir } = &project.location {
+            mcp_remote::ensure(
+                &project.key(),
+                mcp_remote::ForwardSpec {
+                    host: host.clone(),
+                    project_name: project.name.clone(),
+                    remote_dir: dir.clone(),
+                    local_socket: handle.socket_path().to_string(),
+                },
+            );
+        }
+        let id = project.id;
+        let stream = iced::futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|cmd| (mcp::Request::new(cmd), rx))
+        });
+        let (task, commands) = Task::run(stream, move |request| Event::McpCommand {
+            project: id,
+            request,
+        })
+        .abortable();
+        self.projects[pidx].mcp = Some(McpLink {
+            handle,
+            bridge,
+            commands,
+            // Force the first sync to write the table.
+            fingerprint: 0,
+        });
+        self.sync_mcp_snapshots();
+        task
+    }
+
+    /// Stop the project's server: socket files removed, command stream
+    /// aborted, and a remote project's forward torn down (its host-side
+    /// socket files with it).
+    fn stop_mcp(&mut self, pidx: usize) {
+        let Some(link) = self.projects[pidx].mcp.take() else {
+            return;
+        };
+        link.handle.stop();
+        link.commands.abort();
+        let project = &self.projects[pidx];
+        if let Some(host) = project.location.host() {
+            tuxflow_core::mcp::remote::close(&project.key(), host, &project.name);
+        }
+    }
+
+    /// Rewrite each live server's snapshot table when what it is built
+    /// from has moved (status, detected URL, a new run). Runs on every
+    /// event; the fingerprint is hashed without allocating, the rebuild
+    /// clones strings only when it fires.
+    fn sync_mcp_snapshots(&mut self) {
+        let now = Instant::now();
+        for project in &mut self.projects {
+            let Some(link) = project.mcp.as_mut() else {
+                continue;
+            };
+            let ports = &project.ports;
+            let fingerprint = mcp::fingerprint(
+                project
+                    .entries
+                    .iter()
+                    .map(|e| (e, ports.get_url(&e.config.name))),
+            );
+            if fingerprint == link.fingerprint {
+                continue;
+            }
+            link.fingerprint = fingerprint;
+            let dir = project.location.dir_str();
+            let snapshots = project
+                .entries
+                .iter()
+                .map(|e| mcp::snapshot(e, ports.get_url(&e.config.name), &dir, now))
+                .collect();
+            link.bridge.replace_snapshots(snapshots);
+        }
+    }
+
+    /// An agent's tool call, answered through the oneshot it carries. The
+    /// lifecycle half goes through the same paths as the sidebar's
+    /// buttons; logs come straight off the grid (fork patch 25).
+    fn handle_mcp_command(&mut self, project: u64, request: mcp::Request) -> Task<Event> {
+        use tuxflow_core::mcp::bridge::{CommandResult, McpCommand};
+        let Some(command) = request.take() else {
+            return Task::none();
+        };
+        let (name, reply, action) = match command {
+            McpCommand::StartProcess { name, reply } => (name, reply, "start"),
+            McpCommand::StopProcess { name, reply } => (name, reply, "stop"),
+            McpCommand::RestartProcess { name, reply } => (name, reply, "restart"),
+            McpCommand::ReadLogs { name, lines, reply } => {
+                let result = match self.entry_by_name(project, &name) {
+                    Some((pidx, index)) => match &self.projects[pidx].entries[index].terminal {
+                        Some(term) => CommandResult::Ok(term.recent_text(lines)),
+                        None => CommandResult::Error(format!("Process '{name}' has not run yet")),
+                    },
+                    None => CommandResult::Error(format!("Process '{name}' not found")),
+                };
+                let _ = reply.send(result);
+                return Task::none();
+            }
+        };
+        let Some((pidx, index)) = self.entry_by_name(project, &name) else {
+            let _ = reply.send(CommandResult::Error(format!("Process '{name}' not found")));
+            return Task::none();
+        };
+        let running = self.projects[pidx].entries[index].is_running();
+        let (result, task) = match action {
+            "start" if running => (
+                CommandResult::Error(format!("Process '{name}' is already running")),
+                Task::none(),
+            ),
+            "stop" if !running => (
+                CommandResult::Error(format!("Process '{name}' is not running")),
+                Task::none(),
+            ),
+            "stop" => {
+                self.stop(pidx, index);
+                (
+                    CommandResult::Ok(format!("Process '{name}' stopped")),
+                    Task::none(),
+                )
+            }
+            _ => {
+                if running {
+                    self.stop(pidx, index);
+                }
+                let past = if action == "start" {
+                    "started"
+                } else {
+                    "restarted"
+                };
+                (
+                    CommandResult::Ok(format!("Process '{name}' {past}")),
+                    self.start_fresh(pidx, index),
+                )
+            }
+        };
+        log::info!(
+            "MCP: {action} '{name}' → {}",
+            match &result {
+                CommandResult::Ok(m) | CommandResult::Error(m) => m.as_str(),
+            }
+        );
+        let _ = reply.send(result);
+        task
+    }
+
+    /// The (project, entry) an MCP command names — the socket is per
+    /// project, so the name resolves inside that project only.
+    fn entry_by_name(&self, project: u64, name: &str) -> Option<(usize, usize)> {
+        let pidx = self.project_index(project)?;
+        let index = self.projects[pidx]
+            .entries
+            .iter()
+            .position(|e| e.config.name == name)?;
+        Some((pidx, index))
+    }
+
+    fn refresh_recent_order(&mut self) {
+        let mut flipped = false;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for pidx in 0..self.projects.len() {
+            let running = self.projects[pidx].has_running();
+            if self.projects[pidx].was_running == running {
+                continue;
+            }
+            self.projects[pidx].was_running = running;
+            let key = self.projects[pidx].key();
+            self.saved.set_last_used(&key, now);
+            flipped = true;
+        }
+        if flipped && self.settings.sidebar.recent_first {
+            self.sort_projects_recent_first();
+        }
+    }
+
+    /// GTK-parity close save: reload from disk first (the GTK app may have
+    /// saved while we ran — don't clobber its edits), then write only the
+    /// window geometry. A maximized close keeps the last normal size and
+    /// position on disk, so unmaximizing after relaunch restores them.
+    fn save_window_state(&mut self, maximized: bool, position: Option<iced::Point>) {
+        let mut settings = tuxflow_core::config::settings::AppSettings::load();
+        settings.window.maximized = maximized;
+        if !maximized {
+            settings.window.width = self.window_size.width as i32;
+            settings.window.height = self.window_size.height as i32;
+            // `None` (Wayland: no positioning) keeps the values on disk.
+            if let Some(pos) = position {
+                settings.window.x = Some(pos.x as i32);
+                settings.window.y = Some(pos.y as i32);
+            }
+        }
+        // Mirror into the LIVE settings too. Every settings toggle and font
+        // change saves the whole struct, and `self.settings.window` was
+        // populated once at launch — without the mirror, the first toggle
+        // after a move/resize wrote the launch-time geometry back over what
+        // the debounced saves had recorded, exactly the loss the debounce
+        // exists to prevent (cargo watch kills without a close).
+        self.settings.window = settings.window.clone();
+        settings.save();
+    }
+
+    fn subscription(&self) -> Subscription<Event> {
+        let subs: Vec<_> = self
+            .projects
+            .iter()
+            .flat_map(|p| p.entries.iter())
+            .filter_map(|e| e.terminal.as_ref())
+            .map(|t| t.subscription())
+            .collect();
+        // One recursive directory watch per LOCAL project with patterns.
+        // Keyed on the project id AND the pattern set, so an edit that adds
+        // or removes a pattern rebuilds the watch on the next frame and a
+        // project with none has no watcher at all (GTK's "No file watch
+        // patterns configured"). Remote projects never qualify: their
+        // files live on the host.
+        let watchers: Vec<_> = self
+            .projects
+            .iter()
+            .filter(|p| matches!(p.phase, Phase::Ready))
+            .filter_map(|p| match &p.location {
+                ProjectLocation::Local(dir) => Some((p, dir)),
+                ProjectLocation::Ssh { .. } => None,
+            })
+            .filter_map(|(p, dir)| {
+                let set = WatchSet::from_configs(p.entries.iter().map(|e| &e.config));
+                (!set.is_empty())
+                    .then(|| file_watch_subscription(p.id, dir.clone(), set.signature()))
+            })
+            .collect();
+        Subscription::batch([
+            Subscription::batch(subs).map(Event::Terminal),
+            Subscription::batch(watchers),
+            // Ignored-status keys only — anything a focused widget consumed
+            // never reaches the hotkeys.
+            iced::keyboard::listen().map(Event::Hotkey),
+            iced::window::resize_events().map(|(_, size)| Event::WindowResized(size)),
+            iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Window(iced::window::Event::Moved(_)) => Some(Event::WindowMoved),
+                // Tracked continuously because a right-press event carries
+                // no position — this is where its context menu opens.
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Event::CursorMoved(position))
+                }
+                // A drag ends wherever the button comes up — over the pane,
+                // the ghost, off the list — so the release is read here,
+                // whatever widget captured it.
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Event::PointerReleased),
+                // The keycap reveal. Taken from ModifiersChanged rather than
+                // KeyPressed because a bare modifier is not a key press —
+                // and read regardless of capture status, since the terminal
+                // swallows the keyboard whenever it has focus, which is
+                // exactly when the hint is wanted.
+                iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
+                    Some(Event::ModifiersHeld(m))
+                }
+                // Focus loss drops held state (keycaps, a drag) — see the
+                // handler.
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Event::WindowUnfocused),
+                iced::Event::Window(iced::window::Event::Focused) => Some(Event::WindowFocused),
+                _ => None,
+            }),
+            // exit_on_close_request(false): the close button routes through
+            // update so geometry gets saved first (GTK parity).
+            iced::window::close_requests().map(Event::WindowCloseRequested),
+        ])
+    }
+}
+
+/// Which palette Settings → Color Scheme asks for: "light", "dark", or
+/// "system" resolved through the portal's answer (no answer = dark, the
+/// shell's native scheme).
+fn effective_light(setting: &str, system_light: Option<bool>) -> bool {
+    match setting {
+        "light" => true,
+        "system" => system_light.unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// A CSS-style numeric weight (the settings file's unit, GTK's Pango
+/// scale) to the nearest of iced's nine named weights.
+fn font_weight(weight: u32) -> iced::font::Weight {
+    match weight {
+        0..=149 => iced::font::Weight::Thin,
+        150..=249 => iced::font::Weight::ExtraLight,
+        250..=349 => iced::font::Weight::Light,
+        350..=449 => iced::font::Weight::Normal,
+        450..=549 => iced::font::Weight::Medium,
+        550..=649 => iced::font::Weight::Semibold,
+        650..=749 => iced::font::Weight::Bold,
+        750..=849 => iced::font::Weight::ExtraBold,
+        _ => iced::font::Weight::Black,
+    }
+}
+
+/// RGBA8 (what arboard hands over) → PNG bytes.
+fn encode_png(image: &arboard::ImageData) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, image.width as u32, image.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer
+            .write_image_data(&image.bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// Centered elevated card on the main-pane surface.
+/// Debounce before a remote path completion goes out — long enough to skip
+/// probing on every keystroke, short enough to feel live over a warm
+/// ControlMaster connection. GTK's `SUGGEST_DEBOUNCE_MS`.
+const SUGGEST_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Detection for the ADD flow, mirroring GTK's `prepare_project_inner(dir,
+/// conservative: false)`: an authored `tuxflow.toml` wins outright and leaves
+/// nothing to choose between, otherwise the FULL detector runs — the add
+/// dialog offers everything, and `finish_add_project` persists whatever the
+/// startup loader wouldn't re-detect.
+fn detect_for_add(dir: &std::path::Path) -> (String, Vec<detector::DetectedStack>, bool) {
+    use tuxflow_core::config::loader;
+    let base = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| String::from("project"));
+    match loader::find_config(dir).and_then(|p| loader::load_config(&p).ok()) {
+        Some(config) => (config.project.name, Vec::new(), true),
+        None => (base, detector::detect_stacks(dir), false),
+    }
+}
+
+/// GTK's advice verbatim: BatchMode can't answer a password or a first-time
+/// host-key prompt, so the fix is always to connect once by hand.
+fn connect_hint(host: &str, err: &ProbeError) -> String {
+    match err {
+        ProbeError::Invalid(msg) => msg.clone(),
+        ProbeError::Unreachable(msg) => format!(
+            "{msg}\n\nIf this host needs a password or first-time host-key \
+             confirmation, connect once in a terminal (ssh {host}), then retry."
+        ),
+    }
+}
+
+/// Canonical project key from user input: ssh URLs pass through, local
+/// paths canonicalize (relative ones against the cwd).
+fn normalize_key(input: &str) -> String {
+    // The desktop entry passes `%U`, so a directory opened from a file
+    // manager arrives as a file:// URI (gio's `File::path` did this
+    // conversion in the GTK app). Percent-decode it: a space in a project
+    // path is `%20` on the way in.
+    let input = match input.strip_prefix("file://") {
+        Some(rest) => percent_decode(rest),
+        None => input.to_string(),
+    };
+    match ProjectLocation::parse(&input) {
+        ProjectLocation::Local(p) => ProjectLocation::Local(p.canonicalize().unwrap_or(p)).key(),
+        remote => remote.key(),
+    }
+}
+
+/// `%XX` escapes to bytes, lossily — a path is what comes out either way.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(v) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Palette label ("Green") back to its settings name ("green").
+fn accent_name_for_label(label: &str) -> String {
+    tuxflow_core::config::palette::ACCENT_COLORS
+        .iter()
+        .find(|c| c.label == label)
+        .map(|c| c.name)
+        .unwrap_or(tuxflow_core::config::palette::FALLBACK_LOCAL)
+        .to_string()
+}
+
+/// Sound label ("Soft · Badge") back to its id ("soft-badge"); "(Use default)" and
+/// unknown labels clear the override.
+fn sound_id_for_label(label: &str) -> Option<String> {
+    tuxflow_core::util::sounds::BUNDLED_SOUNDS
+        .iter()
+        .find(|b| b.label == label)
+        .map(|b| b.id.to_string())
+}
+
+/// A row label that soaks up the slack: it takes the leftover width and
+/// clips a too-long name at the edge, instead of wrapping or shoving the
+/// chips to its right out of the row (text paints past its bounds unless a
+/// clipping container cuts it).
+fn clipped_label(label: iced::widget::Text<'_>) -> Element<'_, Event> {
+    container(label.wrapping(text::Wrapping::None))
+        .width(Length::Fill)
+        .clip(true)
+        .into()
+}
+
+/// One small icon button inside a sidebar hover cluster.
+fn row_action(
+    icon: &'static [u8],
+    tint: iced::Color,
+    label: String,
+    event: Event,
+) -> Element<'static, Event> {
+    tip(
+        // 12px icon + 2px vertical padding = 16px, safely under the
+        // row's text line — a taller button would grow the row on hover
+        // and shove everything below it down a few pixels.
+        button(symbolic(icon, 12.0, tint))
+            .padding([2, 4])
+            .style(theme::toolbar_icon(false))
+            .on_press(event)
+            .into(),
+        label,
+        iced::widget::tooltip::Position::Bottom,
+    )
+}
+
+fn open_badge(project: &ProjectState, entry: &ProcessEntry) {
+    if let Some(url) = browser_url(project, &entry.config.name) {
+        log::info!("open badge {url}");
+        if let Err(e) = open::that(&url) {
+            log::warn!("open {url} failed: {e}");
+        }
+    }
+}
+
+/// A full URL for the browser, tunnel-mapped on remote projects.
+fn browser_url(project: &ProjectState, name: &str) -> Option<String> {
+    let port = project.ports.get_port(name)?;
+    let local = project.port_map.get(&port).copied().unwrap_or(port);
+    match project.ports.get_url(name) {
+        Some(url) => Some(remap_url_port(url, port, local)),
+        None => Some(format!("http://localhost:{local}")),
+    }
+}
+
+/// Displayed grid as trimmed lines — the detector's input, like VTE's
+/// `text_range_format` feed in the GTK app.
+fn visible_text(term: &iced_term::Terminal) -> String {
+    let content = term.backend().renderable_content();
+    let mut lines: Vec<String> = Vec::new();
+    let mut current_line: Option<Line> = None;
+    for indexed in &content.cells {
+        if current_line != Some(indexed.point.line) {
+            current_line = Some(indexed.point.line);
+            lines.push(String::new());
+        }
+        lines.last_mut().unwrap().push(indexed.c);
+    }
+    lines
+        .iter()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn bold() -> iced::Font {
+    iced::Font {
+        weight: iced::font::Weight::Bold,
+        ..iced::Font::DEFAULT
+    }
+}
+
+/// The recent-first comparison key for one project, sorted ascending:
+/// running tier first, then within it `last_used` ASCENDING (stable start
+/// order — GTK appends a newly started project BELOW the already-running),
+/// while the stopped tier runs DESCENDING (most recently used first); the
+/// sign flip encodes the direction switch into one key. Never-used stopped
+/// projects tie at zero and fall to the manual position.
+fn recent_order_key(
+    running: bool,
+    last_used: u64,
+    manual: usize,
+) -> (std::cmp::Reverse<bool>, i64, usize) {
+    let tier_key = match running {
+        true => last_used as i64,
+        false => -(last_used as i64),
+    };
+    (std::cmp::Reverse(running), tier_key, manual)
+}
+
+/// An avatar path we can actually draw, or None for the initials square.
+/// Existence is checked HERE, once at load, and never again: a saved icon
+/// can outlive the file it names (a deleted logo, a cleared cache), and iced
+/// draws a missing image as an empty hole where GTK's initials would be —
+/// but `view` runs every frame and has no business touching the disk.
+fn usable_icon(path: Option<String>) -> Option<PathBuf> {
+    let path = PathBuf::from(path?);
+    path.is_file().then_some(path)
+}
+
+/// What Copy Path puts on the clipboard: the local path, or the scp-style
+/// `host:dir` a remote project pastes straight into scp/rsync.
+fn copyable_path(location: &ProjectLocation) -> String {
+    match location {
+        ProjectLocation::Local(p) => p.to_string_lossy().into_owned(),
+        ProjectLocation::Ssh { host, dir } => format!("{host}:{dir}"),
+    }
+}
+
+/// 1px hairline (style.css alpha(@borders, .3)) — horizontal.
+fn hline() -> Element<'static, Event> {
+    container(column![])
+        .width(Length::Fill)
+        .height(1)
+        .style(theme::hairline)
+        .into()
+}
+
+/// The sidebar card's group separator: the air under the project header
+/// and between one category's rows and the next.
+/// The sidebar dot's colour for a status (GTK's status-dot classes).
+fn dot_color(status: &Status, accent: iced::Color) -> iced::Color {
+    match status {
+        Status::Running => accent,
+        Status::Stopped => pal().stopped,
+        Status::Crashed(_) => CRASHED,
+        Status::Restarting(_) | Status::Reconnecting(_) => pal().restarting,
+    }
+}
+
+fn group_gap() -> Element<'static, Event> {
+    container(column![]).height(3).into()
+}
+
+/// 1px hairline — vertical.
+fn vline() -> Element<'static, Event> {
+    container(column![])
+        .width(1)
+        .height(Length::Fill)
+        .style(theme::hairline)
+        .into()
+}
+
+// The GTK sidebar's icons, vendored from adwaita-icon-theme (see
+// assets/icons/README.md) so the shells share the exact glyphs.
+const ICON_SIDEBAR: &[u8] = include_bytes!("../assets/icons/sidebar-show-symbolic.svg");
+const ICON_FIND: &[u8] = include_bytes!("../assets/icons/edit-find-symbolic.svg");
+const ICON_GEAR: &[u8] = include_bytes!("../assets/icons/emblem-system-symbolic.svg");
+const ICON_ADD: &[u8] = include_bytes!("../assets/icons/list-add-symbolic.svg");
+const ICON_PLAY: &[u8] = include_bytes!("../assets/icons/media-playback-start-symbolic.svg");
+const ICON_STOP: &[u8] = include_bytes!("../assets/icons/media-playback-stop-symbolic.svg");
+const ICON_RESTART: &[u8] = include_bytes!("../assets/icons/view-refresh-symbolic.svg");
+const ICON_FOCUS: &[u8] = include_bytes!("../assets/icons/focus-windows-symbolic.svg");
+const ICON_CLEAR: &[u8] = include_bytes!("../assets/icons/edit-clear-symbolic.svg");
+const ICON_EXTERNAL: &[u8] = include_bytes!("../assets/icons/external-link-symbolic.svg");
+const ICON_REMOTE: &[u8] = include_bytes!("../assets/icons/tuxflow-remote-symbolic.svg");
+
+/// A symbolic icon: the baked-in fill is overridden by the tint, which
+/// is what makes these behave like GTK's -symbolic icons.
+fn symbolic(bytes: &'static [u8], px: f32, tint: iced::Color) -> iced::widget::svg::Svg<'static> {
+    iced::widget::svg(iced::widget::svg::Handle::from_memory(bytes))
+        .width(px)
+        .height(px)
+        .style(move |_, _| iced::widget::svg::Style { color: Some(tint) })
+}
+
+/// Hang a tooltip on anything. GTK's icon-only chips are unreadable
+/// without one, so every glyph-only control in the app goes through here.
+fn tip<'a>(
+    content: Element<'a, Event>,
+    label: String,
+    position: iced::widget::tooltip::Position,
+) -> Element<'a, Event> {
+    tip_after(content, label, position, Duration::ZERO)
+}
+
+/// `tip` that waits before opening — for hints hung on something the
+/// pointer crosses on its way elsewhere (a whole sidebar row), rather
+/// than on a control it was aimed at.
+fn tip_after<'a>(
+    content: Element<'a, Event>,
+    label: String,
+    position: iced::widget::tooltip::Position,
+    delay: Duration,
+) -> Element<'a, Event> {
+    iced::widget::tooltip(content, text(label).size(11), position)
+        .gap(4)
+        .padding(7)
+        .delay(delay)
+        .style(theme::tooltip)
+        .into()
+}
+
+/// `host:dir` for a remote project — what the status bar's remote glyph
+/// says on hover. None for a local one: the icon isn't shown at all.
+fn remote_hint(location: &ProjectLocation) -> Option<String> {
+    match location {
+        ProjectLocation::Local(_) => None,
+        ProjectLocation::Ssh { host, dir } => Some(format!("{host}:{dir}")),
+    }
+}
+
+/// GTK's `should_notify`, minus the lookups: with the suppression off
+/// everything notifies; with it on, only what the user is NOT looking at
+/// — a focused window showing that very terminal is the one case dropped.
+fn notification_allowed(suppress_when_focused: bool, window_focused: bool, visible: bool) -> bool {
+    !(suppress_when_focused && window_focused && visible)
+}
+
+/// The status bar's changes chip, as `(label, color)` badges: `+N` and
+/// `−M` when the tree has line changes, else the file count — untracked
+/// files and binary or mode-only edits count no lines under `git diff`,
+/// and the chip is the way into Git Changes, so it must not vanish while
+/// there is something to commit. `None` on a clean tree hides the chip.
+fn changes_chip_parts(
+    stat: tuxflow_core::remote::git::DiffStat,
+) -> Option<Vec<(String, iced::Color)>> {
+    let mut parts = Vec::new();
+    if stat.added > 0 {
+        parts.push((
+            format!("+{}", git_view::compact_count(stat.added)),
+            pal().git_added,
+        ));
+    }
+    if stat.removed > 0 {
+        parts.push((
+            format!("\u{2212}{}", git_view::compact_count(stat.removed)),
+            pal().git_removed,
+        ));
+    }
+    if parts.is_empty() {
+        let files = stat.files + stat.untracked;
+        if files == 0 {
+            return None;
+        }
+        let noun = if files == 1 { "file" } else { "files" };
+        parts.push((format!("{files} {noun}"), pal().text_secondary));
+    }
+    Some(parts)
+}
+
+/// The watcher stream for one local project: core's debounced recursive
+/// watch (`watch::start`) reporting every batch as `FilesChanged`. The
+/// pattern signature is part of the key only — matching happens in the
+/// handler against the LIVE entries, so a rename lands without a rebuild.
+/// The watcher lives inside the pending future: when iced drops the
+/// subscription (project closed, patterns changed) the future is
+/// cancelled and the watcher thread with it.
+fn file_watch_subscription(
+    project: u64,
+    dir: PathBuf,
+    signature: Vec<(String, Vec<String>)>,
+) -> Subscription<Event> {
+    Subscription::run_with((project, dir, signature), |(project, dir, _)| {
+        let project = *project;
+        let dir = dir.clone();
+        iced::stream::channel(16, async move |tx| {
+            let _watcher = watch::start(&dir, move |paths| {
+                let mut tx = tx.clone();
+                if tx.try_send(Event::FilesChanged { project, paths }).is_err() {
+                    log::warn!("file watcher: change report dropped (channel full)");
+                }
+            });
+            std::future::pending::<()>().await;
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn file_uris_from_the_launcher_become_paths() {
+        assert_eq!(
+            super::percent_decode("/home/n/my%20app/%C3%A9"),
+            "/home/n/my app/é"
+        );
+        // A stray % stays put; the launcher key still parses as a path.
+        assert_eq!(super::percent_decode("/a%zz/b"), "/a%zz/b");
+        assert_eq!(super::percent_decode("/trailing%2"), "/trailing%2");
+        let key = super::normalize_key("file:///definitely/not/there");
+        assert_eq!(key, "/definitely/not/there");
+    }
+
+    use super::*;
+
+    const SPAN: f32 = 160.0;
+
+    #[test]
+    fn changes_chip_hides_clean_and_names_lineless_changes() {
+        use tuxflow_core::remote::git::DiffStat;
+        let labels = |stat: DiffStat| -> Vec<String> {
+            changes_chip_parts(stat)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect()
+        };
+        assert!(changes_chip_parts(DiffStat::default()).is_none());
+        let both = DiffStat {
+            files: 2,
+            added: 1200,
+            removed: 3,
+            untracked: 1,
+        };
+        assert_eq!(labels(both), ["+1.2K", "\u{2212}3"]);
+        let added_only = DiffStat {
+            files: 1,
+            added: 4,
+            ..Default::default()
+        };
+        assert_eq!(labels(added_only), ["+4"]);
+        // No lines to count, but something to commit: the way in stays.
+        let untracked = DiffStat {
+            untracked: 1,
+            ..Default::default()
+        };
+        assert_eq!(labels(untracked), ["1 file"]);
+        let binary_and_new = DiffStat {
+            files: 2,
+            untracked: 1,
+            ..Default::default()
+        };
+        assert_eq!(labels(binary_and_new), ["3 files"]);
+    }
+
+    #[test]
+    fn focus_gate_drops_only_the_watched_terminal() {
+        // Suppression off: always.
+        for focused in [false, true] {
+            for visible in [false, true] {
+                assert!(notification_allowed(false, focused, visible));
+            }
+        }
+        // Suppression on: dropped only when focused AND visible.
+        assert!(!notification_allowed(true, true, true));
+        assert!(notification_allowed(true, true, false), "another pane");
+        assert!(notification_allowed(true, false, true), "window unfocused");
+        assert!(notification_allowed(true, false, false));
+    }
+
+    #[test]
+    fn ramp_advances_then_settles() {
+        let mut a = Anim::default();
+        let g = a.start();
+        assert_eq!(a.eased(), 0.0);
+        // Ten 16ms frames cover a 160ms span exactly.
+        for _ in 0..9 {
+            assert!(a.tick(g, SPAN), "ramp stopped early");
+        }
+        assert!(!a.tick(g, SPAN), "ramp should have arrived");
+        assert!(a.settled());
+        assert_eq!(a.eased(), 1.0);
+    }
+
+    #[test]
+    fn stale_ticks_are_dropped() {
+        let mut a = Anim::default();
+        let old = a.start();
+        a.tick(old, SPAN);
+        let new = a.start();
+        assert_ne!(old, new);
+        // The abandoned chain must not advance the restarted ramp — two
+        // live chains would run it at double speed.
+        assert!(!a.tick(old, SPAN));
+        assert_eq!(a.eased(), 0.0);
+    }
+
+    #[test]
+    fn reversal_is_continuous() {
+        let mut a = Anim::default();
+        let g = a.start();
+        for _ in 0..3 {
+            a.tick(g, SPAN);
+        }
+        // Reversing mid-glide: the widget's position is `1 - eased`, and
+        // the new ramp has to start exactly there or it visibly jumps.
+        let mirrored = 1.0 - a.eased();
+        a.restart_at(mirrored);
+        assert!(
+            (a.eased() - mirrored).abs() < 1e-5,
+            "{} != {mirrored}",
+            a.eased()
+        );
+    }
+
+    /// `(name, category)` → a running entry.
+    fn up(name: &str, category: ProcessCategory) -> ProcessEntry {
+        let mut e = ProcessEntry::new(ProcessConfig {
+            name: name.into(),
+            command: format!("echo {name}"),
+            working_dir: None,
+            start_with_project: false,
+            auto_restart: false,
+            open_in_browser: false,
+            restart_when_changed: Vec::new(),
+            env: Default::default(),
+            category,
+            auto_named: false,
+            display_name: None,
+        });
+        e.status = Status::Running;
+        e
+    }
+
+    fn down(name: &str, category: ProcessCategory) -> ProcessEntry {
+        let mut e = up(name, category);
+        e.status = Status::Stopped;
+        e
+    }
+
+    #[test]
+    fn slots_follow_drawn_order_not_entry_order() {
+        // The reported card: four commands with an agent saved third. The
+        // agent draws at the TOP of the card, so it must own Ctrl+1 — the
+        // old code numbered by entry index and labelled it Ctrl+3, which is
+        // what made the sidebar read 3,1,2,4,5 down the screen.
+        use ProcessCategory::{Agent, Command};
+        let entries = vec![
+            up("dev", Command),
+            up("build", Command),
+            up("shopify app launch status", Agent),
+            up("deploy", Command),
+            up("deploy shopify config", Command),
+        ];
+        let targets = switch_targets_of([entries.as_slice()]);
+        assert_eq!(targets, vec![(0, 2), (0, 0), (0, 1), (0, 3), (0, 4)]);
+    }
+
+    #[test]
+    fn categories_draw_agents_commands_terminals_ssh() {
+        // Must match GTK's `running_names_in_sidebar_order`; the iced port
+        // had Terminal and SSH the other way round.
+        use ProcessCategory::{Agent, Command, SSH, Terminal};
+        let entries = vec![
+            up("s", SSH),
+            up("t", Terminal),
+            up("c", Command),
+            up("a", Agent),
+        ];
+        let order: Vec<usize> = sidebar_order(&entries).collect();
+        assert_eq!(order, vec![3, 2, 1, 0]);
+    }
+
+    /// GTK's sort_project_rows contract: running projects on top in START
+    /// order (ascending stamps — the newest start sits at the BOTTOM of
+    /// the tier, so the already-running rows hold still), stopped ones
+    /// below it most-recently-used first, never-used last in manual order.
+    #[test]
+    fn recent_first_orders_in_two_tiers() {
+        let mut rows = vec![
+            ("stopped-recent", recent_order_key(false, 200, 0)),
+            ("running-old", recent_order_key(true, 50, 1)),
+            ("never-used-b", recent_order_key(false, 0, 3)),
+            ("running-new", recent_order_key(true, 90, 4)),
+            ("stopped-older", recent_order_key(false, 100, 5)),
+            ("never-used-a", recent_order_key(false, 0, 2)),
+        ];
+        rows.sort_by_key(|(_, k)| *k);
+        let order: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            order,
+            vec![
+                "running-old",
+                "running-new",
+                "stopped-recent",
+                "stopped-older",
+                "never-used-a",
+                "never-used-b",
+            ]
+        );
+    }
+
+    #[test]
+    fn stopped_rows_take_no_slot() {
+        // GTK only numbers running processes: the chord's whole job is to
+        // focus a terminal, and a stopped row has none.
+        use ProcessCategory::Command;
+        let entries = vec![
+            down("a", Command),
+            up("b", Command),
+            down("c", Command),
+            up("d", Command),
+        ];
+        assert_eq!(
+            switch_targets_of([entries.as_slice()]),
+            vec![(0, 1), (0, 3)]
+        );
+    }
+
+    #[test]
+    fn numbering_runs_across_projects() {
+        // Global, not per-card — Ctrl+N addresses the whole sidebar.
+        use ProcessCategory::Command;
+        let a = vec![up("a1", Command), up("a2", Command)];
+        let b = vec![up("b1", Command)];
+        let targets = switch_targets_of([a.as_slice(), b.as_slice()]);
+        assert_eq!(targets, vec![(0, 0), (0, 1), (1, 0)]);
+    }
+
+    #[test]
+    fn numbering_stops_at_nine() {
+        use ProcessCategory::Command;
+        let entries: Vec<ProcessEntry> = (0..12).map(|i| up(&i.to_string(), Command)).collect();
+        assert_eq!(switch_targets_of([entries.as_slice()]).len(), SWITCH_SLOTS);
+    }
 }

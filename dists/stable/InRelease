@@ -1,0 +1,43 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Tue, 15 Sep 2026 01:18:17 +0000
+Description: TuxFlow apt repository
+Label: TuxFlow
+Origin: TuxFlow
+Suite: stable
+MD5Sum:
+ 0a7f824e246e9c121bf5f47344021d5c              174 Release
+ 39ebc31f83daa3e2eb1cee078d9dd9a0             5788 main/binary-amd64/Packages
+ 7541171e04402454fd20078381d9ab93             1641 main/binary-amd64/Packages.gz
+SHA1:
+ 5d56be658df022ade5ac301a651d86d9bf4e0d41              174 Release
+ b10a6f9e5685c158c190fdd7d6145b31bcfbde3d             5788 main/binary-amd64/Packages
+ daac0502b12d0a5e4688254c6f2c2dc664e7077e             1641 main/binary-amd64/Packages.gz
+SHA256:
+ 1b7e1a064e68abef6755b89447eb4d1f742acc801e09e08c2a146c0523d00a4a              174 Release
+ b6419598a40fc2bccedf817fa7bd96843c96f6529953882f88dc0e1d42c9d2eb             5788 main/binary-amd64/Packages
+ 26dc3235ddc35e7b2720be8724caa43e37b519d8700cf6ff4d16cb31eba04c20             1641 main/binary-amd64/Packages.gz
+SHA512:
+ d80b52a8360113f3d8e0e185de8af7b8473fa4a1d14c338c367e82178287f736ab2a5aeeb2a753eb3f76185418e4e1b992e4859fcaefbe0c19a6b5c9c66c784b              174 Release
+ c2ca470f5555f6652a0da3a2d8b7cf42a5534dccb5cf9917c51fb6d2808197efd15d987bc9a9d3220213797cc07785d356ac1188842e507285cd859bf247a424             5788 main/binary-amd64/Packages
+ 31cb4ab62c398bfa51b9bf08f37921cbfc326dd1613404097938137e08f741b1e9867ed67a9fc0a7e86a90afd669975f9a4bce339e65643b5c93a28b8a122153             1641 main/binary-amd64/Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEqxo+L7TfD9cevRPkj/Tpc5uAHMQFAmqonNkACgkQj/Tpc5uA
+HMQspA/+OQhc8/jHZvOl7YLMzIXqU3Tfnq6xlm/Hsew0Lfr7fpS1/mxktugYO6wk
+PEDxRzqSILyj2mlvbkhn8EQWKUETDaZtgP7RBMaAWg0YKwzIfdfusFfUlIyEbjWU
+a8C4sqWrNcm87nMMuRRzDy3i9mDkWLeEcF+4qR+3nAAfr2vdR+aq33JE8NMzbXXO
+q6IDt+OVX1SAZ2xl2Ftr86Hwy4v3MGEeSgWKbUfXdlzSZiLhSP/0BXyUeSkMOq5T
+I/axeVBnzr4wFVzj3EWDUThzR8wbn6T4y19yv3JDwWgvbk8FpU7AX/M9mldbBoP+
+HL682mqda/YxwiSosVITRx6sr8A9+u3AbetrEJsaLUkNUevYIveXaOFJoqAXKSw5
+N8dq+UdbXzsUve90fjnGZoHTVDC/YfoBJ6181jY/Z17gi/mYHn0aMhWpLdCPEecq
+Qe0bzRct5Y/W7c3mI8pojSebImMy6r1s+xEKeORlcKUj0BcWyym6QoE6C35wzJTw
+zme5O6//jyehzycm2rNa1ddL5yylKMMLQDSPOm+QAOmBgnVWtPegWOoD/Z5Dr8Li
+xdogrZBh6Y5Luxb4GOYFLhlD1G5Ad3GemwOx1rdhhNKhhYRChTHvOdSYRvMugvtL
+JR8EeiMEGzFFsYDe0F0Z6Muz/CSJvn0Wq0JMQcL8yfuEhGenJf0=
+=owc9
+-----END PGP SIGNATURE-----

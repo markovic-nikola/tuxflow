@@ -16,13 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Only the retired tuxflow-gtk member needs these; the app itself has
-      # no toolkit dev dependency. Drop this step with that crate.
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

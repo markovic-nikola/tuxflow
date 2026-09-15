@@ -1,5 +1,5 @@
 [workspace]
-members = ["tuxflow-core", "tuxflow-gtk", "vendor/iced_term"]
+members = ["tuxflow-core", "vendor/iced_term"]
 # The spike is a frozen record with its own lockfile; it consumes
 # vendor/iced_term as an external path dep.
 exclude = ["spike"]
@@ -11,8 +11,7 @@ exclude = ["spike"]
 [workspace.package]
 version = "0.1.70"
 
-# The app: the iced shell, built on the vendored iced_term fork. The GTK
-# shell it replaced lives in tuxflow-gtk/ until it is deleted.
+# The app: the iced shell, built on the vendored iced_term fork.
 [package]
 name = "tuxflow"
 version.workspace = true

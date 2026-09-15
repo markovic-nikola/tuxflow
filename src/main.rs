@@ -67,7 +67,7 @@ const FRAME: Duration = Duration::from_millis(16);
 /// The sidebar cluster's slide-in (design round F).
 const HOVER_SLIDE_MS: f32 = 140.0;
 /// The gap a drop target opens on its targeted edge: GTK's 2px border +
-/// 2px padding (style.css `.drop-target-above/-below`).
+/// 2px padding (the GTK stylesheet's `.drop-target-above/-below`).
 const DROP_GAP: f32 = 4.0;
 /// The sidebar's collapse/expand glide. Longer than the hover glide: it
 /// moves the whole window's layout, and Adwaita's own flap takes ~200ms.
@@ -8939,7 +8939,7 @@ fn copyable_path(location: &ProjectLocation) -> String {
     }
 }
 
-/// 1px hairline (style.css alpha(@borders, .3)) — horizontal.
+/// 1px hairline (the GTK stylesheet's alpha(@borders, .3)) — horizontal.
 fn hline() -> Element<'static, Event> {
     container(column![])
         .width(Length::Fill)

@@ -1,4 +1,4 @@
-.PHONY: help dev run run-mcp gtk dev-gtk build build-release test fmt clippy lint deb install uninstall clean release
+.PHONY: help dev run run-mcp build build-release test fmt clippy lint deb install uninstall clean release
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -12,13 +12,6 @@ run: ## Run the app, release (debug misrepresents terminal latency)
 
 run-mcp: ## Run MCP server binary
 	cargo run --bin tuxflow-mcp
-
-gtk: ## Run the retired GTK shell (needs the GTK4/libadwaita/VTE dev packages)
-	cargo run -p tuxflow-gtk
-
-dev-gtk: ## Live reload for the retired GTK shell
-	@command -v cargo-watch >/dev/null 2>&1 || { echo "Install cargo-watch first: cargo install cargo-watch"; exit 1; }
-	cargo watch -x 'run -p tuxflow-gtk'
 
 build: ## Debug build of the app (tuxflow + tuxflow-mcp)
 	cargo build -p tuxflow

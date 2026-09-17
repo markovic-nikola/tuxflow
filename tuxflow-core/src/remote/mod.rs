@@ -784,11 +784,69 @@ pub(crate) fn spawn_reverse_forward(
                 .lines()
                 .map_while(Result::ok)
             {
-                log::error!("{label} {host}: {line}");
+                log::warn!("{label} {host}: {line}");
             }
         });
     }
     Ok(child)
+}
+
+/// How often a reverse forward that never came up is tried again, and the
+/// pause before each retry.
+const FORWARD_RETRY_PAUSES: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(6),
+];
+
+/// Script that waits (≤5 s, host-side, one round trip over the shared
+/// connection) for `remote_socket` to be bound, i.e. for the forward's own
+/// connection to have authenticated. Provisioning removed the socket, so
+/// its existence is the forward's doing.
+fn wait_bound_script(remote_socket: &str) -> String {
+    let sock = sh_quote(remote_socket);
+    format!(
+        "i=0; while [ $i -lt 25 ] && [ ! -S {sock} ]; do sleep 0.2; i=$((i+1)); done; [ -S {sock} ]"
+    )
+}
+
+/// [`spawn_reverse_forward`], confirmed and retried: `provision` (which must
+/// REMOVE the remote socket and report its absolute path) runs before every
+/// attempt, and an attempt counts only once the host shows the socket bound.
+/// A forward is a dedicated connection, and sshd drops new connections at
+/// random once `MaxStartups` unauthenticated ones are in flight — which on an
+/// internet-facing host is not only our doing: brute-force bots park on
+/// port 22 for the whole `LoginGraceTime`. A spawn that merely succeeded says
+/// nothing; the ssh behind it may be reset during key exchange a moment later.
+/// **Blocking — worker threads only.**
+pub(crate) fn bring_up_reverse_forward(
+    host: &str,
+    provision: impl Fn() -> Result<String, String>,
+    local_socket: &std::path::Path,
+    label: &'static str,
+) -> Result<(std::process::Child, String), String> {
+    let mut pauses = FORWARD_RETRY_PAUSES.iter();
+    loop {
+        let attempt = (|| {
+            let remote_socket = provision()?;
+            let mut child = spawn_reverse_forward(host, &remote_socket, local_socket, label)?;
+            let bound = ssh_stream_stdin(host, &wait_bound_script(&remote_socket), &[]).is_ok();
+            if bound && matches!(child.try_wait(), Ok(None)) {
+                Ok((child, remote_socket))
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err("the forward's connection did not come up".to_string())
+            }
+        })();
+        match (attempt, pauses.next()) {
+            (Ok(up), _) => return Ok(up),
+            (Err(e), None) => return Err(e),
+            (Err(e), Some(pause)) => {
+                log::warn!("{label} {host}: {e}; retrying");
+                std::thread::sleep(*pause);
+            }
+        }
+    }
 }
 
 /// The remote half of an explicit stop, as a shell script. Split out from

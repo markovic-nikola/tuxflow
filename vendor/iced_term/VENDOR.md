@@ -433,4 +433,16 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     while the cell advance is the font's own advance, which is exactly
     what spacing breaks. Costs the per-cell path (thousands of fill_text
     calls a frame) only while spacing is non-zero.
+27. **`FocusMarkStyle::Border { width, idle }`** — patch 24's ring, but
+    never absent: `FocusMark::color` while focused, `idle` while not.
+    The other styles paint in ONE focus state and nothing in the other;
+    this one keeps the frame and changes only its strength, so focus
+    moving in or out does not read as something appearing. Drawn
+    OUTSIDE the widget's bounds (`bounds.expand(width)`) — the bounds are
+    the grid, and a 5 px frame inside them covers column 0 and the top of
+    row 0 — so the embedder pads the widget by `width`.
+28. **`FocusMarkStyle::DropTarget { width, dash, outset, wash }`** — a dashed
+    frame (quads; the quad pipeline has no dash pattern) over a wash,
+    painted in BOTH focus states. The embedder swaps it in for the
+    configured mark while a file drag hovers the window.
 

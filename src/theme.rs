@@ -313,6 +313,13 @@ pub const UNFOCUSED_DIM_LSTAR: f32 = 3.5;
 /// Alpha of the accent for the line/ring focus indicators.
 const FOCUS_LINE_ALPHA: f32 = 0.8;
 const FOCUS_RING_ALPHA: f32 = 0.45;
+/// The always-present border: the accent while focused, a toned-down
+/// shade of the terminal background while not.
+const FOCUS_BORDER_WIDTH: f32 = 2.0;
+const FOCUS_BORDER_ALPHA: f32 = 0.15;
+/// How far the idle border sinks from the terminal's own background
+/// toward black — the frame stays, as a shade of the pane itself.
+const FOCUS_BORDER_IDLE_DARKEN: f32 = 0.35;
 
 /// Alpha of a black wash that lowers `bg` by `UNFOCUSED_DIM_LSTAR`. A black
 /// wash at alpha a scales sRGB by (1 − a), i.e. linear luminance by
@@ -369,12 +376,38 @@ pub fn focus_mark(name: &str, accent: Color, scheme: &str) -> Option<iced_term::
             alpha(accent, FOCUS_LINE_ALPHA),
         ),
         "ring" => (FocusMarkStyle::Ring(1.0), alpha(accent, FOCUS_RING_ALPHA)),
+        "border" => (
+            FocusMarkStyle::Border {
+                width: FOCUS_BORDER_WIDTH,
+                idle: mix(
+                    terminal_background(scheme),
+                    Color::BLACK,
+                    FOCUS_BORDER_IDLE_DARKEN,
+                ),
+            },
+            alpha(accent, FOCUS_BORDER_ALPHA),
+        ),
         _ => (
             FocusMarkStyle::Dim,
             alpha(Color::BLACK, dim_alpha_for(terminal_background(scheme))),
         ),
     };
     Some(FocusMark { color, style })
+}
+
+/// The mark a terminal wears while a dragged file hovers the window and a
+/// drop would be delivered to it: dashed accent frame, a breath of accent
+/// over the pane. Replaces the configured indicator for the drag.
+pub fn drop_mark(accent: Color, outset: f32) -> iced_term::FocusMark {
+    iced_term::FocusMark {
+        color: alpha(accent, 0.6),
+        style: iced_term::FocusMarkStyle::DropTarget {
+            width: 2.0,
+            dash: 10.0,
+            outset,
+            wash: alpha(accent, 0.08),
+        },
+    }
 }
 
 /// The terminal scheme's background as a colour.

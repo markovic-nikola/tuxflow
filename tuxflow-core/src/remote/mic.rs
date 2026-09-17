@@ -239,24 +239,16 @@ impl MicBridgeManager {
         Self::default()
     }
 
-    /// Bring up the bridge for `host` if it isn't already running. **Blocking
-    /// (provisioning runs ssh) — call from a worker thread.**
-    pub fn ensure(&mut self, host: &str) -> Result<(), String> {
-        if let Some(bridge) = self.bridges.get_mut(host) {
-            match bridge.child.try_wait() {
-                Ok(None) => return Ok(()), // still up
-                _ => {
-                    self.bridges.remove(host);
-                }
+    /// Whether `host`'s bridge is still running; a dead one is forgotten.
+    fn is_up(&mut self, host: &str) -> bool {
+        match self.bridges.get_mut(host).map(|b| b.child.try_wait()) {
+            Some(Ok(None)) => true,
+            Some(_) => {
+                self.bridges.remove(host);
+                false
             }
+            None => false,
         }
-        ensure_listener()?;
-        let remote_socket = provision(host)?;
-        let child =
-            super::spawn_reverse_forward(host, &remote_socket, &local_socket_path(), "Mic bridge")?;
-        log::info!("Mic bridge up: {host} -> {remote_socket}");
-        self.bridges.insert(host.to_string(), Bridge { child });
-        Ok(())
     }
 
     pub fn close(&mut self, host: &str) {
@@ -300,11 +292,40 @@ fn enabled() -> bool {
     ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Bring up the bridge for `host` if it isn't already running. **Blocking
+/// (ssh, with retries) — the worker thread only**, and never under the
+/// `MANAGER` lock: quit takes it from the UI thread ([`shutdown`]).
 fn ensure_for(host: &str) -> Result<(), String> {
-    let mut manager = MANAGER.lock().unwrap_or_else(|e| e.into_inner());
-    manager.ensure(host).inspect_err(|e| {
-        log::error!("Mic bridge for {host} unavailable: {e}");
-    })
+    let lock = || MANAGER.lock().unwrap_or_else(|e| e.into_inner());
+    if lock().is_up(host) {
+        return Ok(());
+    }
+    let brought_up = ensure_listener().and_then(|()| {
+        super::bring_up_reverse_forward(
+            host,
+            || provision(host),
+            &local_socket_path(),
+            "Mic bridge",
+        )
+    });
+    match brought_up {
+        Ok((mut child, remote_socket)) => {
+            // Switched off (or quit) while the handshake was in flight: a
+            // live microphone must not outlive that.
+            if !enabled() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("bridging was switched off".into());
+            }
+            log::info!("Mic bridge up: {host} -> {remote_socket}");
+            lock().bridges.insert(host.to_string(), Bridge { child });
+            Ok(())
+        }
+        Err(e) => {
+            log::error!("Mic bridge for {host} unavailable: {e}");
+            Err(e)
+        }
+    }
 }
 
 /// Whether bridging is switched on.
@@ -386,8 +407,8 @@ pub fn register_host(host: &str) {
 pub fn set_enabled(on: bool) {
     ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
     if !on {
-        // Off its own thread: this is called from the GTK main thread, and
-        // the lock it needs is held across ssh provisioning. Killing children
+        // Off its own thread: this is called from the UI thread, and
+        // reaping children waits on them. Killing children
         // from another thread is safe — only *spawning* is thread-sensitive
         // (see WORKER). ENABLED is already false, so nothing new starts.
         std::thread::spawn(shutdown);

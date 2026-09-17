@@ -181,31 +181,76 @@ struct Forwards {
     live: HashMap<String, Child>,
 }
 
-impl Forwards {
-    /// **Blocking (provisioning runs ssh) — the worker thread only.**
-    fn ensure(&mut self, key: &str, spec: &ForwardSpec) -> Result<(), String> {
-        if let Some(child) = self.live.get_mut(key) {
-            match child.try_wait() {
-                Ok(None) => return Ok(()), // still up
-                _ => {
-                    self.live.remove(key);
-                }
+/// How often a forward that never came up is tried again, and the pause
+/// before each retry.
+const FORWARD_RETRY_PAUSES: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(6),
+];
+
+/// Script that waits (≤5 s, host-side, one round trip over the shared
+/// connection) for `remote_socket` to be bound, i.e. for the forward's own
+/// connection to have authenticated. Provisioning removed the socket, so
+/// its existence is the forward's doing.
+fn wait_bound_script(remote_socket: &str) -> String {
+    let sock = sh_quote(remote_socket);
+    format!(
+        "i=0; while [ $i -lt 25 ] && [ ! -S {sock} ]; do sleep 0.2; i=$((i+1)); done; [ -S {sock} ]"
+    )
+}
+
+/// Provision, spawn and WAIT until the forward is bound. The wait is what
+/// paces a workspace load: every forward is a dedicated connection, a
+/// connection counts against sshd's `MaxStartups` (10 unauthenticated)
+/// until it has authenticated, and three dozen projects on one host spawned
+/// back to back had most of them reset during key exchange — silently
+/// leaving those projects without MCP, since nothing retried. One handshake
+/// in flight at a time, and a refused one is tried again.
+/// **Blocking — the worker thread only**, and never under the `FORWARDS`
+/// lock (`close` takes it from the UI thread).
+fn bring_up(spec: &ForwardSpec) -> Result<(Child, String), String> {
+    let mut pauses = FORWARD_RETRY_PAUSES.iter();
+    loop {
+        let attempt = (|| {
+            let remote_socket = provision(&spec.host, &spec.project_name, &spec.remote_dir)?;
+            let mut child = crate::remote::spawn_reverse_forward(
+                &spec.host,
+                &remote_socket,
+                std::path::Path::new(&spec.local_socket),
+                "MCP forward",
+            )?;
+            let bound =
+                ssh_stream_stdin(&spec.host, &wait_bound_script(&remote_socket), &[]).is_ok();
+            if bound && matches!(child.try_wait(), Ok(None)) {
+                Ok((child, remote_socket))
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err("the forward's connection did not come up".to_string())
+            }
+        })();
+        match (attempt, pauses.next()) {
+            (Ok(up), _) => return Ok(up),
+            (Err(e), None) => return Err(e),
+            (Err(e), Some(pause)) => {
+                log::warn!("MCP forward for {}: {e}; retrying", spec.project_name);
+                std::thread::sleep(*pause);
             }
         }
-        let remote_socket = provision(&spec.host, &spec.project_name, &spec.remote_dir)?;
-        let child = crate::remote::spawn_reverse_forward(
-            &spec.host,
-            &remote_socket,
-            std::path::Path::new(&spec.local_socket),
-            "MCP forward",
-        )?;
-        log::info!(
-            "MCP forward up: {} -> {remote_socket} ({})",
-            spec.host,
-            spec.local_socket
-        );
-        self.live.insert(key.to_string(), child);
-        Ok(())
+    }
+}
+
+impl Forwards {
+    /// Whether `key`'s forward is still running; a dead one is forgotten.
+    fn is_up(&mut self, key: &str) -> bool {
+        match self.live.get_mut(key).map(|child| child.try_wait()) {
+            Some(Ok(None)) => true,
+            Some(_) => {
+                self.live.remove(key);
+                false
+            }
+            None => false,
+        }
     }
 
     fn close(&mut self, key: &str) {
@@ -237,9 +282,20 @@ static WORKER: std::sync::LazyLock<std::sync::mpsc::Sender<Request>> =
         let (tx, rx) = std::sync::mpsc::channel::<Request>();
         std::thread::spawn(move || {
             for (key, spec) in rx {
-                let mut forwards = FORWARDS.lock().unwrap_or_else(|e| e.into_inner());
-                if let Err(e) = forwards.ensure(&key, &spec) {
-                    log::error!("MCP forward for {} unavailable: {e}", spec.host);
+                let lock = || FORWARDS.lock().unwrap_or_else(|e| e.into_inner());
+                if lock().is_up(&key) {
+                    continue;
+                }
+                match bring_up(&spec) {
+                    Ok((child, remote_socket)) => {
+                        log::info!(
+                            "MCP forward up: {} -> {remote_socket} ({})",
+                            spec.host,
+                            spec.local_socket
+                        );
+                        lock().live.insert(key, child);
+                    }
+                    Err(e) => log::error!("MCP forward for {} unavailable: {e}", spec.host),
                 }
             }
         });

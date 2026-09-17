@@ -569,6 +569,8 @@ struct App {
     /// A (heading, body) message awaiting an OK — GTK's AlertDialog for
     /// things that failed but need no decision.
     notice: Option<(String, String)>,
+    /// A file drag is over the window.
+    file_hover: bool,
     /// The status bar's update chip state.
     update_badge: UpdateBadge,
     /// The update card, when one of its stages is up.
@@ -801,6 +803,16 @@ enum Event {
     /// A Moved event arrived — only ever a trigger for the debounced
     /// save, never a position source (see `window_size` field comment).
     WindowMoved,
+    /// A file dragged from a file manager landed on the window (one event
+    /// per file). Goes to the terminal on the pane: its path typed for a
+    /// local project, uploaded first for a remote one.
+    FileDropped(std::path::PathBuf),
+    /// A file drag entered (true) or left (false) the window — the pane
+    /// says whether it would take the drop.
+    FileHover(bool),
+    /// A dropped file never reached the host — said out loud, since the
+    /// user is otherwise left waiting for a path that will not appear.
+    FileUploadFailed(String),
     WindowCloseRequested(iced::window::Id),
     WindowClose {
         id: iced::window::Id,
@@ -1186,6 +1198,7 @@ impl App {
             git_tick_stamp: 0,
             add_form_epoch: 0,
             notice: None,
+            file_hover: false,
             update_badge: UpdateBadge::Hidden,
             update_card: None,
             update_can_install: false,
@@ -1295,6 +1308,11 @@ impl App {
         // Check for updates in the background, once per launch (15-min
         // cache in core). The install-kind probe (`dpkg -S`) rides the
         // same worker so the card knows its buttons before it opens.
+        if std::env::var("TUXFLOW_UI").as_deref() == Ok("drop") {
+            // Screenshot hook: a file drag that never ends (no XDND source
+            // exists headless).
+            tasks.push(Task::done(Event::FileHover(true)));
+        }
         if std::env::var("TUXFLOW_UI").as_deref() == Ok("update") {
             // Screenshot hook: a fake release, so the chip and the card can
             // be exercised without a newer release existing.
@@ -4130,9 +4148,19 @@ impl App {
 
         Task::perform(
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-                let image = arboard::Clipboard::new()
-                    .and_then(|mut cb| cb.get_image())
-                    .map_err(|e| format!("no image on clipboard: {e}"))?;
+                let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+                let image = match clipboard.get_image() {
+                    Ok(image) => image,
+                    // No image: files copied in a file manager travel the
+                    // same road a dropped one does.
+                    Err(e) => {
+                        let files = clipboard
+                            .get()
+                            .file_list()
+                            .map_err(|_| format!("no image on clipboard: {e}"))?;
+                        return typed_file_paths(host.as_deref(), &files);
+                    }
+                };
                 match (host, is_agent) {
                     (None, true) => {
                         // Local agent: it reads the real clipboard itself.
@@ -4162,6 +4190,46 @@ impl App {
                 term,
                 run,
                 result: joined.unwrap_or_else(|e| Err(format!("paste worker died: {e}"))),
+            },
+        )
+    }
+
+    /// Would a file dropped now reach a terminal? The same grab as the
+    /// chords — under a card or a full-pane view the terminal is not what
+    /// the user is aiming at — and a run to type into. One predicate for
+    /// the drop and for the frame that invites it, so the pane never
+    /// promises a drop it would ignore.
+    fn accepts_file_drop(&self) -> bool {
+        self.notice.is_none()
+            && self.update_card.is_none()
+            && self.confirm.is_none()
+            && self.context_menu.is_none()
+            && !self.full_pane_open()
+            && self.selected_run().is_some()
+    }
+
+    /// Files handed to the terminal on the pane (a drop, or a file-manager
+    /// copy pasted): VTE's behaviour for a local project — the path typed,
+    /// quoted when it needs it — and the same for a remote one after the
+    /// file has been uploaded to the host, so an agent there can read it.
+    /// Rides `ImagePasted`, whose run stamp is exactly the guard needed.
+    fn deliver_files(&mut self, files: Vec<std::path::PathBuf>) -> Task<Event> {
+        let Some((project, term, run)) = self.selected_run() else {
+            return Task::none();
+        };
+        let host = self
+            .active_project()
+            .and_then(|p| p.location.host().map(String::from));
+        Task::perform(
+            tokio::task::spawn_blocking(move || typed_file_paths(host.as_deref(), &files)),
+            move |joined| match joined.unwrap_or_else(|e| Err(format!("upload worker died: {e}"))) {
+                Ok(bytes) => Event::ImagePasted {
+                    project,
+                    term,
+                    run,
+                    result: Ok(bytes),
+                },
+                Err(e) => Event::FileUploadFailed(e),
             },
         )
     }
@@ -4386,6 +4454,23 @@ impl App {
                 self.debounce_geometry_save()
             }
             Event::WindowMoved => self.debounce_geometry_save(),
+            Event::FileUploadFailed(detail) => {
+                log::error!("file upload failed: {detail}");
+                self.notice = Some(("Couldn't send the file".into(), detail));
+                TerminalView::unfocus()
+            }
+            Event::FileHover(over) => {
+                self.file_hover = over;
+                Task::none()
+            }
+            Event::FileDropped(path) => {
+                // One event per file, and no "left" after a drop.
+                self.file_hover = false;
+                if !self.accepts_file_drop() {
+                    return Task::none();
+                }
+                self.deliver_files(vec![path])
+            }
             Event::GeometrySettled(generation) => {
                 if generation != self.geometry_gen {
                     return Task::none();
@@ -5060,6 +5145,15 @@ impl App {
                     let key = self.projects[pidx].key();
                     self.saved.set_expanded(&key, self.projects[pidx].expanded);
                     self.saved.save();
+                    // A project is otherwise activated by selecting one of
+                    // its processes; one with none has only its header, so
+                    // without this its pane — the only place a first
+                    // process can be added from — was unreachable once
+                    // another project held the pane (i.e. after a restart).
+                    if self.projects[pidx].entries.is_empty() && self.active != pidx {
+                        self.active = pidx;
+                        return self.poll_git_fetch();
+                    }
                 }
                 Task::none()
             }
@@ -7706,21 +7800,14 @@ impl App {
         }
 
         let Some(project) = self.active_project() else {
-            return container(
-                column![
-                    text("No projects yet").size(14).color(pal().dim),
-                    button(text("+ Add Project").size(13))
-                        .padding([7, 16])
-                        .style(theme::primary(LOCAL_ACCENT))
-                        .on_press(Event::OpenAddProject),
-                ]
-                .spacing(14)
-                .align_x(iced::Alignment::Center),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(theme::pane)
-            .into();
+            return welcome_pane(
+                "No projects yet",
+                button(text("+ Add Project").size(13))
+                    .padding([7, 16])
+                    .style(theme::primary(LOCAL_ACCENT))
+                    .on_press(Event::OpenAddProject)
+                    .into(),
+            );
         };
         let remote = project.location.is_remote();
         let accent = accent_for(remote);
@@ -7759,34 +7846,27 @@ impl App {
         }
 
         let Some(entry) = project.entries.get(project.selected) else {
-            return container(
-                column![
-                    text("No processes").size(14).color(pal().dim),
-                    row![
-                        button(text("+ Command").size(12))
-                            .padding([6, 14])
-                            .style(theme::primary(accent))
-                            .on_press(Event::OpenAddCommand {
-                                project: project.id,
-                                agent: false,
-                            }),
-                        button(text("+ Agent").size(12))
-                            .padding([6, 14])
-                            .style(theme::primary(accent))
-                            .on_press(Event::OpenAddCommand {
-                                project: project.id,
-                                agent: true,
-                            }),
-                    ]
-                    .spacing(8),
+            return welcome_pane(
+                "No processes",
+                row![
+                    button(text("+ Command").size(12))
+                        .padding([6, 14])
+                        .style(theme::primary(accent))
+                        .on_press(Event::OpenAddCommand {
+                            project: project.id,
+                            agent: false,
+                        }),
+                    button(text("+ Agent").size(12))
+                        .padding([6, 14])
+                        .style(theme::primary(accent))
+                        .on_press(Event::OpenAddCommand {
+                            project: project.id,
+                            agent: true,
+                        }),
                 ]
-                .spacing(14)
-                .align_x(iced::Alignment::Center),
-            )
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .style(theme::pane)
-            .into();
+                .spacing(8)
+                .into(),
+            );
         };
 
         let body: Element<'_, Event> = match &entry.terminal {
@@ -7800,22 +7880,32 @@ impl App {
             // BEFORE delegating: the terminal captures every press, and a
             // stock mouse_area returns before its own handlers on a
             // captured event — it would never see the click.
-            Some(term) => dnd::DragArea::new(
-                container(
-                    TerminalView::show_marked(
-                        term,
-                        theme::focus_mark(
-                            &self.settings.appearance.focus_indicator,
-                            accent,
-                            &self.settings.appearance.terminal_theme,
-                        ),
-                    )
-                    .map(Event::Terminal),
-                )
-                .style(theme::terminal_pane(
+            Some(term) => dnd::DragArea::new({
+                let mark = theme::focus_mark(
+                    &self.settings.appearance.focus_indicator,
+                    accent,
                     &self.settings.appearance.terminal_theme,
-                )),
-            )
+                );
+                // The border indicator is painted around the grid, not
+                // over it; this is the room it paints into. Padding, not a
+                // wrapper — the tree keeps its shape across the setting.
+                let frame = match mark.map(|m| m.style) {
+                    Some(iced_term::FocusMarkStyle::Border { width, .. }) => width,
+                    _ => 0.0,
+                };
+                // A hovering file drag swaps the mark, never the padding:
+                // resizing the grid mid-drag would reflow the program.
+                let mark = if self.file_hover && self.accepts_file_drop() {
+                    Some(theme::drop_mark(accent, frame))
+                } else {
+                    mark
+                };
+                container(TerminalView::show_marked(term, mark).map(Event::Terminal))
+                    .padding(frame)
+                    .style(theme::terminal_pane(
+                        &self.settings.appearance.terminal_theme,
+                    ))
+            })
             .on_press(|_| Event::TerminalPressed)
             .into(),
             // Only before a process's FIRST run: from then on its terminal
@@ -7823,16 +7913,20 @@ impl App {
             // exit banner, which is where the status is spelled out.
             None => {
                 let label = match entry.status {
-                    Status::Crashed(_) => {
-                        String::from("Could not start \u{2014} check the command")
-                    }
-                    _ => String::from("Not running"),
+                    Status::Crashed(_) => "Could not start \u{2014} check the command",
+                    _ => "Not running",
                 };
-                container(text(label).size(13).color(pal().dim))
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill)
-                    .style(theme::pane)
-                    .into()
+                welcome_pane(
+                    label,
+                    button(text("\u{25b6} Start").size(12))
+                        .padding([6, 14])
+                        .style(theme::primary(accent))
+                        .on_press(Event::Start {
+                            project: project.id,
+                            index: project.selected,
+                        })
+                        .into(),
+                )
             }
         };
 
@@ -9135,6 +9229,15 @@ impl App {
             iced::window::resize_events().map(|(_, size)| Event::WindowResized(size)),
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Window(iced::window::Event::Moved(_)) => Some(Event::WindowMoved),
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(Event::FileDropped(path))
+                }
+                iced::Event::Window(iced::window::Event::FileHovered(_)) => {
+                    Some(Event::FileHover(true))
+                }
+                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                    Some(Event::FileHover(false))
+                }
                 // Tracked continuously because a right-press event carries
                 // no position — this is where its context menu opens.
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
@@ -9165,6 +9268,31 @@ impl App {
             iced::window::close_requests().map(Event::WindowCloseRequested),
         ])
     }
+}
+
+/// The bytes to type for `files`: each path as the machine running the
+/// terminal sees it — uploaded first when that machine is `host`.
+/// Blocking — call from a worker.
+fn typed_file_paths(host: Option<&str>, files: &[std::path::PathBuf]) -> Result<Vec<u8>, String> {
+    let mut typed = String::new();
+    for (i, file) in files.iter().enumerate() {
+        let path = match host {
+            Some(host) => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+                    + i as u128;
+                let path = remote::upload_file(host, file, stamp)?;
+                log::info!("file upload: {} → {host}:{path}", file.display());
+                path
+            }
+            None => file.display().to_string(),
+        };
+        typed.push_str(&remote::typed_path(&path));
+        typed.push(' ');
+    }
+    Ok(typed.into_bytes())
 }
 
 /// Which palette Settings → Color Scheme asks for: "light", "dark", or
@@ -9453,6 +9581,7 @@ fn vline() -> Element<'static, Event> {
 // assets/icons/README.md) so the shells share the exact glyphs.
 const ICON_SIDEBAR: &[u8] = include_bytes!("../assets/icons/sidebar-show-symbolic.svg");
 const ICON_FIND: &[u8] = include_bytes!("../assets/icons/edit-find-symbolic.svg");
+const ICON_LOGO: &[u8] = include_bytes!("../assets/icons/tuxflow-logo-symbolic.svg");
 const ICON_GEAR: &[u8] = include_bytes!("../assets/icons/emblem-system-symbolic.svg");
 const ICON_ADD: &[u8] = include_bytes!("../assets/icons/list-add-symbolic.svg");
 const ICON_PLAY: &[u8] = include_bytes!("../assets/icons/media-playback-start-symbolic.svg");
@@ -9470,6 +9599,25 @@ fn symbolic(bytes: &'static [u8], px: f32, tint: iced::Color) -> iced::widget::s
         .width(px)
         .height(px)
         .style(move |_, _| iced::widget::svg::Style { color: Some(tint) })
+}
+
+/// The pane with nothing to show — GTK's welcome StatusPage: the logo,
+/// dimmed like a symbolic icon there, over what is missing and the way to
+/// add it.
+fn welcome_pane<'a>(message: &'a str, actions: Element<'a, Event>) -> Element<'a, Event> {
+    container(
+        column![
+            symbolic(ICON_LOGO, 224.0, pal().dim.scale_alpha(0.45)),
+            text(message).size(14).color(pal().dim),
+            actions,
+        ]
+        .spacing(14)
+        .align_x(iced::Alignment::Center),
+    )
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .style(theme::pane)
+    .into()
 }
 
 /// Hang a tooltip on anything. GTK's icon-only chips are unreadable

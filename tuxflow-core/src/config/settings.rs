@@ -120,6 +120,10 @@ pub const FOCUS_INDICATOR_CHOICES: &[(&str, &str)] = &[
     ("top", "Accent line along the top edge"),
     ("left", "Accent line along the left edge"),
     ("ring", "Accent ring around the pane"),
+    (
+        "border",
+        "Accent border, fading into the pane when unfocused",
+    ),
     ("none", "None"),
 ];
 

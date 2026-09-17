@@ -43,6 +43,25 @@ pub enum FocusMarkStyle {
     Ring(f32),
     /// A wash of `color` over the pane while UNfocused (dim inactive).
     Dim,
+    /// A border that never leaves: `color` while focused, `idle` while
+    /// not — the pane keeps its frame and only the frame's strength says
+    /// where the keys go. Painted OUTSIDE the widget's bounds, which are
+    /// the grid: at any real width a frame inside them covers the first
+    /// column and row. The embedder reserves the room (padding of `width`
+    /// around the widget, unclipped).
+    Border { width: f32, idle: iced::Color },
+    /// "Drop it here": a dashed frame of `color` over a `wash` of the
+    /// pane, whatever the focus — a drag from another window leaves this
+    /// one unfocused. `outset` is the room the embedder already keeps
+    /// around the widget (see `Border`); the frame sits out there when
+    /// there is some and over the edge cells when there is none, which a
+    /// mark that lasts one drag can afford.
+    DropTarget {
+        width: f32,
+        dash: f32,
+        outset: f32,
+        wash: iced::Color,
+    },
 }
 
 pub struct TerminalView<'a> {
@@ -1026,6 +1045,24 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
             let paint = |renderer: &mut iced::Renderer, b: Rectangle| {
                 renderer.fill_quad(quad(b), mark.color);
             };
+            let ring = |renderer: &mut iced::Renderer,
+                        bounds: Rectangle,
+                        width: f32,
+                        color| {
+                renderer.fill_quad(
+                    Quad {
+                        bounds,
+                        border: iced_core::Border {
+                            color,
+                            width,
+                            radius: 0.0.into(),
+                        },
+                        shadow: iced_core::Shadow::default(),
+                        snap: true,
+                    },
+                    iced::Color::TRANSPARENT,
+                );
+            };
             match (mark.style, cursor_focused) {
                 (FocusMarkStyle::TopLine(w), true) => {
                     paint(
@@ -1040,21 +1077,59 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                     paint(renderer, Rectangle { width: w, ..bounds });
                 },
                 (FocusMarkStyle::Ring(w), true) => {
-                    renderer.fill_quad(
-                        Quad {
-                            bounds,
-                            border: iced_core::Border {
-                                color: mark.color,
-                                width: w,
-                                radius: 0.0.into(),
-                            },
-                            shadow: iced_core::Shadow::default(),
-                            snap: true,
-                        },
-                        iced::Color::TRANSPARENT,
-                    );
+                    ring(renderer, bounds, w, mark.color)
                 },
+                (FocusMarkStyle::Border { width, idle }, focused) => ring(
+                    renderer,
+                    bounds.expand(width),
+                    width,
+                    if focused { mark.color } else { idle },
+                ),
                 (FocusMarkStyle::Dim, false) => paint(renderer, bounds),
+                (
+                    FocusMarkStyle::DropTarget {
+                        width,
+                        dash,
+                        outset,
+                        wash,
+                    },
+                    _,
+                ) => {
+                    renderer.fill_quad(quad(bounds), wash);
+                    let bounds = bounds.expand(outset);
+                    let mut x = bounds.x;
+                    while x < bounds.x + bounds.width {
+                        let w = dash.min(bounds.x + bounds.width - x);
+                        for y in [bounds.y, bounds.y + bounds.height - width] {
+                            paint(
+                                renderer,
+                                Rectangle {
+                                    x,
+                                    y,
+                                    width: w,
+                                    height: width,
+                                },
+                            );
+                        }
+                        x += dash * 2.0;
+                    }
+                    let mut y = bounds.y;
+                    while y < bounds.y + bounds.height {
+                        let h = dash.min(bounds.y + bounds.height - y);
+                        for x in [bounds.x, bounds.x + bounds.width - width] {
+                            paint(
+                                renderer,
+                                Rectangle {
+                                    x,
+                                    y,
+                                    width,
+                                    height: h,
+                                },
+                            );
+                        }
+                        y += dash * 2.0;
+                    }
+                },
                 _ => {},
             }
         }

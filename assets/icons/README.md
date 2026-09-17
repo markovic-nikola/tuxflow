@@ -25,8 +25,10 @@ Status bar:
 - `edit-clear-symbolic.svg` — clear the terminal
 - `external-link-symbolic.svg` — open the detected URL
 
-Two are TuxFlow's own, MIT like the rest of the app, not Adwaita copies:
+Three are TuxFlow's own, MIT like the rest of the app, not Adwaita copies:
 
+- `tuxflow-logo-symbolic.svg` — the logo on the empty pane (the GTK
+  welcome page's icon, restored from `1db72a9`)
 - `tuxflow-remote-symbolic.svg` (app-namespaced so a user's icon theme
   can't override the glyph, copied from `data/icons/`) marks a project
   that lives on an ssh host.

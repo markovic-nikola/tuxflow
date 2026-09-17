@@ -8,7 +8,7 @@ pub mod probe;
 pub mod tunnel;
 pub mod vite;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Where a project's files live. Everything that touches the project
 /// filesystem or spawns its processes dispatches on this.
@@ -632,9 +632,54 @@ pub fn stage_clipboard_image(host: &str, remote_path: &str) -> Result<(), String
 /// /tmp guarantees nothing outlives a reboot. `stamp` disambiguates
 /// concurrent uploads. Blocking — call from a worker thread.
 pub fn upload_temp_image(host: &str, png: &[u8], stamp: u128) -> Result<String, String> {
-    let path = format!("/tmp/.tuxflow-img-{stamp}.png");
-    let script = format!("cat > {p} && echo {p}", p = sh_quote(&path));
-    ssh_stream_stdin(host, &script, png)
+    upload_to(host, &format!("/tmp/.tuxflow-img-{stamp}.png"), png)
+}
+
+/// Remote path a dropped or pasted local file uploads to: a per-upload
+/// directory under /tmp with the file's OWN name inside it — agents judge a
+/// document by its name and extension, which a stamped flat name would
+/// destroy. Control characters are flattened because the path is typed into
+/// a terminal afterwards, where a newline would submit half of it.
+pub fn dropped_file_remote_path(local: &Path, stamp: u128) -> String {
+    let name: String = local
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into())
+        .chars()
+        .map(|c| if c.is_control() || c == '/' { '_' } else { c })
+        .collect();
+    format!("/tmp/.tuxflow-drop-{stamp}/{name}")
+}
+
+/// Upload a local file to `host` (see [`dropped_file_remote_path`]) and
+/// return the remote path. The whole file is read into memory — this is the
+/// documents-and-screenshots bridge, not rsync. Blocking — call from a
+/// worker thread.
+pub fn upload_file(host: &str, local: &Path, stamp: u128) -> Result<String, String> {
+    let bytes = std::fs::read(local).map_err(|e| format!("{}: {e}", local.display()))?;
+    upload_to(host, &dropped_file_remote_path(local, stamp), &bytes)
+}
+
+/// Write `bytes` to `path` on `host`, creating its directory; echoes the
+/// path back as the success value.
+fn upload_to(host: &str, path: &str, bytes: &[u8]) -> Result<String, String> {
+    let script = format!(
+        "mkdir -p \"$(dirname {p})\" && cat > {p} && echo {p}",
+        p = sh_quote(path)
+    );
+    ssh_stream_stdin(host, &script, bytes)
+}
+
+/// `path` as it should be TYPED into a terminal: bare when every character
+/// is shell-inert, single-quoted otherwise (what VTE did for a dropped
+/// file, and what agents un-quote on their side).
+pub fn typed_path(path: &str) -> String {
+    let inert = |c: char| c.is_ascii_alphanumeric() || "/._-+@%,:=".contains(c);
+    if !path.is_empty() && path.chars().all(inert) {
+        path.to_string()
+    } else {
+        sh_quote(path)
+    }
 }
 
 /// Run `script` on `host` with `stdin_bytes` streamed to its stdin; returns
@@ -816,6 +861,22 @@ pub fn remote_kill(host: &str, pidfile: &str, tmux_session: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    /// The name survives (agents read the extension), nothing in it can
+    /// break out of the directory or submit the typed line early.
+    #[test]
+    fn dropped_file_keeps_its_name_and_types_safely() {
+        use super::{dropped_file_remote_path, typed_path};
+        use std::path::Path;
+        let path = dropped_file_remote_path(Path::new("/home/u/Q3 report.pdf"), 7);
+        assert_eq!(path, "/tmp/.tuxflow-drop-7/Q3 report.pdf");
+        assert_eq!(typed_path(&path), "'/tmp/.tuxflow-drop-7/Q3 report.pdf'");
+        assert_eq!(typed_path("/tmp/a-b_c.txt"), "/tmp/a-b_c.txt");
+        assert_eq!(
+            dropped_file_remote_path(Path::new("/x/a\nb.txt"), 1),
+            "/tmp/.tuxflow-drop-1/a_b.txt"
+        );
+        assert_eq!(typed_path("it's"), "'it'\\''s'");
+    }
 
     /// The cap is the whole point: without it a workspace load opened one ssh
     /// channel per project and sshd refused everything past MaxSessions.

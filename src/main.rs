@@ -345,6 +345,21 @@ struct Attachment {
     thumb: iced::widget::image::Handle,
 }
 
+/// One release check on a worker (15-min cache in core). The install-kind
+/// probe (`dpkg -S`) rides the same worker so the card knows its buttons
+/// before it opens.
+fn update_check_task() -> Task<Event> {
+    Task::perform(
+        tokio::task::spawn_blocking(|| {
+            let info = update::check_for_update(VERSION)?;
+            let can_install =
+                info.deb_url.is_some() && matches!(update::install_kind(), InstallKind::Deb);
+            Some((info, can_install))
+        }),
+        |joined| Event::UpdateChecked(joined.ok().flatten()),
+    )
+}
+
 /// Serve the single-instance socket: each accepted connection is one
 /// launch's keys. Ends at once when this process is not the instance.
 fn instance_stream() -> impl iced::futures::Stream<Item = Vec<String>> + Send {
@@ -1032,9 +1047,12 @@ enum Event {
     /// Status-bar Clear: empty the selected terminal's grid, child intact.
     ClearTerminal,
     NoticeDismiss,
-    /// The once-per-launch release check answered (a newer version, or
-    /// nothing). Carries whether this binary can be upgraded in place.
+    /// A release check answered (a newer version, or nothing). Carries
+    /// whether this binary can be upgraded in place.
     UpdateChecked(Option<(UpdateInfo, bool)>),
+    /// `update::RECHECK_INTERVAL` after the last answer: ask again, so a
+    /// window open for days still learns about a release.
+    UpdateRecheck,
     /// The 30 s readlink of /proc/self/exe (release builds only).
     BinaryReplacedTick,
     /// The status-bar chip was clicked.
@@ -1335,9 +1353,8 @@ impl App {
             tokio::time::sleep(MCP_HEALTH_INTERVAL),
             |_| Event::McpHealthTick,
         ));
-        // Check for updates in the background, once per launch (15-min
-        // cache in core). The install-kind probe (`dpkg -S`) rides the
-        // same worker so the card knows its buttons before it opens.
+        // Check for updates in the background: now, then again every
+        // `update::RECHECK_INTERVAL` (each answer schedules the next).
         if std::env::var("TUXFLOW_UI").as_deref() == Ok("drop") {
             // Screenshot hook: a file drag that never ends (no XDND source
             // exists headless).
@@ -1356,15 +1373,7 @@ impl App {
                 false,
             )))));
         } else {
-            tasks.push(Task::perform(
-                tokio::task::spawn_blocking(|| {
-                    let info = update::check_for_update(VERSION)?;
-                    let can_install = info.deb_url.is_some()
-                        && matches!(update::install_kind(), InstallKind::Deb);
-                    Some((info, can_install))
-                }),
-                |joined| Event::UpdateChecked(joined.ok().flatten()),
-            ));
+            tasks.push(update_check_task());
         }
         // Watch for the binary being replaced underneath us (GTK's 30 s
         // poll): a release installed by the system's software manager
@@ -5407,8 +5416,16 @@ impl App {
                     self.update_can_install = can_install;
                     self.update_badge = UpdateBadge::Available(info);
                 }
-                Task::none()
+                // A pending restart ends the chain: nothing a later check
+                // finds could be shown until the relaunch, which checks.
+                if matches!(self.update_badge, UpdateBadge::RestartRequired) {
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(update::RECHECK_INTERVAL), |_| {
+                    Event::UpdateRecheck
+                })
             }
+            Event::UpdateRecheck => update_check_task(),
             Event::BinaryReplacedTick => {
                 if update::binary_replaced() {
                     log::info!("binary replaced on disk; prompting for restart");

@@ -31,6 +31,13 @@ pub struct UpdateInfo {
 /// real usefulness to save nothing.
 const CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
+/// How often a RUNNING app asks again. The launch check alone leaves a window
+/// that stays open for days blind to every release published after it started
+/// — unless something else installs the package, nothing ever lights the chip.
+/// Hours, not minutes: nobody is waiting on this one, and it must stay longer
+/// than `CHECK_INTERVAL` or a re-check would only ever re-read the cache.
+pub const RECHECK_INTERVAL: Duration = Duration::from_secs(3 * 60 * 60);
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Cached {
     checked_at: u64,

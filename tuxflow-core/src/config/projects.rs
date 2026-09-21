@@ -22,6 +22,11 @@ pub struct SavedProjects {
     pub deleted_processes: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub custom_commands: BTreeMap<String, Vec<ProcessConfig>>,
+    /// Names stack detection had ALREADY offered when the project was first
+    /// loaded — the baseline [`Self::withhold_new_detections`] judges a
+    /// later detection against. No entry = not baselined yet.
+    #[serde(default)]
+    pub known_detected: BTreeMap<String, Vec<String>>,
     /// Unix seconds of the last user-visible activity (a process starting)
     /// per project. Drives the sidebar's "recently used first" sort.
     #[serde(default)]
@@ -144,6 +149,7 @@ impl SavedProjects {
         self.expanded.remove(dir);
         self.deleted_processes.remove(dir);
         self.custom_commands.remove(dir);
+        self.known_detected.remove(dir);
         self.save();
     }
 
@@ -240,6 +246,30 @@ impl SavedProjects {
         self.deleted_processes
             .get(dir)
             .is_some_and(|list| list.iter().any(|n| n == process_name))
+    }
+
+    /// Drop from a fresh DETECTION list whatever the project's baseline has
+    /// never seen, so the sidebar changes only when the user changes it.
+    ///
+    /// Detection reads files the user keeps editing: a Makefile written
+    /// after the project was added — with a hand-picked command list —
+    /// came back on the next launch as nineteen uninvited `make …` rows.
+    /// What is withheld is not lost: it stays in the detection pool, which
+    /// is exactly what Edit Project lists under "Detected", one switch away.
+    /// Enabling there persists a custom command, and those never pass
+    /// through here. The first load of a project records the baseline (and
+    /// withholds nothing); it never grows afterwards, or a withheld name
+    /// would walk in on the launch after. Not for an authored `tuxflow.toml`
+    /// list — that one IS the user's change.
+    pub fn withhold_new_detections(&mut self, dir: &str, detected: &mut Vec<ProcessConfig>) {
+        match self.known_detected.get(dir) {
+            Some(known) => detected.retain(|c| known.contains(&c.name)),
+            None => {
+                let names = detected.iter().map(|c| c.name.clone()).collect();
+                self.known_detected.insert(dir.to_string(), names);
+                self.save();
+            }
+        }
     }
 
     pub fn add_custom_command(&mut self, dir: &str, config: ProcessConfig) {

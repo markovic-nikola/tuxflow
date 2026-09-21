@@ -16,7 +16,7 @@
 //! PDEATHSIG (see [`super::super::remote::spawn_reverse_forward`]), so it
 //! cannot outlive the app that answers on it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Child;
 
 use crate::remote::{sh_quote, ssh_stream_stdin};
@@ -164,6 +164,57 @@ fn provision(host: &str, project_name: &str, remote_dir: &str) -> Result<String,
     ssh_stream_stdin(host, &script, &[])
 }
 
+/// Asks each of a host's sockets the one question that matters — does a
+/// TuxFlow ANSWER on it — and prints the names that fail. A connect is not
+/// enough: sshd accepts on a forward whose far end went to sleep and then
+/// says nothing, so the probe sends an MCP `initialize` and waits for the
+/// first byte of a reply. Names arrive as arguments, one thread each (a
+/// dead one costs its whole timeout).
+const PROBE: &str = r#"import os, socket, sys, threading
+D = os.path.expanduser("~/.cache/tuxflow/mcp")
+INIT = b'{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"tuxflow-probe","version":"0"}}}\n'
+dead = []
+
+
+def probe(name):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    try:
+        s.connect(os.path.join(D, name + ".sock"))
+        s.sendall(INIT)
+        if s.recv(1):
+            return
+    except OSError:
+        pass
+    finally:
+        s.close()
+    dead.append(name)
+
+
+threads = [threading.Thread(target=probe, args=(n,)) for n in sys.argv[1:]]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+print("\n".join(dead))
+"#;
+
+/// The probe's text, for tests that run it against a local server.
+pub fn probe_script() -> &'static str {
+    PROBE
+}
+
+/// Which of `names` (sanitized) have no TuxFlow answering on `host`. `Err`
+/// means the host could not be asked — NOT that everything is dead; a link
+/// that is down has nothing to be re-raised over.
+/// **Blocking (ssh) — worker thread only.**
+fn dead_sockets(host: &str, names: &[String]) -> Result<Vec<String>, String> {
+    let args: Vec<String> = names.iter().map(|n| sh_quote(n)).collect();
+    let script = format!("python3 - {}", args.join(" "));
+    let out = ssh_stream_stdin(host, &script, PROBE.as_bytes())?;
+    Ok(out.lines().map(str::to_string).collect())
+}
+
 /// What one forward needs to exist.
 #[derive(Clone, Debug)]
 pub struct ForwardSpec {
@@ -179,6 +230,14 @@ pub struct ForwardSpec {
 #[derive(Default)]
 struct Forwards {
     live: HashMap<String, Child>,
+    /// Keys whose project still wants a forward. `close` clears it, and the
+    /// worker reads it on both sides of a bring-up: that takes seconds, and
+    /// a project closed meanwhile must not be handed a forward nobody will
+    /// ever tear down.
+    wanted: HashSet<String>,
+    /// Hosts with a health check queued or running — the check is
+    /// periodic, and a slow host must not grow a queue of them.
+    checking: HashSet<String>,
 }
 
 /// Provision, spawn and WAIT until the forward is bound
@@ -213,6 +272,12 @@ impl Forwards {
     }
 
     fn close(&mut self, key: &str) {
+        self.wanted.remove(key);
+        self.kill(key);
+    }
+
+    /// End `key`'s ssh, leaving whether the project wants one alone.
+    fn kill(&mut self, key: &str) {
         if let Some(mut child) = self.live.remove(key) {
             let _ = child.kill();
             let _ = child.wait();
@@ -231,30 +296,82 @@ impl Forwards {
 static FORWARDS: std::sync::LazyLock<std::sync::Mutex<Forwards>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Requests to bring a forward up, served by one long-lived thread — the
-/// forward's PDEATHSIG is bound to the thread that spawned it (see
-/// `mic.rs`), and provisioning runs ssh, which must not block the UI.
-type Request = (String, ForwardSpec);
+/// Served by one long-lived thread — the forward's PDEATHSIG is bound to
+/// the thread that spawned it (see `mic.rs`), and provisioning runs ssh,
+/// which must not block the UI.
+enum Request {
+    Ensure(String, ForwardSpec),
+    Check(String, Vec<(String, ForwardSpec)>),
+}
+
+fn forwards() -> std::sync::MutexGuard<'static, Forwards> {
+    FORWARDS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Bring `key`'s forward up unless the project went away, before or during.
+fn raise(key: String, spec: &ForwardSpec) {
+    if !forwards().wanted.contains(&key) {
+        return;
+    }
+    match bring_up(spec) {
+        Ok((mut child, remote_socket)) => {
+            let mut forwards = forwards();
+            if forwards.wanted.contains(&key) {
+                log::info!(
+                    "MCP forward up: {} -> {remote_socket} ({})",
+                    spec.host,
+                    spec.local_socket
+                );
+                forwards.live.insert(key, child);
+            } else {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        Err(e) => log::error!("MCP forward for {} unavailable: {e}", spec.host),
+    }
+}
+
+/// Re-raise the forwards of `specs` whose host socket nobody answers on.
+/// A running ssh proves nothing here: the socket path is per PROJECT, so a
+/// second machine opening the same project takes the path over (its
+/// provisioning unlinks ours) and leaves it dead when it sleeps or quits,
+/// all while our own ssh stays healthy. Hence the question goes to the
+/// socket, and a live answer — whoever gives it — is left alone, so two
+/// machines do not take the path from each other in turns.
+fn check(host: &str, specs: Vec<(String, ForwardSpec)>) {
+    let names: Vec<String> = specs
+        .iter()
+        .map(|(_, spec)| sanitize_name(&spec.project_name))
+        .collect();
+    let dead = match dead_sockets(host, &names) {
+        Ok(dead) => dead,
+        Err(e) => return log::debug!("MCP health check on {host} skipped: {e}"),
+    };
+    for ((key, spec), name) in specs.into_iter().zip(names) {
+        if dead.contains(&name) {
+            log::warn!("MCP socket for {name} on {host} is dead; re-raising");
+            forwards().kill(&key);
+            raise(key, &spec);
+        }
+    }
+}
 
 static WORKER: std::sync::LazyLock<std::sync::mpsc::Sender<Request>> =
     std::sync::LazyLock::new(|| {
         let (tx, rx) = std::sync::mpsc::channel::<Request>();
         std::thread::spawn(move || {
-            for (key, spec) in rx {
-                let lock = || FORWARDS.lock().unwrap_or_else(|e| e.into_inner());
-                if lock().is_up(&key) {
-                    continue;
-                }
-                match bring_up(&spec) {
-                    Ok((child, remote_socket)) => {
-                        log::info!(
-                            "MCP forward up: {} -> {remote_socket} ({})",
-                            spec.host,
-                            spec.local_socket
-                        );
-                        lock().live.insert(key, child);
+            for request in rx {
+                match request {
+                    Request::Ensure(key, spec) => {
+                        if !forwards().is_up(&key) {
+                            raise(key, &spec);
+                        }
                     }
-                    Err(e) => log::error!("MCP forward for {} unavailable: {e}", spec.host),
+                    Request::Check(host, specs) => {
+                        check(&host, specs);
+                        forwards().checking.remove(&host);
+                    }
                 }
             }
         });
@@ -264,7 +381,20 @@ static WORKER: std::sync::LazyLock<std::sync::mpsc::Sender<Request>> =
 /// Bring the forward for `key` up (or back up — a dead ssh is replaced).
 /// Non-blocking: queued to the worker.
 pub fn ensure(key: &str, spec: ForwardSpec) {
-    let _ = WORKER.send((key.to_string(), spec));
+    forwards().wanted.insert(key.to_string());
+    let _ = WORKER.send(Request::Ensure(key.to_string(), spec));
+}
+
+/// Verify `host`'s forwards end to end and re-raise the dead ones — what
+/// brings MCP back after an outage without the app being restarted (the
+/// agents outlive the link in tmux, so nothing else would). One ssh round
+/// trip per call; a call made while the host's last one is still pending
+/// is dropped. Non-blocking: queued to the worker.
+pub fn check_host(host: &str, specs: Vec<(String, ForwardSpec)>) {
+    if specs.is_empty() || !forwards().checking.insert(host.to_string()) {
+        return;
+    }
+    let _ = WORKER.send(Request::Check(host.to_string(), specs));
 }
 
 /// Tear `key`'s forward down and remove its socket files on the host,
@@ -272,10 +402,7 @@ pub fn ensure(key: &str, spec: ForwardSpec) {
 /// spawning is thread-sensitive); the host-side rm is its own short ssh
 /// on a throwaway thread, so a closing project never waits on the link.
 pub fn close(key: &str, host: &str, project_name: &str) {
-    FORWARDS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .close(key);
+    forwards().close(key);
     let host = host.to_string();
     let name = sanitize_name(project_name);
     std::thread::spawn(move || {
@@ -293,10 +420,7 @@ pub fn close(key: &str, host: &str, project_name: &str) {
 /// socket files are left behind on purpose — quitting must not wait on N
 /// ssh round trips — and the shim skips a socket nothing answers on.
 pub fn shutdown() {
-    FORWARDS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .close_all();
+    forwards().close_all();
 }
 
 #[cfg(test)]

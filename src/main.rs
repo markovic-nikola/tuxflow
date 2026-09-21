@@ -745,6 +745,13 @@ enum UpdateCard {
 /// whether it's worth retrying.
 type ProbeResult = Result<ProbeOk, (String, bool)>;
 
+fn flatten_stacks(stacks: Vec<detector::DetectedStack>) -> Vec<ProcessConfig> {
+    stacks
+        .into_iter()
+        .flat_map(|s| s.suggested_processes)
+        .collect()
+}
+
 /// The probe's payload — a struct rather than a tuple because the icon made
 /// it four wide and `p.2` stopped saying anything.
 #[derive(Debug, Clone)]
@@ -753,6 +760,9 @@ struct ProbeOk {
     /// What the project loads with: an authored `tuxflow.toml`'s processes,
     /// or the CONSERVATIVE detection subset.
     configs: Vec<ProcessConfig>,
+    /// `configs` came from a `tuxflow.toml`, so it is not held to the
+    /// project's detection baseline (`load_local_configs`' flag).
+    authored: bool,
     /// Everything detection found, conservative or not — the pool Edit
     /// Project resolves the Hidden group from (see `detected_full`).
     detected_full: Vec<ProcessConfig>,
@@ -1157,6 +1167,12 @@ enum Event {
     /// full-pane view.
     OpenEditProject(u64),
     EditProjectMsg(edit_project::Msg),
+    /// A remote project's live re-detection for its open Edit Project form.
+    EditProjectDetected {
+        project: u64,
+        stamp: u64,
+        full: Vec<ProcessConfig>,
+    },
 }
 
 impl App {
@@ -1402,7 +1418,7 @@ impl App {
 
         match project.location.clone() {
             ProjectLocation::Local(dir) => {
-                let (name, configs) = processes::load_local_configs(&dir);
+                let (name, mut load, authored) = processes::load_local_configs(&dir);
                 if self.saved.get_name(key).is_none() {
                     project.name = name;
                 }
@@ -1415,8 +1431,11 @@ impl App {
                     Some(&dir),
                     None,
                 ));
-                project.detected_configs = configs.clone();
-                let merged = processes::merge_saved(configs, &self.saved, key);
+                project.detected_configs = load.clone();
+                if !authored {
+                    self.saved.withhold_new_detections(key, &mut load);
+                }
+                let merged = processes::merge_saved(load, &self.saved, key);
                 project.entries = processes::entries_from(merged);
                 project.phase = Phase::Ready;
                 self.projects.push(project);
@@ -1641,18 +1660,13 @@ impl App {
                 remote::probe::probe_remote(&host, &dir, false)
                     .map(|p| {
                         let name = p.config.as_ref().map(|c| c.project.name.clone());
-                        let flatten = |stacks: Vec<detector::DetectedStack>| -> Vec<ProcessConfig> {
-                            stacks
-                                .into_iter()
-                                .flat_map(|s| s.suggested_processes)
-                                .collect()
-                        };
                         let mut conservative = p.stacks.clone();
                         detector::apply_conservative_filter(&mut conservative);
-                        let detected_full = flatten(p.stacks);
+                        let detected_full = flatten_stacks(p.stacks);
+                        let authored = p.config.is_some();
                         let configs = match p.config {
                             Some(c) => c.process,
-                            None => flatten(conservative),
+                            None => flatten_stacks(conservative),
                         };
                         // Own ssh permit inside: the probe released its own
                         // on return and the fetch opens channels of its own.
@@ -1665,6 +1679,7 @@ impl App {
                         ProbeOk {
                             name,
                             configs,
+                            authored,
                             detected_full,
                             live_sessions: p.live_sessions,
                             icon,
@@ -2866,37 +2881,19 @@ impl App {
         let p = &self.projects[pidx];
         let key = p.key();
 
-        // The pool the Hidden/Detected groups resolve from: the load-time
-        // config list, plus the FULL detection — live for a local project,
-        // so commands added since load appear (GTK's dialog behavior), and
-        // the probe's own full list for a remote one, where a live rerun
-        // would be an ssh round trip mid-form (GTK's staleness trade).
-        let mut pool = p.detected_configs.clone();
+        // Live detection for a local project, so commands added since load
+        // appear (GTK's dialog behavior). A remote one opens on the probe's
+        // list — a rerun is an ssh round trip — and `EditProjectDetected`
+        // swaps the fresh one in underneath when it lands.
         let full: Vec<ProcessConfig> = match &p.location {
-            ProjectLocation::Local(dir) => detector::detect_stacks(dir)
-                .into_iter()
-                .flat_map(|s| s.suggested_processes)
-                .collect(),
+            ProjectLocation::Local(dir) => flatten_stacks(detector::detect_stacks(dir)),
             ProjectLocation::Ssh { .. } => p.detected_full.clone(),
         };
-        for config in full {
-            if !pool.iter().any(|c| c.name == config.name) {
-                pool.push(config);
-            }
-        }
-        let active: Vec<ProcessConfig> = p.entries.iter().map(|e| e.config.clone()).collect();
-        let deleted = self
-            .saved
-            .deleted_processes
-            .get(&key)
-            .cloned()
-            .unwrap_or_default();
-        let custom = self
-            .saved
-            .get_custom_commands(&key)
-            .cloned()
-            .unwrap_or_default();
-        let commands = edit_project::toggle_entries(&active, &deleted, &custom, &pool);
+        let commands = self.edit_project_commands(pidx, full);
+        let redetect = match &p.location {
+            ProjectLocation::Ssh { host, dir } => Some((host.clone(), dir.clone())),
+            ProjectLocation::Local(_) => None,
+        };
 
         // Same epoch stride as the add forms: an icon fetch or listing in
         // flight when this form closes must not land in the next one.
@@ -2924,10 +2921,93 @@ impl App {
         // Symmetric with OpenSettings: a hidden Git view would keep its
         // 2 s (possibly ssh) poll running blind underneath.
         self.git_ui = None;
-        if switched {
-            self.poll_git_fetch()
-        } else {
-            Task::none()
+        let stamp = self.add_form_epoch;
+        let redetect = match redetect {
+            Some((host, dir)) => Task::perform(
+                tokio::task::spawn_blocking(move || {
+                    let _permit = remote::ssh_permit();
+                    flatten_stacks(detector::detect_stacks_fs(&remote::fs::SshFs::new(
+                        &host, &dir,
+                    )))
+                }),
+                move |joined| Event::EditProjectDetected {
+                    project,
+                    stamp,
+                    full: joined.unwrap_or_default(),
+                },
+            ),
+            None => Task::none(),
+        };
+        let git = match switched {
+            true => self.poll_git_fetch(),
+            false => Task::none(),
+        };
+        Task::batch([redetect, git])
+    }
+
+    /// Edit Project's switch rows for a detection result: the load-time
+    /// config list plus `full`, run through GTK's union.
+    fn edit_project_commands(
+        &self,
+        pidx: usize,
+        full: Vec<ProcessConfig>,
+    ) -> Vec<edit_project::ToggleEntry> {
+        let p = &self.projects[pidx];
+        let key = p.key();
+        let mut pool = p.detected_configs.clone();
+        for config in full {
+            if !pool.iter().any(|c| c.name == config.name) {
+                pool.push(config);
+            }
+        }
+        let active: Vec<ProcessConfig> = p.entries.iter().map(|e| e.config.clone()).collect();
+        let deleted = self
+            .saved
+            .deleted_processes
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let custom = self
+            .saved
+            .get_custom_commands(&key)
+            .cloned()
+            .unwrap_or_default();
+        edit_project::toggle_entries(&active, &deleted, &custom, &pool)
+    }
+
+    /// A remote project's fresh detection, back while its Edit Project form
+    /// is still up: rebuild the rows, keeping whatever switches were flipped
+    /// during the wait (by COMMAND, the rows' identity). An empty result is
+    /// a failed round trip as far as the form can tell — the list it opened
+    /// with beats blanking the Detected group.
+    fn edit_project_detected(&mut self, project: u64, stamp: u64, full: Vec<ProcessConfig>) {
+        let Some(pidx) = self.project_index(project) else {
+            return;
+        };
+        if full.is_empty() {
+            return;
+        }
+        self.projects[pidx].detected_full = full.clone();
+        // Stamps stride 2^32 per form instance; the low half counts that
+        // instance's keystrokes.
+        let same_form =
+            |s: &edit_project::State| s.project == project && s.stamp >> 32 == stamp >> 32;
+        if !self.edit_project.as_ref().is_some_and(same_form) {
+            return;
+        }
+        let mut commands = self.edit_project_commands(pidx, full);
+        if let Some(state) = &mut self.edit_project {
+            for entry in &mut commands {
+                if let Some(old) = state
+                    .commands
+                    .iter()
+                    .find(|o| o.config.command == entry.config.command)
+                    && old.on != old.initial_on
+                {
+                    entry.on = old.on;
+                }
+            }
+            state.commands = commands;
         }
     }
 
@@ -4582,7 +4662,8 @@ impl App {
                 match result {
                     Ok(ProbeOk {
                         name,
-                        configs,
+                        configs: mut load,
+                        authored,
                         detected_full,
                         live_sessions,
                         icon,
@@ -4601,9 +4682,12 @@ impl App {
                             None,
                             icon,
                         ));
-                        self.projects[pidx].detected_configs = configs.clone();
+                        self.projects[pidx].detected_configs = load.clone();
                         self.projects[pidx].detected_full = detected_full;
-                        let merged = processes::merge_saved(configs, &self.saved, &key);
+                        if !authored {
+                            self.saved.withhold_new_detections(&key, &mut load);
+                        }
+                        let merged = processes::merge_saved(load, &self.saved, &key);
                         self.projects[pidx].entries = processes::entries_from(merged);
                         self.projects[pidx].phase = Phase::Ready;
                         let boot = self.boot_after_mic_bridge(pidx, live_sessions);
@@ -6084,6 +6168,14 @@ impl App {
             Event::AddSshMsg(msg) => self.update_add_ssh(msg),
             Event::OpenEditProject(project) => self.open_edit_project(project),
             Event::EditProjectMsg(msg) => self.update_edit_project(msg),
+            Event::EditProjectDetected {
+                project,
+                stamp,
+                full,
+            } => {
+                self.edit_project_detected(project, stamp, full);
+                Task::none()
+            }
             Event::AddCommandSubmit => {
                 let Some(form) = self.add_command.take() else {
                     return Task::none();

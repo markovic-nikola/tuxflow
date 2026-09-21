@@ -148,16 +148,13 @@ pub fn conservative_names(stacks: &[DetectedStack]) -> std::collections::HashSet
 /// just asking for a name?
 ///
 /// A project with a `tuxflow.toml` has an authored process list — there is
-/// nothing to choose. Otherwise it is worth choosing only once detection
-/// found more than a handful.
+/// nothing to choose. Otherwise anything detected is worth choosing from:
+/// the step opens with NOTHING selected (the sidebar holds what the user
+/// picked, not what detection could find), so skipping it for a short list
+/// would add the project with every command hidden.
 pub fn needs_command_selection(config_loaded: bool, stacks: &[DetectedStack]) -> bool {
-    let total: usize = stacks.iter().map(|s| s.suggested_processes.len()).sum();
-    !config_loaded && total > MAX_UNSELECTED_COMMANDS
+    !config_loaded && stacks.iter().any(|s| !s.suggested_processes.is_empty())
 }
-
-/// Above this many detected commands, adding a project asks which ones to
-/// keep instead of taking them all.
-const MAX_UNSELECTED_COMMANDS: usize = 5;
 
 fn make_process(name: &str, command: &str, _auto_start: bool) -> ProcessConfig {
     ProcessConfig {

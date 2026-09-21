@@ -234,7 +234,7 @@ impl State {
             detected_name: d.name.clone(),
             name: d.name,
             stacks: d.stacks,
-            selected: vec![true; total],
+            selected: vec![false; total],
             config_loaded: d.config_loaded,
             select,
         });
@@ -492,7 +492,7 @@ fn view_configure<'a>(state: &'a State, c: &'a Configure, accent: iced::Color) -
         content = content.push(line);
     }
 
-    let label = match c.select {
+    let label = match c.select && c.chosen() > 0 {
         true => format!("Add {} Commands", c.chosen()),
         false => "Add Project".to_string(),
     };
@@ -632,7 +632,11 @@ mod tests {
         });
         let c = s.configure.as_ref().unwrap();
         assert_eq!(c.total(), 3);
-        assert_eq!(c.chosen(), 3, "everything starts selected, as GTK's do");
+        assert_eq!(c.chosen(), 0, "nothing starts selected — the user picks");
+        assert!(
+            c.select,
+            "so the step shows for any detection, however short"
+        );
         let names: Vec<&str> = c.flat().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["dev", "build", "serve"]);
     }

@@ -187,10 +187,12 @@ pub fn entries_from(configs: Vec<ProcessConfig>) -> Vec<ProcessEntry> {
 /// Project name + process configs for a local directory: tuxflow.toml when
 /// present, stack detection otherwise (conservative variant — same as the
 /// GTK app's startup path). Remote projects go through the async core
-/// probe instead.
-pub fn load_local_configs(dir: &Path) -> (String, Vec<ProcessConfig>) {
+/// probe instead. The flag says the list was AUTHORED (tuxflow.toml) rather
+/// than detected — only a detected one is held to the project's baseline
+/// (`SavedProjects::withhold_new_detections`).
+pub fn load_local_configs(dir: &Path) -> (String, Vec<ProcessConfig>, bool) {
     match loader::find_config(dir).and_then(|p| loader::load_config(&p).ok()) {
-        Some(config) => (config.project.name, config.process),
+        Some(config) => (config.project.name, config.process, true),
         None => {
             let name = dir
                 .file_name()
@@ -200,7 +202,7 @@ pub fn load_local_configs(dir: &Path) -> (String, Vec<ProcessConfig>) {
                 .into_iter()
                 .flat_map(|stack| stack.suggested_processes)
                 .collect();
-            (name, processes)
+            (name, processes, false)
         }
     }
 }
@@ -666,6 +668,33 @@ mod tests {
         let merged = merge_saved(vec![pc("web"), pc("api"), pc("new")], &saved, "k");
         let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["api", "web", "new"]);
+    }
+
+    /// The sidebar changes only when the user changes it: the first load
+    /// baselines what detection offers, and a Makefile written afterwards
+    /// does not walk in on the next launch — while an enabled (custom)
+    /// command, which never passes through the baseline, still loads.
+    #[test]
+    fn detections_newer_than_the_baseline_are_withheld() {
+        let mut saved = SavedProjects::default();
+        let mut first = vec![pc("dev")];
+        saved.withhold_new_detections("k", &mut first);
+        assert_eq!(first.len(), 1, "the baselining load withholds nothing");
+
+        saved
+            .custom_commands
+            .insert("k".into(), vec![pc("make logs")]);
+        let mut later = vec![pc("dev"), pc("make build"), pc("make logs")];
+        saved.withhold_new_detections("k", &mut later);
+        let merged = merge_saved(later, &saved, "k");
+        let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["dev", "make logs"]);
+
+        // Withheld names never join the baseline, or they would appear on
+        // the launch after.
+        let mut again = vec![pc("dev"), pc("make build")];
+        saved.withhold_new_detections("k", &mut again);
+        assert_eq!(again.len(), 1);
     }
 
     /// A stable connection forgives past outages, like stable runs do.

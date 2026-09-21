@@ -23,7 +23,7 @@ mod status_dot;
 mod theme;
 mod widgets;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -62,6 +62,8 @@ const POLL_FAST: Duration = Duration::from_secs(2);
 const POLL_SLOW: Duration = Duration::from_secs(30);
 /// Provisional badges get this long to firm up before auto-open fires.
 const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
+/// How often the remote MCP sockets are asked whether anything answers.
+const MCP_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Frame cadence shared by every [`Anim`] ramp — ~60fps.
 const FRAME: Duration = Duration::from_millis(16);
@@ -346,32 +348,38 @@ struct Attachment {
 /// Serve the single-instance socket: each accepted connection is one
 /// launch's keys. Ends at once when this process is not the instance.
 fn instance_stream() -> impl iced::futures::Stream<Item = Vec<String>> + Send {
-    iced::futures::stream::unfold(
-        None::<std::sync::Arc<std::os::unix::net::UnixListener>>,
-        |listener| async move {
-            let listener = match listener {
-                Some(l) => l,
-                None => std::sync::Arc::new(instance::take_listener()?),
-            };
-            // `accept` blocks; keep it off the executor's threads.
-            let l = listener.clone();
-            let keys = tokio::task::spawn_blocking(move || -> Option<Vec<String>> {
-                loop {
-                    let (mut stream, _) = l.accept().ok()?;
-                    match instance::read_request(&mut stream) {
-                        Ok(keys) => {
-                            instance::ack(&mut stream);
-                            return Some(keys);
-                        }
-                        Err(e) => log::warn!("instance request unreadable: {e}"),
-                    }
-                }
-            })
-            .await
-            .ok()??;
-            Some((keys, Some(listener)))
-        },
-    )
+    // `accept` must be the ASYNC one. A blocking accept parked on
+    // `spawn_blocking` never returns, and a tokio runtime being dropped
+    // waits for every blocking task that has started — so closing the
+    // window tore everything down and then left the process alive forever,
+    // still holding its tunnels and whatever terminals were running. An
+    // async accept is simply cancelled with the runtime. Only the exchange
+    // itself blocks, and that is bounded by `read_request`'s timeout.
+    iced::futures::stream::unfold(None::<tokio::net::UnixListener>, |listener| async move {
+        let listener = match listener {
+            Some(l) => l,
+            None => {
+                let l = instance::take_listener()?;
+                l.set_nonblocking(true).ok()?;
+                tokio::net::UnixListener::from_std(l).ok()?
+            }
+        };
+        loop {
+            let (stream, _) = listener.accept().await.ok()?;
+            let exchange = tokio::task::spawn_blocking(move || {
+                let mut stream = stream.into_std()?;
+                stream.set_nonblocking(false)?;
+                let keys = instance::read_request(&mut stream)?;
+                instance::ack(&mut stream);
+                std::io::Result::Ok(keys)
+            });
+            match exchange.await {
+                Ok(Ok(keys)) => return Some((keys, Some(listener))),
+                Ok(Err(e)) => log::warn!("instance request unreadable: {e}"),
+                Err(_) => return None,
+            }
+        }
+    })
 }
 
 enum Phase {
@@ -992,6 +1000,8 @@ enum Event {
         generation: u64,
     },
     GitTick,
+    /// 30 s chain: are the remote MCP sockets still answered?
+    McpHealthTick,
     GitPolled {
         project: u64,
         status: Option<tuxflow_core::remote::git::GitStatus>,
@@ -1321,6 +1331,10 @@ impl App {
             ));
         }
         tasks.push(Task::done(Event::GitTick));
+        tasks.push(Task::perform(
+            tokio::time::sleep(MCP_HEALTH_INTERVAL),
+            |_| Event::McpHealthTick,
+        ));
         // Check for updates in the background, once per launch (15-min
         // cache in core). The install-kind probe (`dpkg -S`) rides the
         // same worker so the card knows its buttons before it opens.
@@ -5273,6 +5287,30 @@ impl App {
                 });
                 Task::batch([poll, next])
             }
+            Event::McpHealthTick => {
+                // The forwards are ssh connections of their own and the
+                // agents behind them live on in tmux, so an outage (or a
+                // second machine taking the host socket over and leaving)
+                // kills MCP for a session that otherwise carries on — and
+                // the agent's "reconnect" only re-runs a shim with nothing
+                // to connect to. Core asks the sockets and re-raises the
+                // dead; one ssh round trip per host, on its worker.
+                let mut by_host: BTreeMap<String, Vec<_>> = BTreeMap::new();
+                for pidx in 0..self.projects.len() {
+                    if let Some((key, spec)) = self.mcp_forward_spec(pidx) {
+                        by_host
+                            .entry(spec.host.clone())
+                            .or_default()
+                            .push((key, spec));
+                    }
+                }
+                for (host, specs) in by_host {
+                    tuxflow_core::mcp::remote::check_host(&host, specs);
+                }
+                Task::perform(tokio::time::sleep(MCP_HEALTH_INTERVAL), |_| {
+                    Event::McpHealthTick
+                })
+            }
             Event::GitPolled {
                 project,
                 status,
@@ -9079,17 +9117,6 @@ impl App {
         let project = &self.projects[pidx];
         let handle =
             server::start_mcp_server(&project.name, &project.location.dir_str(), bridge.clone());
-        if let ProjectLocation::Ssh { host, dir } = &project.location {
-            mcp_remote::ensure(
-                &project.key(),
-                mcp_remote::ForwardSpec {
-                    host: host.clone(),
-                    project_name: project.name.clone(),
-                    remote_dir: dir.clone(),
-                    local_socket: handle.socket_path().to_string(),
-                },
-            );
-        }
         let id = project.id;
         let stream = iced::futures::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|cmd| (mcp::Request::new(cmd), rx))
@@ -9106,8 +9133,34 @@ impl App {
             // Force the first sync to write the table.
             fingerprint: 0,
         });
+        if let Some((key, spec)) = self.mcp_forward_spec(pidx) {
+            mcp_remote::ensure(&key, spec);
+        }
         self.sync_mcp_snapshots();
         task
+    }
+
+    /// The reverse forward a remote project's running server needs, under
+    /// the key core files it by; `None` for local projects and while the
+    /// server is down.
+    fn mcp_forward_spec(
+        &self,
+        pidx: usize,
+    ) -> Option<(String, tuxflow_core::mcp::remote::ForwardSpec)> {
+        let project = &self.projects[pidx];
+        let link = project.mcp.as_ref()?;
+        let ProjectLocation::Ssh { host, dir } = &project.location else {
+            return None;
+        };
+        Some((
+            project.key(),
+            tuxflow_core::mcp::remote::ForwardSpec {
+                host: host.clone(),
+                project_name: project.name.clone(),
+                remote_dir: dir.clone(),
+                local_socket: link.handle.socket_path().to_string(),
+            },
+        ))
     }
 
     /// Stop the project's server: socket files removed, command stream

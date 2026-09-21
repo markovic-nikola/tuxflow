@@ -269,3 +269,40 @@ fn python_shim_relays_by_env_var_and_by_cwd_discovery() {
 
     handle.stop();
 }
+
+#[test]
+fn health_probe_names_only_the_sockets_nothing_answers_on() {
+    let Some(python) = python3() else {
+        eprintln!("python3 not available, skipping probe test");
+        return;
+    };
+    let (handle, _rx) = server("probe");
+    let tmp = tempfile::tempdir().unwrap();
+    let sock_dir = tmp.path().join(".cache/tuxflow/mcp");
+    std::fs::create_dir_all(&sock_dir).unwrap();
+    std::os::unix::fs::symlink(handle.socket_path(), sock_dir.join("live.sock")).unwrap();
+    // A file whose listener is gone: connect is refused.
+    drop(std::os::unix::net::UnixListener::bind(sock_dir.join("refused.sock")).unwrap());
+    // A forward whose far end went quiet: sshd still accepts, nothing ever
+    // answers. Only a request can tell this one from a live socket.
+    let _mute = std::os::unix::net::UnixListener::bind(sock_dir.join("mute.sock")).unwrap();
+
+    let mut child = Command::new(python)
+        .args(["-", "live", "refused", "mute", "missing"])
+        .env("HOME", tmp.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(remote::probe_script().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let mut dead: Vec<&str> = std::str::from_utf8(&out.stdout).unwrap().lines().collect();
+    dead.sort_unstable();
+    assert_eq!(dead, ["missing", "mute", "refused"]);
+}

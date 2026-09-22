@@ -7538,9 +7538,11 @@ impl App {
                             block = block.push(group_gap());
                         }
                         first = false;
-                        for i in members {
-                            block = block.push(self.view_row(pidx, i, targets));
-                        }
+                        let rows = members
+                            .into_iter()
+                            .map(|i| self.view_row(pidx, i, targets))
+                            .collect();
+                        block = block.push(gutter_group(category, rows));
                     }
                 }
             }
@@ -9757,6 +9759,75 @@ fn group_gap() -> Element<'static, Event> {
     container(column![]).height(3).into()
 }
 
+/// The sidebar group gutter's glyph size. The gutter column is exactly
+/// this wide plus its inset: any width beyond the glyph pushed the rows
+/// right for nothing, since the row button already pads its dot 9 px in.
+const GUTTER_ICON: f32 = 12.0;
+/// Where the gutter's centre line runs, measured from the card content's
+/// left edge: the project avatar's centre (`view_project_block` draws it
+/// 26 wide, inset 4 by the header button), so the glyphs stand on the
+/// avatar's own axis and the card reads as one grid — avatar over
+/// glyphs, title over the rows.
+const GUTTER_AXIS: f32 = 4.0 + 26.0 / 2.0;
+/// A process row's full height — its 17 px content plus the button's
+/// 5 px above and below (`view_row`). The gutter's glyph slot is exactly
+/// this tall so the glyph centres on the first row's status dot.
+const ROW_HEIGHT: f32 = 27.0;
+
+/// One category group of rows with its gutter: the kind's glyph level
+/// with the first row's dot, and a hairline rail down the rest of the
+/// group, both on the gutter's centre line. The glyph labels the GROUP,
+/// as GTK's caption row did, without spending a row on it.
+fn gutter_group<'a>(
+    category: ProcessCategory,
+    rows: Vec<Element<'a, Event>>,
+) -> Element<'a, Event> {
+    let glyph = container(symbolic(category_icon(category), GUTTER_ICON, pal().dim))
+        .width(GUTTER_ICON)
+        .height(ROW_HEIGHT)
+        .center_y(ROW_HEIGHT);
+    // The rail hangs off the glyph and ends level with the last row's
+    // dot (half a row up from the group's bottom edge), so it brackets
+    // the group's dots rather than fencing the rows. The card hairline
+    // is too faint for a 1 px line this short to register; the dim ink
+    // at a quarter strength is.
+    let rail = container(
+        container(column![])
+            .width(1)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(theme::alpha(pal().dim, 0.28))),
+                ..Default::default()
+            }),
+    )
+    .width(GUTTER_ICON)
+    .height(Length::Fill)
+    .center_x(GUTTER_ICON)
+    .padding(iced::Padding {
+        top: 2.0,
+        right: 0.0,
+        bottom: ROW_HEIGHT / 2.0,
+        left: 0.0,
+    });
+    // The inset rides the column's own padding: a wrapping container
+    // with a Shrink height gives the rail's Fill nothing to fill and the
+    // whole gutter measures zero.
+    let inset = GUTTER_AXIS - GUTTER_ICON / 2.0;
+    let gutter = column![glyph, rail]
+        .width(GUTTER_ICON + inset)
+        .height(Length::Fill)
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: inset,
+        });
+    let body = column(rows).width(Length::Fill);
+    // No spacing of its own: the row button's 9 px left padding is the
+    // whole gap between glyph and dot, and it is enough.
+    row![gutter, body].align_y(iced::Alignment::Start).into()
+}
+
 /// 1px hairline — vertical.
 fn vline() -> Element<'static, Event> {
     container(column![])
@@ -9780,6 +9851,23 @@ const ICON_FOCUS: &[u8] = include_bytes!("../assets/icons/focus-windows-symbolic
 const ICON_CLEAR: &[u8] = include_bytes!("../assets/icons/edit-clear-symbolic.svg");
 const ICON_EXTERNAL: &[u8] = include_bytes!("../assets/icons/external-link-symbolic.svg");
 const ICON_REMOTE: &[u8] = include_bytes!("../assets/icons/tuxflow-remote-symbolic.svg");
+const ICON_AGENT: &[u8] = include_bytes!("../assets/icons/tuxflow-agent-symbolic.svg");
+const ICON_COMMAND: &[u8] = include_bytes!("../assets/icons/view-list-symbolic.svg");
+const ICON_TERMINAL: &[u8] = include_bytes!("../assets/icons/utilities-terminal-symbolic.svg");
+const ICON_SSH: &[u8] = include_bytes!("../assets/icons/network-server-symbolic.svg");
+
+/// The glyph a sidebar group wears in its gutter — the same four the GTK
+/// app put on its section captions (`section_header.rs`), minus the
+/// caption: the groups are already told apart by the gap between them,
+/// the gutter only names them.
+fn category_icon(category: ProcessCategory) -> &'static [u8] {
+    match category {
+        ProcessCategory::Agent => ICON_AGENT,
+        ProcessCategory::Command => ICON_COMMAND,
+        ProcessCategory::Terminal => ICON_TERMINAL,
+        ProcessCategory::SSH => ICON_SSH,
+    }
+}
 
 /// A symbolic icon: the baked-in fill is overridden by the tint, which
 /// is what makes these behave like GTK's -symbolic icons.

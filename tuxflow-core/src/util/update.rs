@@ -276,6 +276,35 @@ fn relaunch_path() -> Result<PathBuf, String> {
         .ok_or_else(|| format!("Could not find {} to relaunch", cleaned.display()))
 }
 
+/// How long the relauncher waits for this process to exit on its own before
+/// it stops trusting that it will.
+///
+/// The wait is not decoration: the closing window still saves its geometry
+/// and tears down the mic bridge and the MCP sockets, and none of that has
+/// finished the instant the button is clicked. But 0.2.3 closed its window
+/// and then never exited (a blocking accept pinned the runtime), so a
+/// relauncher waiting on the PID alone sat in a loop for hours and "Restart
+/// now" read as doing nothing — with the new version installed the whole
+/// time. Past this the old process is a leak, not a shutdown in progress.
+pub const RELAUNCH_GRACE: Duration = Duration::from_secs(15);
+
+/// The shell the relauncher runs: wait for `pid` to go, TERM it once
+/// `grace` is up, KILL it if TERM is ignored, then exec `exe`. Sleeping in
+/// fifths of a second keeps the ordinary restart snappy; the counter is in
+/// those ticks.
+fn relaunch_script(pid: u32, exe: &Path, grace: Duration) -> String {
+    let ticks = (grace.as_millis() / 200).max(1);
+    let exe = crate::remote::sh_quote(&exe.to_string_lossy());
+    format!(
+        "n=0; while kill -0 {pid} 2>/dev/null; do \
+         n=$((n+1)); \
+         if [ $n -eq {ticks} ]; then kill -TERM {pid} 2>/dev/null; fi; \
+         if [ $n -ge {kill_at} ]; then kill -KILL {pid} 2>/dev/null; fi; \
+         sleep 0.2; done; exec {exe}",
+        kill_at = ticks + 25,
+    )
+}
+
 /// Relaunch after this process exits. The caller quits once this returns
 /// `Ok`; the hand-off is what makes that quit a restart.
 ///
@@ -284,16 +313,13 @@ fn relaunch_path() -> Result<PathBuf, String> {
 /// which looked exactly like the restart button doing nothing. Hand off to a
 /// detached shell that waits for our PID to disappear and then execs the new
 /// binary. The iced shell has no such lock, but the wait costs nothing and
-/// keeps the two windows from ever overlapping.
+/// keeps the two windows from ever overlapping. The wait is bounded by
+/// `RELAUNCH_GRACE`, after which the relauncher ends us itself.
 pub fn restart() -> Result<(), String> {
     use std::os::unix::process::CommandExt;
 
     let exe = relaunch_path()?;
-    let pid = std::process::id();
-    let script = format!(
-        "while kill -0 {pid} 2>/dev/null; do sleep 0.2; done; exec {}",
-        crate::remote::sh_quote(&exe.to_string_lossy())
-    );
+    let script = relaunch_script(std::process::id(), &exe, RELAUNCH_GRACE);
 
     std::process::Command::new("sh")
         .arg("-c")
@@ -314,6 +340,7 @@ pub fn restart() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn strips_the_deleted_marker_from_a_replaced_binary() {
@@ -341,7 +368,59 @@ mod tests {
         let p = relaunch_path().expect("test binary must resolve");
         assert!(p.is_file(), "{} is not a file", p.display());
     }
-    use super::*;
+
+    /// Run the relauncher against `child`, reaping the child on a thread the
+    /// way a session manager would. That reaping is not optional: `kill -0`
+    /// succeeds on a zombie, so a signalled child nobody has waited for
+    /// keeps the loop alive and the test with it.
+    fn run_relauncher(
+        mut child: std::process::Child,
+        grace: Duration,
+    ) -> (std::process::ExitStatus, std::process::ExitStatus) {
+        let script = relaunch_script(child.id(), Path::new("/bin/true"), grace);
+        let reaper = std::thread::spawn(move || child.wait().expect("reap child"));
+        let relauncher = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .expect("run relauncher");
+        (relauncher, reaper.join().expect("reaper thread"))
+    }
+
+    /// A process that closes its window but never exits (0.2.3) must not
+    /// park the relauncher forever: after the grace it is ended and the new
+    /// binary still starts.
+    #[test]
+    fn relauncher_ends_a_process_that_will_not_exit() {
+        let stuck = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn sleep");
+        let started = std::time::Instant::now();
+        let (relauncher, stuck) = run_relauncher(stuck, Duration::from_millis(400));
+        // `exec /bin/true` ran: the relauncher's exit status is true's.
+        assert!(relauncher.success(), "relauncher: {relauncher}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !stuck.success(),
+            "the stuck process should have been signalled"
+        );
+    }
+
+    #[test]
+    fn relauncher_does_not_signal_a_process_that_exits_in_time() {
+        let quick = std::process::Command::new("sleep")
+            .arg("0.3")
+            .spawn()
+            .expect("spawn sleep");
+        let (relauncher, quick) = run_relauncher(quick, Duration::from_secs(15));
+        assert!(relauncher.success());
+        assert!(quick.success(), "exited on its own, untouched");
+    }
 
     #[test]
     fn test_is_newer() {

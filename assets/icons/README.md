@@ -19,16 +19,26 @@ Sidebar lifecycle controls (process rows + project headers):
 - `media-playback-stop-symbolic.svg` — stop
 - `view-refresh-symbolic.svg` — restart
 
+Sidebar group gutters (the category glyph beside each group of rows;
+the GTK app put the same glyphs on its section captions):
+
+- `view-list-symbolic.svg` — commands
+- `utilities-terminal-symbolic.svg` — terminals (Adwaita's `legacy/` copy)
+- `network-server-symbolic.svg` — SSH connections
+
 Status bar:
 
 - `focus-windows-symbolic.svg` — focus mode (hide the sidebar)
 - `edit-clear-symbolic.svg` — clear the terminal
 - `external-link-symbolic.svg` — open the detected URL
 
-Three are TuxFlow's own, MIT like the rest of the app, not Adwaita copies:
+Four are TuxFlow's own, MIT like the rest of the app, not Adwaita copies:
 
 - `tuxflow-logo-symbolic.svg` — the logo on the empty pane (the GTK
   welcome page's icon, restored from `1db72a9`)
+- `tuxflow-agent-symbolic.svg` marks the agents group. GTK asked the
+  theme for `ai-brain-symbolic`, which no Adwaita release ships, so its
+  AGENTS caption showed a broken-image placeholder on a stock system.
 - `tuxflow-remote-symbolic.svg` (app-namespaced so a user's icon theme
   can't override the glyph, copied from `data/icons/`) marks a project
   that lives on an ssh host.

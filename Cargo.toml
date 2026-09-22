@@ -9,7 +9,7 @@ exclude = ["spike"]
 # every package must inherit this rather than carry its own.
 # scripts/release.sh bumps the first `version = ` line, which is this one.
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 
 # The app: the iced shell, built on the vendored iced_term fork.
 [package]

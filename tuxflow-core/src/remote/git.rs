@@ -16,6 +16,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -59,12 +60,74 @@ pub fn git_command(location: &ProjectLocation, args: &[&str]) -> std::process::C
     }
 }
 
+/// How long any one git invocation may run before it is killed. Generous
+/// for a status or a diff, and the point is not latency but the wedge: a
+/// command that never returns (a ControlMaster whose TCP side died under
+/// a suspend, a host-side mux to GitHub that stopped answering) parks the
+/// worker forever, and everything keyed on its completion — the chip's
+/// fetch guard above all — stays stuck with it.
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `Command::output` with a deadline. The pipes are drained on their own
+/// threads so a chatty command can't fill a pipe and deadlock against the
+/// poll; on the deadline the child is killed and the error is `TimedOut`.
+pub fn output_within(
+    mut cmd: std::process::Command,
+    limit: Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    fn drain<R: Read + Send + 'static>(mut pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(p) = pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("git did not finish within {} s", limit.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// Every git call in this module goes through here, so no one of them
+/// can hang a worker past `GIT_TIMEOUT`.
+fn git_output_within(
+    location: &ProjectLocation,
+    args: &[&str],
+) -> std::io::Result<std::process::Output> {
+    output_within(git_command(location, args), GIT_TIMEOUT)
+}
+
 /// None = not a git repo, git absent, or (remote) host unreachable —
 /// the chip simply doesn't show.
 pub fn query_status(location: &ProjectLocation) -> Option<GitStatus> {
-    let output = git_command(location, &["status", "--porcelain=v2", "--branch"])
-        .output()
-        .ok()?;
+    let output = git_output_within(location, &["status", "--porcelain=v2", "--branch"]).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -100,9 +163,7 @@ fn parse_porcelain_v2(text: &str) -> GitStatus {
 /// on success, the trimmed stderr as the error message on failure (that
 /// string goes straight into an error dialog).
 pub fn run_git_command(location: &ProjectLocation, args: &[&str]) -> Result<String, String> {
-    let output = git_command(location, args)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = git_output_within(location, args).map_err(|e| e.to_string())?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -114,7 +175,7 @@ pub fn run_git_command(location: &ProjectLocation, args: &[&str]) -> Result<Stri
 /// Stdout of a git command, or empty on any failure — for the counters,
 /// where "couldn't ask" and "the answer is zero" lead to the same chip.
 fn git_output(location: &ProjectLocation, args: &[&str]) -> String {
-    match git_command(location, args).output() {
+    match git_output_within(location, args) {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         _ => String::new(),
     }
@@ -201,8 +262,28 @@ pub fn query_diffstat(location: &ProjectLocation) -> DiffStat {
     }
 }
 
+/// The chip's background fetch. Failures are logged rather than
+/// returned — nothing in the UI wants a notice for a flaky network at
+/// 60 s cadence — but they must be logged, because a fetch that fails
+/// silently looks exactly like one that found nothing: the ↓ just never
+/// appears, and there is nothing to read afterwards.
 pub fn fetch(location: &ProjectLocation) {
-    let _ = git_command(location, &["fetch"]).output();
+    let started = Instant::now();
+    match git_output_within(location, &["fetch"]) {
+        Ok(o) if o.status.success() => {
+            log::debug!("git fetch {location:?} ok in {:?}", started.elapsed());
+        }
+        Ok(o) => log::warn!(
+            "git fetch {location:?} failed ({}) after {:?}: {}",
+            o.status,
+            started.elapsed(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!(
+            "git fetch {location:?} failed after {:?}: {e}",
+            started.elapsed()
+        ),
+    }
 }
 
 pub fn current_branch(location: &ProjectLocation) -> Option<String> {
@@ -392,7 +473,7 @@ pub fn load_diff(location: &ProjectLocation, file: &ChangedFile) -> DiffResult {
     };
     // `--no-index` reports a difference with exit code 1, so this one
     // can't go through the success-gated helper.
-    let raw = match git_command(location, &args).output() {
+    let raw = match git_output_within(location, &args) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
         Err(_) => {
             return DiffResult {
@@ -777,6 +858,26 @@ fn runs(toks: &[(usize, &str)], keep: &[bool]) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_within_returns_a_finished_command_whole() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let o = output_within(cmd, Duration::from_secs(10)).unwrap();
+        assert_eq!(o.status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "out\n");
+        assert_eq!(String::from_utf8_lossy(&o.stderr), "err\n");
+    }
+
+    #[test]
+    fn output_within_kills_a_command_past_its_deadline() {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let started = Instant::now();
+        let err = output_within(cmd, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     #[test]
     fn parses_branch_ahead_behind_and_changes() {

@@ -3499,6 +3499,15 @@ impl App {
                 state.busy = None;
                 match result {
                     Ok(()) => {
+                        if action == git_view::Busy::Push {
+                            // Pushing is the last step of the commit
+                            // flow: the work is on the remote, so the
+                            // view has nothing left to show. Close it
+                            // and return to the terminal; the status
+                            // bar still needs its numbers updated.
+                            self.git_ui = None;
+                            return Task::batch([self.focus_selected_terminal(), self.poll_git()]);
+                        }
                         if action == git_view::Busy::Commit {
                             state.message = iced::widget::text_editor::Content::new();
                         }

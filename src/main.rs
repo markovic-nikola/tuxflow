@@ -64,6 +64,11 @@ const POLL_SLOW: Duration = Duration::from_secs(30);
 const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
 /// How often the remote MCP sockets are asked whether anything answers.
 const MCP_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a status-chip fetch may stay "in flight" before the next
+/// fetch tick ignores it. Core kills a git call at `GIT_TIMEOUT`, so a
+/// guard this old belongs to a report that was lost, not one still due.
+const FETCH_GUARD_EXPIRY: Duration =
+    tuxflow_core::remote::git::GIT_TIMEOUT.saturating_add(Duration::from_secs(30));
 
 /// Frame cadence shared by every [`Anim`] ramp — ~60fps.
 const FRAME: Duration = Duration::from_millis(16);
@@ -572,13 +577,19 @@ struct App {
     /// 20 fps cadence, alive only while `git_syncing` is non-empty. One
     /// chain serves however many syncs overlap.
     sync_spin: Sweep,
-    /// Projects with a status-chip `git fetch` in flight, by id. Without
-    /// the fetch the chip's ↓ can never light up on its own — `branch.ab`
-    /// counts against the last-FETCHED upstream ref. Guarded because a
-    /// down remote host blocks each git call ~10 s (GTK's poller keeps
-    /// one in-flight flag for the same reason): skipping a tick is free,
-    /// stacking another blocked worker is not.
-    git_fetching: std::collections::HashSet<u64>,
+    /// Projects with a status-chip `git fetch` in flight, by id, with
+    /// when it started. Without the fetch the chip's ↓ can never light up
+    /// on its own — `branch.ab` counts against the last-FETCHED upstream
+    /// ref. Guarded because a down remote host blocks each git call ~10 s
+    /// (GTK's poller keeps one in-flight flag for the same reason):
+    /// skipping a tick is free, stacking another blocked worker is not.
+    /// The start time is the guard's escape hatch: an entry older than
+    /// `FETCH_GUARD_EXPIRY` is treated as gone. A fetch that never
+    /// reported back would otherwise exclude its project from fetching
+    /// for the rest of the session — the chip keeps its branch name and
+    /// its counters from the plain polls, and the ↓ for a teammate's push
+    /// simply never appears, with nothing to say why.
+    git_fetching: std::collections::HashMap<u64, Instant>,
     /// GitTick firings so far — every third one fetches (the 20 s local
     /// tick at GTK's 60 s "poll git pull indicator" cadence).
     git_ticks: u64,
@@ -1237,7 +1248,7 @@ impl App {
             git_syncing: std::collections::HashSet::new(),
             hold_relays: HashMap::new(),
             sync_spin: Sweep::default(),
-            git_fetching: std::collections::HashSet::new(),
+            git_fetching: std::collections::HashMap::new(),
             git_ticks: 0,
             git_tick_stamp: 0,
             add_form_epoch: 0,
@@ -2358,9 +2369,16 @@ impl App {
         }
         let id = project.id;
         let location = project.location.clone();
-        if !self.git_fetching.insert(id) {
-            return plain;
+        let now = Instant::now();
+        match self.git_fetching.get(&id) {
+            Some(since) if now.duration_since(*since) < FETCH_GUARD_EXPIRY => return plain,
+            Some(since) => log::warn!(
+                "git fetch guard for project {id} expired after {:?} — fetching again",
+                now.duration_since(*since)
+            ),
+            None => {}
         }
+        self.git_fetching.insert(id, now);
         let fetch =
             Self::query_git_task(location, true, move |status, diffstat| Event::GitPolled {
                 project: id,

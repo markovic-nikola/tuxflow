@@ -36,7 +36,7 @@ Four are TuxFlow's own, MIT like the rest of the app, not Adwaita copies:
 
 - `tuxflow-logo-symbolic.svg` — the logo on the empty pane (the GTK
   welcome page's icon, restored from `1db72a9`)
-- `tuxflow-agent-symbolic.svg` marks the agents group. GTK asked the
+- `tuxflow-agent-symbolic.svg` (a brain, stroked — iced's svg tint recolours strokes as well as fills) marks the agents group. GTK asked the
   theme for `ai-brain-symbolic`, which no Adwaita release ships, so its
   AGENTS caption showed a broken-image placeholder on a stock system.
 - `tuxflow-remote-symbolic.svg` (app-namespaced so a user's icon theme

@@ -624,6 +624,7 @@ fn commit_bar(state: &'_ State) -> Element<'_, Msg> {
         container(
             text_editor(&state.message)
                 .placeholder("Commit message\u{2026}")
+                .size(12)
                 .height(72)
                 .padding(8)
                 .style(theme::editor(theme::LOCAL_ACCENT))

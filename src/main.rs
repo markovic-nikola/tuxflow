@@ -7534,15 +7534,25 @@ impl App {
                         if members.is_empty() {
                             continue;
                         }
-                        if !first {
-                            block = block.push(group_gap());
+                        // The caption carries its own air above; under a
+                        // filter the card shows only matching rows and a
+                        // count over them would be counting the filter,
+                        // so the plain gap stands in.
+                        if filter.is_some() {
+                            if !first {
+                                block = block.push(group_gap());
+                            }
+                        } else {
+                            let running = members
+                                .iter()
+                                .filter(|&&i| project.entries[i].is_running())
+                                .count();
+                            block = block.push(section_caption(category, running, members.len()));
                         }
                         first = false;
-                        let rows = members
-                            .into_iter()
-                            .map(|i| self.view_row(pidx, i, targets))
-                            .collect();
-                        block = block.push(gutter_group(category, rows));
+                        for i in members {
+                            block = block.push(self.view_row(pidx, i, targets));
+                        }
                     }
                 }
             }
@@ -9759,73 +9769,47 @@ fn group_gap() -> Element<'static, Event> {
     container(column![]).height(3).into()
 }
 
-/// The sidebar group gutter's glyph size. The gutter column is exactly
-/// this wide plus its inset: any width beyond the glyph pushed the rows
-/// right for nothing, since the row button already pads its dot 9 px in.
-const GUTTER_ICON: f32 = 12.0;
-/// Where the gutter's centre line runs, measured from the card content's
-/// left edge: the project avatar's centre (`view_project_block` draws it
-/// 26 wide, inset 4 by the header button), so the glyphs stand on the
-/// avatar's own axis and the card reads as one grid — avatar over
-/// glyphs, title over the rows.
-const GUTTER_AXIS: f32 = 4.0 + 26.0 / 2.0;
-/// A process row's full height — its 17 px content plus the button's
-/// 5 px above and below (`view_row`). The gutter's glyph slot is exactly
-/// this tall so the glyph centres on the first row's status dot.
-const ROW_HEIGHT: f32 = 27.0;
+/// The caption's glyph size — a step under the row glyphs at 12, so the
+/// caption reads as a label over the rows, not a row of its own.
+const CAPTION_ICON: f32 = 11.0;
 
-/// One category group of rows with its gutter: the kind's glyph level
-/// with the first row's dot, and a hairline rail down the rest of the
-/// group, both on the gutter's centre line. The glyph labels the GROUP,
-/// as GTK's caption row did, without spending a row on it.
-fn gutter_group<'a>(
+/// The GTK section header (`sidebar/section_header.rs`), redrawn: the
+/// kind's glyph, its title in small caps, a hairline out to the
+/// running/total count, all in the dim ink. It takes the seat of the
+/// gap between groups, so the category rhythm below it is unchanged.
+fn section_caption(
     category: ProcessCategory,
-    rows: Vec<Element<'a, Event>>,
-) -> Element<'a, Event> {
-    let glyph = container(symbolic(category_icon(category), GUTTER_ICON, pal().dim))
-        .width(GUTTER_ICON)
-        .height(ROW_HEIGHT)
-        .center_y(ROW_HEIGHT);
-    // The rail hangs off the glyph and ends level with the last row's
-    // dot (half a row up from the group's bottom edge), so it brackets
-    // the group's dots rather than fencing the rows. The card hairline
-    // is too faint for a 1 px line this short to register; the dim ink
-    // at a quarter strength is.
-    let rail = container(
-        container(column![])
-            .width(1)
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(theme::alpha(pal().dim, 0.28))),
-                ..Default::default()
-            }),
+    running: usize,
+    total: usize,
+) -> Element<'static, Event> {
+    let title = match category {
+        ProcessCategory::Agent => "AGENTS",
+        ProcessCategory::Command => "COMMANDS",
+        ProcessCategory::Terminal => "TERMINALS",
+        ProcessCategory::SSH => "SSH",
+    };
+    let ink = pal().dim;
+    container(
+        row![
+            symbolic(category_icon(category), CAPTION_ICON, ink),
+            text(title).size(9.5).font(bold()).color(ink),
+            container(hline()).width(Length::Fill).padding([0, 2]),
+            text(format!("{running}/{total}")).size(9.5).color(ink),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
     )
-    .width(GUTTER_ICON)
-    .height(Length::Fill)
-    .center_x(GUTTER_ICON)
+    // Left inset puts the glyph's centre on the rows' dot centre line:
+    // the row button pads its 10 px dot 9 px in, so the dot's centre is
+    // 14 from the card content edge, and 8.5 + 11 / 2 lands there too.
     .padding(iced::Padding {
-        top: 2.0,
-        right: 0.0,
-        bottom: ROW_HEIGHT / 2.0,
-        left: 0.0,
-    });
-    // The inset rides the column's own padding: a wrapping container
-    // with a Shrink height gives the rail's Fill nothing to fill and the
-    // whole gutter measures zero.
-    let inset = GUTTER_AXIS - GUTTER_ICON / 2.0;
-    let gutter = column![glyph, rail]
-        .width(GUTTER_ICON + inset)
-        .height(Length::Fill)
-        .padding(iced::Padding {
-            top: 0.0,
-            right: 0.0,
-            bottom: 0.0,
-            left: inset,
-        });
-    let body = column(rows).width(Length::Fill);
-    // No spacing of its own: the row button's 9 px left padding is the
-    // whole gap between glyph and dot, and it is enough.
-    row![gutter, body].align_y(iced::Alignment::Start).into()
+        top: 6.0,
+        right: 6.0,
+        bottom: 3.0,
+        left: 8.5,
+    })
+    .width(Length::Fill)
+    .into()
 }
 
 /// 1px hairline — vertical.

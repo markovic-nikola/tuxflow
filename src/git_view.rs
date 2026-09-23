@@ -628,6 +628,18 @@ fn commit_bar(state: &'_ State) -> Element<'_, Msg> {
                 .height(72)
                 .padding(8)
                 .style(theme::editor(theme::LOCAL_ACCENT))
+                // Ctrl+Enter commits, as GTK's capture-phase controller did;
+                // git_run applies the button's busy/empty-message gates. iced
+                // offers every key press to the binding, focused or not.
+                .key_binding(|kp| match kp.key.as_ref() {
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+                        if kp.modifiers.control()
+                            && matches!(kp.status, text_editor::Status::Focused { .. }) =>
+                    {
+                        Some(text_editor::Binding::Custom(Msg::Commit))
+                    }
+                    _ => text_editor::Binding::from_key_press(kp),
+                })
                 .on_action(Msg::MessageAction),
         )
         .width(Length::Fill),

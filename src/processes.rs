@@ -68,11 +68,19 @@ pub struct ProcessEntry {
     /// clears any surviving session inline instead of reattaching to it.
     pub remote_fresh_next: bool,
     /// One-shot browser auto-open, armed only by user-initiated starts
-    /// (never auto-restarts or reattaches). Fires when the badge is final,
-    /// or after a 5 s grace for provisional-only badges.
+    /// (never auto-restarts or reattaches). Fires once the badge is final
+    /// AND the output has gone quiet AND every local port the run printed
+    /// answers a connect — or after a 5 s grace for provisional-only badges.
     pub pending_auto_open: bool,
-    /// The provisional-badge grace timer is already scheduled.
-    pub auto_open_grace: bool,
+    /// An auto-open timer is scheduled for this run.
+    pub auto_open_armed: bool,
+    /// Stamp of the newest auto-open timer; a firing with an older stamp
+    /// was re-armed by later output and is ignored.
+    pub auto_open_epoch: u64,
+    /// When this run first showed a port — the quiet period and the
+    /// readiness probe both give up (and open anyway) `AUTO_OPEN_CAP`
+    /// after it, so a chatty or half-broken run still opens.
+    pub auto_open_since: Option<Instant>,
     /// A disconnect notification went out for the current outage — reset
     /// on manual action so the next outage notifies again.
     pub outage_notified: bool,
@@ -113,7 +121,9 @@ impl ProcessEntry {
             remote_session: None,
             remote_fresh_next: false,
             pending_auto_open: false,
-            auto_open_grace: false,
+            auto_open_armed: false,
+            auto_open_epoch: 0,
+            auto_open_since: None,
             outage_notified: false,
             title: None,
             command_override: None,

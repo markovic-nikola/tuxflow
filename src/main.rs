@@ -62,6 +62,19 @@ const POLL_FAST: Duration = Duration::from_secs(2);
 const POLL_SLOW: Duration = Duration::from_secs(30);
 /// Provisional badges get this long to firm up before auto-open fires.
 const AUTO_OPEN_GRACE: Duration = Duration::from_secs(5);
+/// A final badge opens only once the run has printed nothing for this
+/// long: `php artisan serve` announces its port seconds before the Vite
+/// beside it is listening, and a page opened in between loads with no
+/// stylesheets and dead script tags. Every output batch re-arms it.
+const AUTO_OPEN_QUIET: Duration = Duration::from_millis(1500);
+/// The quiet period and the readiness probe stop deferring the open this
+/// long after the first port appeared — a run that logs continuously, or
+/// whose asset server never binds, still gets its page.
+const AUTO_OPEN_CAP: Duration = Duration::from_secs(10);
+/// How long a readiness connect may take before the port counts as down.
+const AUTO_OPEN_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+/// Pause between readiness probes while a port is still down.
+const AUTO_OPEN_PROBE_RETRY: Duration = Duration::from_millis(500);
 /// How often the remote MCP sockets are asked whether anything answers.
 const MCP_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 /// How long a status-chip fetch may stay "in flight" before the next
@@ -1095,9 +1108,18 @@ enum Event {
         project: u64,
         hash: Option<u64>,
     },
+    /// The auto-open timer fired: probe the run's ports before opening.
     AutoOpenDue {
         term: u64,
         generation: u64,
+        epoch: u64,
+    },
+    /// The readiness probe answered — `ready` when every port accepted.
+    AutoOpenProbed {
+        term: u64,
+        generation: u64,
+        epoch: u64,
+        ready: bool,
     },
     /// An edit in the composer. A paste of NOTHING is the image route: an
     /// image-only clipboard reads as "" on X11 (fork patch 15), and that
@@ -1949,7 +1971,8 @@ impl App {
                 entry.status = Status::Running;
                 entry.last_exit = None;
                 entry.stopping = false;
-                entry.auto_open_grace = false;
+                entry.auto_open_armed = false;
+                entry.auto_open_since = None;
                 entry.started_at = Some(Instant::now());
                 // Silence is measured from the spawn until the first
                 // repaint (GTK stamps `last_activity` at handler build).
@@ -1983,7 +2006,8 @@ impl App {
         entry.restart_attempts = 0;
         entry.restart_generation += 1;
         entry.pending_auto_open = entry.config.open_in_browser;
-        entry.auto_open_grace = false;
+        entry.auto_open_armed = false;
+        entry.auto_open_since = None;
         entry.outage_notified = false;
         self.start(pidx, index)
     }
@@ -3724,8 +3748,11 @@ impl App {
         self.maybe_auto_open(pidx, index)
     }
 
-    /// The one-shot browser open: fires when the badge is final, or arms a
-    /// 5 s grace when only a provisional badge exists.
+    /// The one-shot browser open. A final badge arms a short quiet timer
+    /// that every later output batch re-arms, so the open lands after the
+    /// run has stopped announcing servers; a provisional-only badge gets
+    /// the longer grace once. When the timer fires, `AutoOpenDue` probes
+    /// the ports before opening. Both stop deferring at `AUTO_OPEN_CAP`.
     fn maybe_auto_open(&mut self, pidx: usize, index: usize) -> Task<Event> {
         let project = &self.projects[pidx];
         let entry = &project.entries[index];
@@ -3733,21 +3760,63 @@ impl App {
         if !entry.pending_auto_open || !project.ports.has_port(&name) {
             return Task::none();
         }
-        if project.ports.badge_final(&name) {
-            self.open_in_browser(pidx, index);
-            Task::none()
-        } else if !entry.auto_open_grace {
-            let Some(term) = entry.term_id else {
+        let Some(term) = entry.term_id else {
+            return Task::none();
+        };
+        let badge_final = project.ports.badge_final(&name);
+        let entry = &mut self.projects[pidx].entries[index];
+        let since = *entry.auto_open_since.get_or_insert_with(Instant::now);
+        let delay = if badge_final {
+            if entry.auto_open_armed && since.elapsed() >= AUTO_OPEN_CAP {
                 return Task::none();
-            };
-            self.projects[pidx].entries[index].auto_open_grace = true;
-            let generation = self.projects[pidx].entries[index].restart_generation;
-            Task::perform(tokio::time::sleep(AUTO_OPEN_GRACE), move |_| {
-                Event::AutoOpenDue { term, generation }
-            })
+            }
+            AUTO_OPEN_QUIET
         } else {
-            Task::none()
+            if entry.auto_open_armed {
+                return Task::none();
+            }
+            AUTO_OPEN_GRACE
+        };
+        entry.auto_open_armed = true;
+        entry.auto_open_epoch += 1;
+        let epoch = entry.auto_open_epoch;
+        let generation = entry.restart_generation;
+        Task::perform(tokio::time::sleep(delay), move |_| Event::AutoOpenDue {
+            term,
+            generation,
+            epoch,
+        })
+    }
+
+    /// The entry an auto-open timer or probe was scheduled for, if that
+    /// run is still the one on the pane and no later output re-armed it.
+    fn auto_open_target(&self, term: u64, generation: u64, epoch: u64) -> Option<(usize, usize)> {
+        let (pidx, index) = self.entry_for_term(term)?;
+        let entry = self.projects[pidx].entries.get(index)?;
+        (entry.restart_generation == generation
+            && entry.auto_open_epoch == epoch
+            && entry.pending_auto_open)
+            .then_some((pidx, index))
+    }
+
+    /// The quiet period is over: check that every local port the run
+    /// printed actually accepts a connection before opening the page.
+    fn auto_open_probe(&mut self, term: u64, generation: u64, epoch: u64) -> Task<Event> {
+        let Some((pidx, index)) = self.auto_open_target(term, generation, epoch) else {
+            return Task::none();
+        };
+        let project = &self.projects[pidx];
+        let name = project.entries[index].config.name.clone();
+        if !project.ports.has_port(&name) {
+            return Task::none();
         }
+        let ports = auto_open_probe_ports(project, &name);
+        Task::perform(ports_answer(ports), move |ready| Event::AutoOpenProbed {
+            term,
+            generation,
+            epoch,
+            ready,
+        })
     }
 
     /// Dispatch a matched app shortcut.
@@ -5698,23 +5767,37 @@ impl App {
                 }
                 Task::batch(tasks)
             }
-            Event::AutoOpenDue { term, generation } => {
-                let Some((pidx, index)) = self.entry_for_term(term) else {
+            Event::AutoOpenDue {
+                term,
+                generation,
+                epoch,
+            } => self.auto_open_probe(term, generation, epoch),
+            Event::AutoOpenProbed {
+                term,
+                generation,
+                epoch,
+                ready,
+            } => {
+                let Some((pidx, index)) = self.auto_open_target(term, generation, epoch) else {
                     return Task::none();
                 };
-                let due = self.projects[pidx]
-                    .entries
-                    .get(index)
-                    .is_some_and(|e| e.restart_generation == generation && e.pending_auto_open);
-                let name = self.projects[pidx]
-                    .entries
-                    .get(index)
-                    .map(|e| e.config.name.clone())
-                    .unwrap_or_default();
-                if due && self.projects[pidx].ports.has_port(&name) {
+                let capped = self.projects[pidx].entries[index]
+                    .auto_open_since
+                    .is_some_and(|since| since.elapsed() >= AUTO_OPEN_CAP);
+                if ready || capped {
+                    if !ready {
+                        log::info!("auto-open: a port never answered, opening anyway");
+                    }
                     self.open_in_browser(pidx, index);
+                    return Task::none();
                 }
-                Task::none()
+                Task::perform(tokio::time::sleep(AUTO_OPEN_PROBE_RETRY), move |_| {
+                    Event::AutoOpenDue {
+                        term,
+                        generation,
+                        epoch,
+                    }
+                })
             }
             Event::Hotkey(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 // Hotkey capture owns the keyboard while recording.
@@ -9680,6 +9763,49 @@ fn browser_url(project: &ProjectState, name: &str) -> Option<String> {
     }
 }
 
+/// The local ports the auto-open probe must see listening: the badge's
+/// port plus every other local port the run printed (Vite's, beside a
+/// Laravel server's), each through the tunnel map on a remote project —
+/// a remote port with no forward yet has nothing here to knock on.
+fn auto_open_probe_ports(project: &ProjectState, name: &str) -> Vec<u16> {
+    let mut ports: Vec<u16> = project.ports.get_port(name).into_iter().collect();
+    for port in project.ports.all_local_ports(name) {
+        if !ports.contains(&port) {
+            ports.push(port);
+        }
+    }
+    if project.location.is_remote() {
+        ports
+            .into_iter()
+            .filter_map(|p| project.port_map.get(&p).copied())
+            .collect()
+    } else {
+        ports
+    }
+}
+
+/// Whether every port accepts a TCP connect right now. Vite binds
+/// `localhost`, which on some hosts is only `::1`, so both loopbacks are
+/// tried before a port counts as down.
+async fn ports_answer(ports: Vec<u16>) -> bool {
+    use tokio::net::TcpStream;
+    for port in ports {
+        let mut up = false;
+        for host in ["127.0.0.1", "::1"] {
+            let connect = TcpStream::connect((host, port));
+            if let Ok(Ok(_)) = tokio::time::timeout(AUTO_OPEN_PROBE_TIMEOUT, connect).await {
+                up = true;
+                break;
+            }
+        }
+        if !up {
+            log::info!("auto-open: port {port} not answering yet");
+            return false;
+        }
+    }
+    true
+}
+
 /// Displayed grid as trimmed lines — the detector's input, like VTE's
 /// `text_range_format` feed in the GTK app.
 fn visible_text(term: &iced_term::Terminal) -> String {
@@ -10219,5 +10345,29 @@ mod tests {
         use ProcessCategory::Command;
         let entries: Vec<ProcessEntry> = (0..12).map(|i| up(&i.to_string(), Command)).collect();
         assert_eq!(switch_targets_of([entries.as_slice()]).len(), SWITCH_SLOTS);
+    }
+}
+
+#[cfg(test)]
+mod auto_open_tests {
+    use super::*;
+
+    /// A port nothing listens on fails the probe; one with a listener
+    /// passes, and a dead port anywhere in the list fails the whole set.
+    #[tokio::test]
+    async fn probe_answers_only_when_every_port_listens() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = listener.local_addr().unwrap().port();
+        // Bind-then-drop yields a port that is free right now.
+        let dead = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        assert!(ports_answer(vec![]).await);
+        assert!(ports_answer(vec![live]).await);
+        assert!(!ports_answer(vec![dead]).await);
+        assert!(!ports_answer(vec![live, dead]).await);
+        drop(listener);
     }
 }

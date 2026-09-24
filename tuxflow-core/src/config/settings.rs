@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::keybindings::KeybindingsSettings;
-use super::persist::{read_toml, write_toml};
+use super::persist::{Baseline, read_toml, save_merged};
 use super::state::WindowSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +22,11 @@ pub struct AppSettings {
     /// a portrait monitor's geometry has no business on a laptop.
     #[serde(rename = "window", skip_serializing)]
     pub(crate) legacy_window: Option<WindowSettings>,
+    /// The file as loaded — saves apply only what changed since (see
+    /// `persist::save_merged`), so settings synced in from another machine
+    /// survive. `None` when there was no file: the first save writes it whole.
+    #[serde(skip)]
+    baseline: Baseline,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +246,8 @@ impl AppSettings {
         let Some(mut settings) = read_toml::<AppSettings>(&Self::config_path(), "settings") else {
             return Self::default();
         };
+        // Before the migration, so the migration counts as a change.
+        settings.baseline = Baseline::of(&settings);
         if settings.migrate_keybindings() {
             settings.save();
         }
@@ -260,7 +267,15 @@ impl AppSettings {
         changed
     }
 
-    pub fn save(&self) {
-        write_toml(self, &Self::config_path(), "settings");
+    pub fn save(&mut self) {
+        let mut baseline = std::mem::take(&mut self.baseline);
+        save_merged(
+            self,
+            &mut baseline,
+            &Self::config_path(),
+            "settings",
+            &["window"],
+        );
+        self.baseline = baseline;
     }
 }

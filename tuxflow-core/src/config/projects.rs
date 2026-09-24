@@ -3,8 +3,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::persist::{read_toml, write_toml};
+use crate::config::persist::{Baseline, read_toml, save_merged};
 use crate::config::schema::ProcessConfig;
+
+/// Keys moved to `config::state`, dropped from the file on save.
+const RETIRED_KEYS: &[&str] = &["last_used", "expanded"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedProjects {
@@ -44,6 +47,11 @@ pub struct SavedProjects {
     /// appear in the user's file.
     #[serde(skip)]
     path: Option<PathBuf>,
+    /// The file as this instance loaded it — saves apply only what changed
+    /// since (see `persist::save_merged`), so edits synced in from another
+    /// machine survive.
+    #[serde(skip)]
+    baseline: Baseline,
 }
 
 impl SavedProjects {
@@ -69,6 +77,7 @@ impl SavedProjects {
     pub fn load_from(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let mut saved = Self::read(&path);
+        saved.baseline = Baseline::of(&saved);
         saved.path = Some(path);
         saved
     }
@@ -88,15 +97,17 @@ impl SavedProjects {
     /// setter replaced a 33-project workspace with its own empty struct —
     /// which happened twice. Making the accidental case inert costs nothing,
     /// because the app always arrives through `load()`.
-    pub fn save(&self) {
-        let Some(path) = self.path.as_deref() else {
+    pub fn save(&mut self) {
+        let Some(path) = self.path.clone() else {
             log::error!(
                 "SavedProjects::save() on an unbound instance — ignored. \
                  Use load() in the app, or load_from(tmp) in tests."
             );
             return;
         };
-        write_toml(self, path, "saved projects");
+        let mut baseline = std::mem::take(&mut self.baseline);
+        save_merged(self, &mut baseline, &path, "saved projects", RETIRED_KEYS);
+        self.baseline = baseline;
     }
 
     pub fn add(&mut self, dir: &str) {

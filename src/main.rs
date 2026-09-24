@@ -37,6 +37,7 @@ use iced_term::{BackendCommand, SearchDirection, TerminalView};
 use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::config::ssh;
+use tuxflow_core::config::state::LocalState;
 use tuxflow_core::detect::detector;
 use tuxflow_core::remote::probe::ProbeError;
 use tuxflow_core::remote::tunnel::TunnelManager;
@@ -301,7 +302,7 @@ fn main() -> iced::Result {
     // Position is X11 — Wayland ignores Specific placement and only honors
     // size and maximized. A saved position is passed even when maximized so
     // the window maximizes on the monitor it was closed on.
-    let window = tuxflow_core::config::settings::AppSettings::load().window;
+    let window = LocalState::load().window;
     iced::application(App::new, App::update, App::view)
         .theme(|_: &App| {
             if theme::pal().light {
@@ -561,6 +562,9 @@ struct App {
     /// settings view mutates it and saves immediately on every change,
     /// like the GTK dialog's per-row save points.
     settings: AppSettings,
+    /// Machine-local state (geometry, recency, sidebar groups) — kept out
+    /// of the synced settings/projects files; see core `config::state`.
+    state: LocalState,
     /// Settings view state; `Some` = the main pane shows settings.
     settings_ui: Option<settings_ui::State>,
     /// Git Changes view state; `Some` = the main pane shows it. Like
@@ -1252,6 +1256,7 @@ impl App {
             &settings.appearance.remote_accent_color,
         );
         let saved = SavedProjects::load();
+        let state = LocalState::load();
         // Insurance: keep a .bak of the last known-good (non-empty)
         // workspace before this process ever saves. One wipe was enough.
         if !saved.directories.is_empty()
@@ -1316,13 +1321,14 @@ impl App {
             add_ssh: None,
             edit_project: None,
             window_size: Size {
-                width: settings.window.width.max(1) as f32,
-                height: settings.window.height.max(1) as f32,
+                width: state.window.width.max(1) as f32,
+                height: state.window.height.max(1) as f32,
             },
             geometry_gen: 0,
             next_project_id: 0,
             next_term_id: 0,
             settings,
+            state,
         };
 
         let mut tasks = Vec::new();
@@ -1347,8 +1353,8 @@ impl App {
         // never-used ones, which keep their saved order).
         if app.settings.sidebar.recent_first {
             let mut indexed: Vec<(usize, String)> = keys.into_iter().enumerate().collect();
-            let saved = &app.saved;
-            indexed.sort_by_key(|(i, k)| (std::cmp::Reverse(saved.get_last_used(k)), *i));
+            let state = &app.state;
+            indexed.sort_by_key(|(i, k)| (std::cmp::Reverse(state.get_last_used(k)), *i));
             keys = indexed.into_iter().map(|(_, k)| k).collect();
         }
         for key in keys {
@@ -1366,7 +1372,7 @@ impl App {
             tasks.push(Task::done(Event::OpenAddSsh(id)));
         }
         // Placement correction after the WM settles (see RestoreSettle).
-        if app.settings.window.x.is_some() && !app.settings.window.maximized {
+        if app.state.window.x.is_some() && !app.state.window.maximized {
             tasks.push(Task::perform(
                 tokio::time::sleep(Duration::from_millis(300)),
                 |_| Event::RestoreSettle,
@@ -1375,7 +1381,7 @@ impl App {
         // Maximized restore needs a second ask AFTER the WM maps the
         // window: winit's pre-map request is lost on X11 (verified under
         // metacity — the window came up floating at the saved size).
-        if app.settings.window.maximized {
+        if app.state.window.maximized {
             tasks.push(Task::perform(
                 tokio::time::sleep(Duration::from_millis(250)),
                 |_| Event::RestoreMaximize,
@@ -1450,7 +1456,7 @@ impl App {
                 .get_name(key)
                 .cloned()
                 .unwrap_or_else(|| location.base_name()),
-            expanded: self.saved.is_expanded(key).unwrap_or(true),
+            expanded: self.state.is_expanded(key).unwrap_or(true),
             phase: Phase::Loading,
             entries: Vec::new(),
             selected: 0,
@@ -2228,6 +2234,7 @@ impl App {
         self.projects.remove(pidx);
         self.saved.remove(&key);
         self.saved.save();
+        self.state.forget(&key);
         if self.active >= self.projects.len() {
             self.active = self.projects.len().saturating_sub(1);
         }
@@ -4702,7 +4709,7 @@ impl App {
                 iced::window::latest().and_then(|id| iced::window::maximize(id, true))
             }
             Event::RestoreMeasured { id, actual } => {
-                let w = &self.settings.window;
+                let w = &self.state.window;
                 log::info!(
                     "restore measure: actual {actual:?} saved ({:?},{:?})",
                     w.x,
@@ -5346,8 +5353,7 @@ impl App {
                         }
                     }
                     let key = self.projects[pidx].key();
-                    self.saved.set_expanded(&key, self.projects[pidx].expanded);
-                    self.saved.save();
+                    self.state.set_expanded(&key, self.projects[pidx].expanded);
                     // A project is otherwise activated by selecting one of
                     // its processes; one with none has only its header, so
                     // without this its pane — the only place a first
@@ -9163,7 +9169,7 @@ impl App {
     /// the vec order changes.
     fn sort_projects_recent_first(&mut self) {
         let active_id = self.projects.get(self.active).map(|p| p.id);
-        let saved = &self.saved;
+        let (saved, state) = (&self.saved, &self.state);
         let keys: HashMap<u64, (std::cmp::Reverse<bool>, i64, usize)> = self
             .projects
             .iter()
@@ -9176,7 +9182,7 @@ impl App {
                     .unwrap_or(usize::MAX);
                 (
                     p.id,
-                    recent_order_key(p.has_running(), saved.get_last_used(&key), manual),
+                    recent_order_key(p.has_running(), state.get_last_used(&key), manual),
                 )
             })
             .collect();
@@ -9442,7 +9448,7 @@ impl App {
             }
             self.projects[pidx].was_running = running;
             let key = self.projects[pidx].key();
-            self.saved.set_last_used(&key, now);
+            self.state.set_last_used(&key, now);
             flipped = true;
         }
         if flipped && self.settings.sidebar.recent_first {
@@ -9450,30 +9456,21 @@ impl App {
         }
     }
 
-    /// GTK-parity close save: reload from disk first (the GTK app may have
-    /// saved while we ran — don't clobber its edits), then write only the
-    /// window geometry. A maximized close keeps the last normal size and
-    /// position on disk, so unmaximizing after relaunch restores them.
+    /// A maximized close keeps the last normal size and position on disk,
+    /// so unmaximizing after relaunch restores them.
     fn save_window_state(&mut self, maximized: bool, position: Option<iced::Point>) {
-        let mut settings = tuxflow_core::config::settings::AppSettings::load();
-        settings.window.maximized = maximized;
+        let window = &mut self.state.window;
+        window.maximized = maximized;
         if !maximized {
-            settings.window.width = self.window_size.width as i32;
-            settings.window.height = self.window_size.height as i32;
+            window.width = self.window_size.width as i32;
+            window.height = self.window_size.height as i32;
             // `None` (Wayland: no positioning) keeps the values on disk.
             if let Some(pos) = position {
-                settings.window.x = Some(pos.x as i32);
-                settings.window.y = Some(pos.y as i32);
+                window.x = Some(pos.x as i32);
+                window.y = Some(pos.y as i32);
             }
         }
-        // Mirror into the LIVE settings too. Every settings toggle and font
-        // change saves the whole struct, and `self.settings.window` was
-        // populated once at launch — without the mirror, the first toggle
-        // after a move/resize wrote the launch-time geometry back over what
-        // the debounced saves had recorded, exactly the loss the debounce
-        // exists to prevent (cargo watch kills without a close).
-        self.settings.window = settings.window.clone();
-        settings.save();
+        self.state.save();
     }
 
     fn subscription(&self) -> Subscription<Event> {

@@ -3,7 +3,9 @@
 pub mod keybindings;
 pub mod loader;
 pub mod palette;
+pub mod persist;
 pub mod projects;
 pub mod schema;
 pub mod settings;
 pub mod ssh;
+pub mod state;

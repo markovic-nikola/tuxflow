@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::persist::{read_toml, write_toml};
 use crate::config::schema::ProcessConfig;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -17,8 +17,6 @@ pub struct SavedProjects {
     #[serde(default)]
     pub process_order: BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub expanded: BTreeMap<String, bool>,
-    #[serde(default)]
     pub deleted_processes: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub custom_commands: BTreeMap<String, Vec<ProcessConfig>>,
@@ -27,10 +25,14 @@ pub struct SavedProjects {
     /// later detection against. No entry = not baselined yet.
     #[serde(default)]
     pub known_detected: BTreeMap<String, Vec<String>>,
-    /// Unix seconds of the last user-visible activity (a process starting)
-    /// per project. Drives the sidebar's "recently used first" sort.
-    #[serde(default)]
-    pub last_used: BTreeMap<String, u64>,
+    /// Where `last_used` and `expanded` lived before they moved to the
+    /// machine-local state file ([`crate::config::state::LocalState`]).
+    /// Read once to seed that file, never written back — this file is
+    /// synced between machines and must only change when the user does.
+    #[serde(rename = "last_used", default, skip_serializing)]
+    pub(crate) legacy_last_used: BTreeMap<String, u64>,
+    #[serde(rename = "expanded", default, skip_serializing)]
+    pub(crate) legacy_expanded: BTreeMap<String, bool>,
     /// The file every mutation writes back to, stamped by [`Self::load_from`].
     /// `None` — which is what `default()` gives — means **nowhere**; see
     /// [`Self::save`] for why that is the safe default rather than the real
@@ -74,19 +76,7 @@ impl SavedProjects {
     /// Parse the file, or an empty set if it is absent, unreadable or
     /// malformed. Leaves `path` unset — [`Self::load_from`] stamps it.
     fn read(path: &Path) -> Self {
-        if path.exists() {
-            match fs::read_to_string(path) {
-                Ok(content) => match toml::from_str(&content) {
-                    Ok(saved) => {
-                        log::info!("Loaded saved projects from {}", path.display());
-                        return saved;
-                    }
-                    Err(e) => log::warn!("Failed to parse saved projects: {e}"),
-                },
-                Err(e) => log::warn!("Failed to read saved projects: {e}"),
-            }
-        }
-        Self::default()
+        read_toml(path, "saved projects").unwrap_or_default()
     }
 
     /// Persist to the file this was loaded from. Called by every setter, so
@@ -106,32 +96,7 @@ impl SavedProjects {
             );
             return;
         };
-        self.write_to(path);
-    }
-
-    fn write_to(&self, path: &Path) {
-        if let Some(parent) = path.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            log::error!("Failed to create config directory: {e}");
-            return;
-        }
-        match toml::to_string_pretty(self) {
-            Ok(content) => {
-                // Atomic: write a sibling tmp file, then rename over the
-                // target. Two writers can race (the GTK app and the iced
-                // shell share this file), and a reader must never see a
-                // torn half-write — parsing one as "empty workspace" and
-                // saving it back is how a workspace gets wiped.
-                let tmp = path.with_extension("toml.tmp");
-                let result = fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, path));
-                match result {
-                    Ok(()) => log::debug!("Saved projects list to {}", path.display()),
-                    Err(e) => log::error!("Failed to write saved projects: {e}"),
-                }
-            }
-            Err(e) => log::error!("Failed to serialize saved projects: {e}"),
-        }
+        write_toml(self, path, "saved projects");
     }
 
     pub fn add(&mut self, dir: &str) {
@@ -146,7 +111,6 @@ impl SavedProjects {
         self.icons.remove(dir);
         self.names.remove(dir);
         self.process_order.remove(dir);
-        self.expanded.remove(dir);
         self.deleted_processes.remove(dir);
         self.custom_commands.remove(dir);
         self.known_detected.remove(dir);
@@ -190,25 +154,6 @@ impl SavedProjects {
 
     pub fn get_process_order(&self, dir: &str) -> Option<&Vec<String>> {
         self.process_order.get(dir)
-    }
-
-    pub fn set_expanded(&mut self, dir: &str, expanded: bool) {
-        self.expanded.insert(dir.to_string(), expanded);
-        self.save();
-    }
-
-    pub fn is_expanded(&self, dir: &str) -> Option<bool> {
-        self.expanded.get(dir).copied()
-    }
-
-    pub fn set_last_used(&mut self, dir: &str, timestamp: u64) {
-        self.last_used.insert(dir.to_string(), timestamp);
-        self.save();
-    }
-
-    /// 0 = never used.
-    pub fn get_last_used(&self, dir: &str) -> u64 {
-        self.last_used.get(dir).copied().unwrap_or(0)
     }
 
     pub fn add_deleted_process(&mut self, dir: &str, process_name: &str) {
@@ -307,6 +252,7 @@ impl SavedProjects {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// A bound instance round-trips through the real setter → `save()` →
     /// `load_from()` path, which had no coverage at all: every setter
@@ -345,16 +291,18 @@ mod tests {
         let mut saved = SavedProjects::default();
         saved.set_icon("/p/one", Some("/p/one/logo.svg".into()));
         saved.add("/p/one");
-        saved.set_last_used("/p/one", 42);
 
         assert!(
             saved.path.is_none(),
             "default() must not be bound to any file"
         );
-        // Inert means "does not persist", not "does not work" — the three
+        // Inert means "does not persist", not "does not work" — the
         // mutations above still landed in memory, which is what the existing
         // merge_saved tests rely on.
-        assert_eq!(saved.get_last_used("/p/one"), 42);
+        assert_eq!(
+            saved.get_icon("/p/one").map(String::as_str),
+            Some("/p/one/logo.svg")
+        );
         assert_eq!(saved.directories, vec!["/p/one".to_string()]);
     }
 

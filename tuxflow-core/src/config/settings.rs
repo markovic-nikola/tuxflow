@@ -1,9 +1,10 @@
-use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use super::keybindings::KeybindingsSettings;
+use super::persist::{read_toml, write_toml};
+use super::state::WindowSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -15,18 +16,12 @@ pub struct AppSettings {
     pub tools: ToolSettings,
     pub keybindings: KeybindingsSettings,
     pub integrations: IntegrationSettings,
-    pub window: WindowSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct WindowSettings {
-    pub width: i32,
-    pub height: i32,
-    pub maximized: bool,
-    pub x: Option<i32>,
-    pub y: Option<i32>,
-    pub monitor: Option<String>,
+    /// Where the window geometry lived before it moved to the machine-local
+    /// state file ([`super::state::LocalState`]). Read once to seed that
+    /// file, never written back: this file is synced between machines, and
+    /// a portrait monitor's geometry has no business on a laptop.
+    #[serde(rename = "window", skip_serializing)]
+    pub(crate) legacy_window: Option<WindowSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,19 +229,6 @@ impl Default for IntegrationSettings {
     }
 }
 
-impl Default for WindowSettings {
-    fn default() -> Self {
-        Self {
-            width: 1200,
-            height: 800,
-            maximized: false,
-            x: None,
-            y: None,
-            monitor: None,
-        }
-    }
-}
-
 impl AppSettings {
     fn config_path() -> PathBuf {
         let config_dir = dirs::config_dir()
@@ -256,24 +238,13 @@ impl AppSettings {
     }
 
     pub fn load() -> Self {
-        let path = Self::config_path();
-        if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(content) => match toml::from_str::<AppSettings>(&content) {
-                    Ok(mut settings) => {
-                        log::debug!("Loaded settings from {}", path.display());
-                        let migrated = settings.migrate_keybindings();
-                        if migrated {
-                            settings.save();
-                        }
-                        return settings;
-                    }
-                    Err(e) => log::warn!("Failed to parse settings: {e}"),
-                },
-                Err(e) => log::warn!("Failed to read settings file: {e}"),
-            }
+        let Some(mut settings) = read_toml::<AppSettings>(&Self::config_path(), "settings") else {
+            return Self::default();
+        };
+        if settings.migrate_keybindings() {
+            settings.save();
         }
-        Self::default()
+        settings
     }
 
     /// Migrate keybindings whose old default conflicts with common terminal app
@@ -290,28 +261,6 @@ impl AppSettings {
     }
 
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            log::error!("Failed to create config directory: {e}");
-            return;
-        }
-        match toml::to_string_pretty(self) {
-            Ok(content) => {
-                // Write-then-rename, like SavedProjects: two apps share this
-                // file (the .deb ships both shells) and the iced shell saves
-                // geometry in the background — a reader catching a plain
-                // truncate-write mid-flight parses a torn file as defaults
-                // and, on its next save, writes those defaults back.
-                let tmp = path.with_extension("toml.tmp");
-                let result = fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, &path));
-                match result {
-                    Ok(()) => log::info!("Saved settings to {}", path.display()),
-                    Err(e) => log::error!("Failed to write settings: {e}"),
-                }
-            }
-            Err(e) => log::error!("Failed to serialize settings: {e}"),
-        }
+        write_toml(self, &Self::config_path(), "settings");
     }
 }

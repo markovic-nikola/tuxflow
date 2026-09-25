@@ -325,7 +325,12 @@ const FOCUS_BORDER_IDLE_DARKEN: f32 = 0.35;
 /// wash at alpha a scales sRGB by (1 − a), i.e. linear luminance by
 /// (1 − a)^2.2, so the alpha that lands on the target luminance is a
 /// closed form. Floors are only there for the degenerate ends (a pure
-/// black background cannot get darker).
+/// black background cannot get darker), and the ceiling for the ones next
+/// to them: the wash covers the text too, and a near-black scheme (Ayu,
+/// GitHub Dark, Flexoki — L* 4–5) would need ~50 % to move 3.5 L*, which
+/// halves the text to shift a background nobody can see move.
+const MAX_DIM_ALPHA: f32 = 0.3;
+
 pub fn dim_alpha_for(bg: Color) -> f32 {
     fn lin(c: f32) -> f32 {
         if c <= 0.04045 {
@@ -354,7 +359,7 @@ pub fn dim_alpha_for(bg: Color) -> f32 {
     }
     let target = luminance((lstar(y) - UNFOCUSED_DIM_LSTAR).max(0.0));
     let scale = (target / y).clamp(0.0, 1.0).powf(1.0 / 2.2);
-    (1.0 - scale).clamp(0.0, 0.5)
+    (1.0 - scale).clamp(0.0, MAX_DIM_ALPHA)
 }
 
 /// The terminal's focus indicator, painted by the widget from the same
@@ -1112,7 +1117,7 @@ mod tests {
         assert_eq!(dim_alpha_for(Color::BLACK), 0.0);
         for t in palette::TERMINAL_THEMES {
             let a = dim_alpha_for(terminal_background(t.name));
-            assert!((0.0..=0.3).contains(&a), "{}: {a}", t.name);
+            assert!((0.0..=MAX_DIM_ALPHA).contains(&a), "{}: {a}", t.name);
         }
     }
 

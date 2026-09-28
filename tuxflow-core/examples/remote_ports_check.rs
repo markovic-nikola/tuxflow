@@ -18,5 +18,12 @@ fn main() {
             Some(ports) => println!("{session:<24} {ports:?}"),
             None => println!("{session:<24} (no live pane)"),
         }
+        // What auto-open decides on: the same walk, plus whether a Vite in
+        // the tree has yet to bind.
+        println!(
+            "{:<24} {:?}",
+            "",
+            tuxflow_core::remote::ports::run_listeners(&host, session)
+        );
     }
 }

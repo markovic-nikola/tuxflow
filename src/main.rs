@@ -503,6 +503,31 @@ impl ProjectState {
         self.location.key()
     }
 
+    /// Forward, 1:1, ports the host saw `session`'s process tree listen on
+    /// (`ensure_exact`): remote dev servers bake their own port into URLs
+    /// they serve. A taken local port is a hard failure by design, not a
+    /// remap. Returns whether a new forward opened.
+    fn forward_exact(&mut self, session: &str, ports: &[u16]) -> bool {
+        let Some(tunnels) = &mut self.tunnels else {
+            return false;
+        };
+        let mut opened = false;
+        for &port in ports {
+            if self.port_map.contains_key(&port) {
+                continue;
+            }
+            match tunnels.ensure_exact(port) {
+                Some(local) => {
+                    self.port_map.insert(port, local);
+                    opened = true;
+                    log::info!("exact forward {port} for {session}");
+                }
+                None => log::warn!("exact forward for {port} failed — local port taken"),
+            }
+        }
+        opened
+    }
+
     fn running(&self) -> usize {
         self.entries.iter().filter(|e| e.is_running()).count()
     }
@@ -1117,6 +1142,15 @@ enum Event {
         term: u64,
         generation: u64,
         epoch: u64,
+    },
+    /// The host answered for a remote run: what its process tree listens
+    /// on, and whether a Vite in it has yet to bind. None when there is no
+    /// tree to walk (no tmux on the host) or ssh failed.
+    AutoOpenHostProbed {
+        term: u64,
+        generation: u64,
+        epoch: u64,
+        listeners: Option<remote::ports::RunListeners>,
     },
     /// The readiness probe answered — `ready` when every port accepted.
     AutoOpenProbed {
@@ -3806,18 +3840,82 @@ impl App {
             .then_some((pidx, index))
     }
 
-    /// The quiet period is over: check that every local port the run
-    /// printed actually accepts a connection before opening the page.
+    /// The quiet period is over: check that every port the run serves
+    /// actually accepts a connection before opening the page. A remote run
+    /// asks the host first — the local end of an `ssh -L` forward accepts
+    /// whether or not anything listens behind it, so knocking on it alone
+    /// proves nothing, and a Vite that `php artisan dev` never printed
+    /// would not be on the list at all.
     fn auto_open_probe(&mut self, term: u64, generation: u64, epoch: u64) -> Task<Event> {
         let Some((pidx, index)) = self.auto_open_target(term, generation, epoch) else {
             return Task::none();
         };
         let project = &self.projects[pidx];
-        let name = project.entries[index].config.name.clone();
-        if !project.ports.has_port(&name) {
+        let entry = &project.entries[index];
+        if !project.ports.has_port(&entry.config.name) {
             return Task::none();
         }
-        let ports = auto_open_probe_ports(project, &name);
+        if let (Some(host), Some(session)) = (project.location.host(), entry.remote_session.clone())
+        {
+            let host = host.to_string();
+            return Task::perform(
+                tokio::task::spawn_blocking(move || remote::ports::run_listeners(&host, &session)),
+                move |joined| Event::AutoOpenHostProbed {
+                    term,
+                    generation,
+                    epoch,
+                    listeners: joined.ok().flatten(),
+                },
+            );
+        }
+        self.auto_open_knock(pidx, index, term, generation, epoch, &[])
+    }
+
+    /// The host has spoken for a remote run: forward what it listens on,
+    /// hold while its Vite is still starting, then knock on the forwards.
+    fn auto_open_host_probed(
+        &mut self,
+        term: u64,
+        generation: u64,
+        epoch: u64,
+        listeners: Option<remote::ports::RunListeners>,
+    ) -> Task<Event> {
+        let Some((pidx, index)) = self.auto_open_target(term, generation, epoch) else {
+            return Task::none();
+        };
+        let Some(listeners) = listeners else {
+            return self.auto_open_knock(pidx, index, term, generation, epoch, &[]);
+        };
+        if let Some(session) = self.projects[pidx].entries[index].remote_session.clone() {
+            self.projects[pidx].forward_exact(&session, &listeners.ports);
+        }
+        if listeners.vite_starting {
+            log::info!("auto-open: Vite has not bound yet");
+            return Task::done(Event::AutoOpenProbed {
+                term,
+                generation,
+                epoch,
+                ready: false,
+            });
+        }
+        self.auto_open_knock(pidx, index, term, generation, epoch, &listeners.ports)
+    }
+
+    /// Knock on every port the page needs from this machine: what the run
+    /// printed plus `served` (remote ports the host saw it listen on). On a
+    /// remote project that is the local ends of the forwards, which proves
+    /// the forward is up — ssh binds it only after its own handshake.
+    fn auto_open_knock(
+        &self,
+        pidx: usize,
+        index: usize,
+        term: u64,
+        generation: u64,
+        epoch: u64,
+        served: &[u16],
+    ) -> Task<Event> {
+        let project = &self.projects[pidx];
+        let ports = auto_open_probe_ports(project, &project.entries[index].config.name, served);
         Task::perform(ports_answer(ports), move |ready| Event::AutoOpenProbed {
             term,
             generation,
@@ -5683,10 +5781,6 @@ impl App {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
                 };
-                // Everything the host-side walk found forwards 1:1
-                // (ensure_exact): remote dev servers bake their own port
-                // into URLs they serve. A taken local port is a hard
-                // failure by design, not a remap.
                 let mut opened = false;
                 let proj = &mut self.projects[pidx];
                 for (session, ports) in &session_ports {
@@ -5694,25 +5788,8 @@ impl App {
                         .entries
                         .iter()
                         .any(|e| e.remote_session.as_deref() == Some(session));
-                    if !ours {
-                        continue;
-                    }
-                    for &port in ports {
-                        if proj.port_map.contains_key(&port) {
-                            continue;
-                        }
-                        if let Some(tunnels) = &mut proj.tunnels {
-                            match tunnels.ensure_exact(port) {
-                                Some(local) => {
-                                    proj.port_map.insert(port, local);
-                                    opened = true;
-                                    log::info!("exact forward {port} for {session}");
-                                }
-                                None => {
-                                    log::warn!("exact forward for {port} failed — local port taken")
-                                }
-                            }
-                        }
+                    if ours {
+                        opened |= proj.forward_exact(session, ports);
                     }
                 }
                 proj.poll_interval = if opened {
@@ -5778,6 +5855,12 @@ impl App {
                 generation,
                 epoch,
             } => self.auto_open_probe(term, generation, epoch),
+            Event::AutoOpenHostProbed {
+                term,
+                generation,
+                epoch,
+                listeners,
+            } => self.auto_open_host_probed(term, generation, epoch, listeners),
             Event::AutoOpenProbed {
                 term,
                 generation,
@@ -9762,11 +9845,17 @@ fn browser_url(project: &ProjectState, name: &str) -> Option<String> {
 
 /// The local ports the auto-open probe must see listening: the badge's
 /// port plus every other local port the run printed (Vite's, beside a
-/// Laravel server's), each through the tunnel map on a remote project —
-/// a remote port with no forward yet has nothing here to knock on.
-fn auto_open_probe_ports(project: &ProjectState, name: &str) -> Vec<u16> {
+/// Laravel server's) and every port in `served` (what the host saw the
+/// run listen on), each through the tunnel map on a remote project — a
+/// remote port with no forward yet has nothing here to knock on.
+fn auto_open_probe_ports(project: &ProjectState, name: &str, served: &[u16]) -> Vec<u16> {
     let mut ports: Vec<u16> = project.ports.get_port(name).into_iter().collect();
-    for port in project.ports.all_local_ports(name) {
+    for port in project
+        .ports
+        .all_local_ports(name)
+        .into_iter()
+        .chain(served.iter().copied())
+    {
         if !ports.contains(&port) {
             ports.push(port);
         }

@@ -1216,6 +1216,9 @@ enum Event {
     PaletteSubmit,
     /// A palette row picked by click.
     PaletteActivate(PaletteEntry),
+    /// The palette dismissed without a pick: a press on its backdrop, or
+    /// the Esc its own input consumed.
+    PaletteClose,
     /// Ignored-status keys — the widget consumed everything it wanted
     /// (Ctrl+Shift+V with text on the clipboard never reaches here).
     Hotkey(iced::keyboard::Event),
@@ -6088,6 +6091,10 @@ impl App {
                 }
             }
             Event::PaletteActivate(entry) => self.activate_palette(entry),
+            Event::PaletteClose => match self.palette_open {
+                true => self.close_palette(),
+                false => Task::none(),
+            },
             Event::ImagePasted {
                 project,
                 term,
@@ -7328,23 +7335,35 @@ impl App {
         .padding(12)
         .style(theme::form_card);
 
-        container(card)
+        // The dim is a click-away backdrop, as under the confirm card: a
+        // bare container let the press fall through to the pane, which
+        // focused the terminal beneath — and a focused terminal consumes
+        // Esc, so the palette could no longer be closed at all.
+        let backdrop = iced::widget::mouse_area(
+            container(column![])
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.4,
+                    ))),
+                    ..Default::default()
+                }),
+        )
+        .on_press(Event::PaletteClose);
+
+        // Opaque: a press on the card's own padding or footer is not a
+        // press on the backdrop.
+        let placed = container(iced::widget::opaque(card))
             .center_x(Length::Fill)
             .padding(iced::Padding {
                 top: 90.0,
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(|_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgba(
-                    0.0, 0.0, 0.0, 0.4,
-                ))),
-                ..Default::default()
-            })
-            .into()
+            });
+
+        iced::widget::stack![backdrop, placed].into()
     }
 
     /// The GTK header bar's button cluster: sidebar toggle, sidebar
@@ -9590,6 +9609,24 @@ impl App {
             // Ignored-status keys only — anything a focused widget consumed
             // never reaches the hotkeys.
             iced::keyboard::listen().map(Event::Hotkey),
+            // The palette's input consumes the first Esc to unfocus itself,
+            // which left a palette that neither typed nor closed. Only while
+            // it is up, and only the CAPTURED press (the ignored one is the
+            // Hotkey cascade's) — a terminal's vim Esc never comes this way.
+            if self.palette_open {
+                iced::event::listen_with(|event, status, _| match (event, status) {
+                    (
+                        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                            ..
+                        }),
+                        iced::event::Status::Captured,
+                    ) => Some(Event::PaletteClose),
+                    _ => None,
+                })
+            } else {
+                Subscription::none()
+            },
             iced::window::resize_events().map(|(_, size)| Event::WindowResized(size)),
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Window(iced::window::Event::Moved(_)) => Some(Event::WindowMoved),

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
-use tokio::net::UnixListener;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 
 use crate::mcp::bridge::{self, McpBridge};
@@ -120,7 +121,10 @@ pub fn start_mcp_server(
                     Ok((stream, _addr)) => {
                         let server = TuxFlowMcpServer::new(bridge.clone());
                         tokio::spawn(async move {
-                            match server.serve(stream).await {
+                            let Some(transport) = answer_preinit_probes(stream).await else {
+                                return;
+                            };
+                            match server.serve(transport).await {
                                 Ok(service) => {
                                     log::info!("MCP client connected");
                                     let _ = service.waiting().await;
@@ -140,6 +144,56 @@ pub fn start_mcp_server(
         });
     });
     handle
+}
+
+/// Reads up to the client's `initialize` (or a ping, which rmcp answers
+/// itself) and hands back a transport that replays that line. rmcp treats
+/// any other request ahead of `initialize` as fatal and closes WITHOUT a
+/// reply, while newer clients open with a capability probe
+/// (`server/discover`) and wait for "method not found" before falling back
+/// to the classic handshake — so every such request is answered here and
+/// the connection kept. `None` when the client left first.
+async fn answer_preinit_probes(
+    stream: UnixStream,
+) -> Option<(
+    impl AsyncRead + Send + Unpin + 'static,
+    tokio::net::unix::OwnedWriteHalf,
+)> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        let Some(reply) = preinit_refusal(&line) else {
+            break;
+        };
+        writer.write_all(reply.as_bytes()).await.ok()?;
+        writer.flush().await.ok()?;
+    }
+    let replay = std::io::Cursor::new(std::mem::take(&mut line).into_bytes());
+    Some((replay.chain(reader), writer))
+}
+
+/// The "method not found" line for a request that may not precede
+/// `initialize`; `None` for everything rmcp should see (initialize, ping,
+/// notifications, anything unparseable — its own error is the better one).
+fn preinit_refusal(line: &str) -> Option<String> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    let method = msg.get("method")?.as_str()?;
+    let id = msg.get("id")?;
+    if matches!(method, "initialize" | "ping") {
+        return None;
+    }
+    log::debug!("MCP client probed {method} before initialize; answered method-not-found");
+    let reply = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": -32601, "message": format!("Method not found: {method}")},
+    });
+    Some(format!("{reply}\n"))
 }
 
 pub fn stop_mcp_server(project_name: &str) {

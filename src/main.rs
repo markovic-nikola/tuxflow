@@ -84,6 +84,12 @@ const MCP_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
 const FETCH_GUARD_EXPIRY: Duration =
     tuxflow_core::remote::git::GIT_TIMEOUT.saturating_add(Duration::from_secs(30));
 
+/// Pause between background fetch passes over the projects not on
+/// screen — what keeps a switch's first ↓ current.
+const GIT_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+/// The first pass waits out the launch burst of probes and reattaches.
+const GIT_SWEEP_START: Duration = Duration::from_secs(20);
+
 /// Frame cadence shared by every [`Anim`] ramp — ~60fps.
 const FRAME: Duration = Duration::from_millis(16);
 /// The sidebar cluster's slide-in (design round F).
@@ -1068,6 +1074,9 @@ enum Event {
         generation: u64,
     },
     GitTick,
+    /// Background fetch of the projects NOT on screen, one after the
+    /// other; `None` starts a pass (see `git_sweep_step`).
+    GitSweep(Option<u64>),
     /// 30 s chain: are the remote MCP sockets still answered?
     McpHealthTick,
     GitPolled {
@@ -1425,6 +1434,9 @@ impl App {
             ));
         }
         tasks.push(Task::done(Event::GitTick));
+        tasks.push(Task::perform(tokio::time::sleep(GIT_SWEEP_START), |_| {
+            Event::GitSweep(None)
+        }));
         tasks.push(Task::perform(
             tokio::time::sleep(MCP_HEALTH_INTERVAL),
             |_| Event::McpHealthTick,
@@ -2422,32 +2434,68 @@ impl App {
     /// `do_fetch: true`: on switch, on Ready, and on the 60 s cadence.
     fn poll_git_fetch(&mut self) -> Task<Event> {
         let plain = self.poll_git();
-        let Some(project) = self.active_project() else {
-            return plain;
-        };
-        if !matches!(project.phase, Phase::Ready) {
-            return plain;
+        match self.active_project().map(|p| p.id) {
+            Some(id) => Task::batch([plain, self.fetch_task(id).unwrap_or_else(Task::none)]),
+            None => plain,
         }
-        let id = project.id;
-        let location = project.location.clone();
+    }
+
+    /// `git fetch` + status for `project`, reported as a fetched
+    /// `GitPolled` — or None when it isn't Ready, or its guard says a
+    /// fetch is already on the way (that one's report will do).
+    fn fetch_task(&mut self, project: u64) -> Option<Task<Event>> {
+        let p = self.projects.iter().find(|p| p.id == project)?;
+        if !matches!(p.phase, Phase::Ready) {
+            return None;
+        }
+        let location = p.location.clone();
         let now = Instant::now();
-        match self.git_fetching.get(&id) {
-            Some(since) if now.duration_since(*since) < FETCH_GUARD_EXPIRY => return plain,
+        match self.git_fetching.get(&project) {
+            Some(since) if now.duration_since(*since) < FETCH_GUARD_EXPIRY => return None,
             Some(since) => log::warn!(
-                "git fetch guard for project {id} expired after {:?} — fetching again",
+                "git fetch guard for project {project} expired after {:?} — fetching again",
                 now.duration_since(*since)
             ),
             None => {}
         }
-        self.git_fetching.insert(id, now);
-        let fetch =
-            Self::query_git_task(location, true, move |status, diffstat| Event::GitPolled {
-                project: id,
+        self.git_fetching.insert(project, now);
+        Some(Self::query_git_task(
+            location,
+            true,
+            move |status, diffstat| Event::GitPolled {
+                project,
                 status,
                 diffstat,
                 fetched: true,
-            });
-        Task::batch([plain, fetch])
+            },
+        ))
+    }
+
+    /// One step of the background sweep: fetch the next project after
+    /// `after` (by id — the sidebar may be reordered mid-pass) and chain
+    /// the step after it onto its report. The switch fetch alone can't
+    /// make ↓ prompt: `git fetch` on the host costs ~0.6 s of GitHub
+    /// handshake however the call is made, so the count a switch shows
+    /// first is only as fresh as the last fetch. Swept one project at a
+    /// time — each is four mux channels, and a launch already crowds
+    /// sshd's MaxSessions.
+    fn git_sweep_step(&mut self, after: Option<u64>) -> Task<Event> {
+        let active = self.active_project().map(|p| p.id);
+        let mut ids: Vec<u64> = self
+            .projects
+            .iter()
+            .map(|p| p.id)
+            .filter(|&id| after.is_none_or(|a| id > a) && Some(id) != active)
+            .collect();
+        ids.sort_unstable();
+        for id in ids {
+            if let Some(fetch) = self.fetch_task(id) {
+                return fetch.chain(Task::done(Event::GitSweep(Some(id))));
+            }
+        }
+        Task::perform(tokio::time::sleep(GIT_SWEEP_INTERVAL), |_| {
+            Event::GitSweep(None)
+        })
     }
 
     /// The status-bar sync chip: fetch, ff-pull if behind, push if ahead.
@@ -5507,6 +5555,7 @@ impl App {
                 });
                 Task::batch([poll, next])
             }
+            Event::GitSweep(after) => self.git_sweep_step(after),
             Event::McpHealthTick => {
                 // The forwards are ssh connections of their own and the
                 // agents behind them live on in tmux, so an outage (or a

@@ -455,3 +455,9 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     already forwards. The answer is the THEME's colour, never
     `term.colors()`: the view ignores OSC-set overrides, so the theme is
     what is on screen.
+30. **Pixel scroll deltas keep their sign** (`handle_wheel_scrolled`).
+    Upstream accumulated `ScrollDelta::Pixels` with `-= y` while `Lines`
+    used `y` as-is, so the two disagreed on direction — and pixels are
+    what a touchpad reports (winit on Wayland), so the terminal scrolled
+    against the finger while every iced scrollable beside it was right.
+    Both now treat positive y as up, which is iced's own convention.

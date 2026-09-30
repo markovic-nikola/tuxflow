@@ -40,8 +40,10 @@ pub struct State {
     /// and the cache key a remote icon pick is stored under.
     pub key: String,
     pub remote: bool,
-    /// Pending icon, always a LOCAL path (remote picks are fetched into
-    /// the cache at pick time, so Save stays synchronous). None = initials.
+    /// Pending icon as projects.toml saves it: a local path, or a remote
+    /// pick's host ref (`ssh://host/path`, fetched into the cache at pick
+    /// time so the preview has a file and Save stays synchronous).
+    /// None = initials.
     pub icon: Option<String>,
     /// The image path being typed/browsed, on whichever machine the
     /// project lives.
@@ -76,7 +78,7 @@ pub enum Msg {
     /// Enter in the path field — commit what is typed as the icon.
     CommitIconPath,
     IconAutoDetect,
-    /// A fetch/detect worker came back with a local path (or nothing).
+    /// A fetch/detect worker came back with the host ref to save (or nothing).
     IconFetched {
         stamp: u64,
         path: Option<String>,
@@ -215,8 +217,12 @@ pub fn view(state: &'_ State) -> Element<'_, Msg> {
     .spacing(14);
 
     // ── Icon: preview + auto-detect/reset, and the path browser ─────────
+    let preview_path = state
+        .icon
+        .as_deref()
+        .and_then(|v| tuxflow_core::remote::icon::local_path(v, &state.key));
     let preview = avatar(
-        state.icon.as_deref().map(std::path::Path::new),
+        preview_path.as_deref(),
         &state.name,
         accent,
         state.remote,

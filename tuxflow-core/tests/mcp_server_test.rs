@@ -166,6 +166,37 @@ fn socket_client_sees_snapshots_and_tool_calls_reach_the_bridge() {
     );
 }
 
+/// Newer clients open with `server/discover` and fall back to `initialize`
+/// on "method not found". rmcp closes the connection on it instead, so the
+/// server answers the probe itself and the SAME connection still serves.
+#[test]
+fn a_probe_ahead_of_initialize_is_refused_and_the_connection_kept() {
+    let (handle, _rx) = server("preinit");
+    let stream = UnixStream::connect(handle.socket_path()).unwrap();
+    let mut w = stream.try_clone().unwrap();
+    let mut r = BufReader::new(stream);
+
+    writeln!(
+        w,
+        r#"{{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{{}}}}"#
+    )
+    .unwrap();
+    let mut line = String::new();
+    assert!(r.read_line(&mut line).unwrap() > 0, "closed on the probe");
+    let v: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["id"], json!("server-discover-probe-1"));
+    assert_eq!(v["error"]["code"], json!(-32601));
+
+    handshake(&mut w, &mut r);
+    let list = call(&mut w, &mut r, 2, "tools/list", json!({}));
+    assert!(
+        list["result"]["tools"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty())
+    );
+    handle.stop();
+}
+
 fn python3() -> Option<&'static str> {
     Command::new("python3")
         .arg("--version")

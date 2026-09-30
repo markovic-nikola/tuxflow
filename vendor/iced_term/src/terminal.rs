@@ -176,6 +176,22 @@ impl Terminal {
                 // Snapshotting the viewport and clearing the canvas cache on
                 // every event is wasted work for commands that cannot change
                 // what is displayed (mouse reports, hover) — classify first.
+                // An OSC 4/10/11/12 colour QUERY is answered from the theme
+                // (patch 29) and leaves as an ordinary PtyWrite — the
+                // backend holds the PTY but not the colours.
+                let cmd = match cmd {
+                    backend::Command::ProcessAlacrittyEvent(
+                        generation,
+                        AlacrittyEvent::ColorRequest(index, format),
+                    ) => match self.theme.color_at(index) {
+                        Some(rgb) => backend::Command::ProcessAlacrittyEvent(
+                            generation,
+                            AlacrittyEvent::PtyWrite(format(rgb)),
+                        ),
+                        None => return action,
+                    },
+                    cmd => cmd,
+                };
                 let needs_sync = proxied_cmd_changes_content(&cmd);
                 let link_redraw =
                     matches!(cmd, backend::Command::ProcessLink(..));

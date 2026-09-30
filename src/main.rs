@@ -7902,7 +7902,11 @@ impl App {
                     cluster = cluster.push(row_action(
                         ICON_PLAY,
                         theme::alpha(LOCAL_ACCENT, p),
-                        entry.config.command.clone(),
+                        // A plain terminal has no command to show.
+                        match entry.config.command.trim() {
+                            "" => String::from("Start"),
+                            command => command.to_string(),
+                        },
                         Event::Start {
                             project: project.id,
                             index,

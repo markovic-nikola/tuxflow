@@ -445,4 +445,13 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     frame (quads; the quad pipeline has no dash pattern) over a wash,
     painted in BOTH focus states. The embedder swaps it in for the
     configured mark while a file drag hovers the window.
-
+29. **Colour queries are answered** (`Theme::color_at`, `Terminal::handle`).
+    alacritty parses OSC 4/10/11/12 `?` into `Event::ColorRequest(index,
+    format)` and expects the embedder to call `format` with the colour;
+    the backend's `_ => Ignore` dropped it, so nothing running inside
+    could learn the background — an agent's "auto" theme stayed dark on
+    a light scheme. Answered in `Terminal::handle`, where the theme
+    lives, by rewriting the event into the `PtyWrite` the backend
+    already forwards. The answer is the THEME's colour, never
+    `term.colors()`: the view ignores OSC-set overrides, so the theme is
+    what is on screen.

@@ -97,6 +97,25 @@ impl Theme {
         }
     }
 
+    /// The colour a program asking by INDEX is told (patch 29): alacritty's
+    /// numbering — 0–255 the palette, then `NamedColor`'s foreground,
+    /// background and cursor. The palette carries no cursor colour; the
+    /// cursor is drawn in the foreground, so that is the answer. `None`
+    /// for the indices no query names (dim/bright foreground).
+    pub fn color_at(&self, index: usize) -> Option<ansi::Rgb> {
+        const FOREGROUND: usize = NamedColor::Foreground as usize;
+        const BACKGROUND: usize = NamedColor::Background as usize;
+        const CURSOR: usize = NamedColor::Cursor as usize;
+        let color = match index {
+            0..=255 => ansi::Color::Indexed(index as u8),
+            FOREGROUND | CURSOR => ansi::Color::Named(NamedColor::Foreground),
+            BACKGROUND => ansi::Color::Named(NamedColor::Background),
+            _ => return None,
+        };
+        let [r, g, b, _] = self.get_color(color).into_rgba8();
+        Some(ansi::Rgb { r, g, b })
+    }
+
     pub fn get_color(&self, c: ansi::Color) -> Color {
         match c {
             ansi::Color::Spec(rgb) => Color::from_rgb8(rgb.r, rgb.g, rgb.b),
@@ -263,6 +282,20 @@ mod tests {
     #[test]
     fn hex_to_color_non_valid_hex_string() {
         assert!(hex_to_color("#KKLLOO").is_err());
+    }
+
+    #[test]
+    fn color_at_answers_queries_from_the_palette() {
+        let theme = Theme::default();
+        let rgb = |hex: &str| {
+            let [r, g, b, _] = hex_to_color(hex).unwrap().into_rgba8();
+            ansi::Rgb { r, g, b }
+        };
+        assert_eq!(theme.color_at(1), Some(rgb(&theme.palette.red)));
+        assert_eq!(theme.color_at(256), Some(rgb(&theme.palette.foreground)));
+        assert_eq!(theme.color_at(257), Some(rgb(&theme.palette.background)));
+        assert_eq!(theme.color_at(258), Some(rgb(&theme.palette.foreground)));
+        assert_eq!(theme.color_at(259), None);
     }
 
     #[test]

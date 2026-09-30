@@ -464,8 +464,12 @@ impl<'a> TerminalView<'a> {
             ScrollDelta::Lines { y, .. } => {
                 (y.signum() * y.abs().round()) as i32
             },
+            // Same sign as `Lines`: positive y is up in both (iced's own
+            // scrollable adds them alike). Upstream subtracted here, so a
+            // touchpad — the device that reports pixels — scrolled the
+            // grid backwards while a wheel was right.
             ScrollDelta::Pixels { y, .. } => {
-                state.scroll_pixels -= y;
+                state.scroll_pixels += y;
                 let line_height = font_measure.height;
                 let lines = (state.scroll_pixels / line_height).trunc();
                 state.scroll_pixels %= line_height;
@@ -2133,8 +2137,8 @@ mod tests {
             );
 
             assert_eq!(commands.len(), 1);
-            assert!(matches!(commands[0], Command::Scroll(-2)));
-            assert_eq!(state.scroll_pixels, -8.600002);
+            assert!(matches!(commands[0], Command::Scroll(2)));
+            assert_eq!(state.scroll_pixels, 8.600002);
         }
 
         #[test]
@@ -2152,8 +2156,8 @@ mod tests {
             );
 
             assert_eq!(commands.len(), 1);
-            assert!(matches!(commands[0], Command::Scroll(3)));
-            assert_eq!(state.scroll_pixels, 5.4000034);
+            assert!(matches!(commands[0], Command::Scroll(-3)));
+            assert_eq!(state.scroll_pixels, -5.4000034);
         }
     }
 }

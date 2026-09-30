@@ -86,9 +86,15 @@ pub fn detect_icons_fs(fs: &dyn crate::remote::fs::ProjectFs) -> Vec<&'static st
         .collect()
 }
 
+/// Where `rel` (relative to a project root) stands in detection's priority
+/// order, if it is a literal candidate at all.
+pub fn candidate_rank(rel: &str) -> Option<usize> {
+    CANDIDATES.iter().position(|c| *c == rel)
+}
+
 /// Non-empty regular file — 0-byte placeholders (Laravel's default
 /// favicon.ico) must not win the scan.
-fn is_usable_icon(path: &Path) -> bool {
+pub fn is_usable_icon(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file() && m.len() > 0)
         .unwrap_or(false)
@@ -114,59 +120,34 @@ pub fn detect_icon(project_dir: &Path) -> Option<String> {
     None
 }
 
-/// Resolve a project's icon at load: the saved path wins (it is the user's
-/// pick in Edit Project, or an earlier detection), otherwise a local project
-/// scans its own disk while a remote one takes `hint` — the file its probe
-/// already fetched into `~/.cache/tuxflow/icons/`.
+/// Resolve a LOCAL project's icon at load: the saved path wins (it is the
+/// user's pick in Edit Project, or an earlier detection), otherwise the
+/// project's own disk is scanned. Remote projects resolve through
+/// [`crate::remote::icon::plan`] on their probe instead — their saved value
+/// names a file on the host, not here.
 ///
-/// A saved path only wins while its file still EXISTS. Every saved icon is
-/// a local path — remote picks are downloaded by `cache_remote_icon` before
-/// being saved — and the fetched ones all live under `~/.cache`, which the
-/// user may clear at any time. Honoring a dead entry would pin the initials
-/// square forever: it also suppresses the probe's re-fetch (see
-/// [`has_usable_saved_icon`]), so nothing ever writes the file back. Falling
-/// through re-detects instead, and the dead entry stands until something
-/// better overwrites it — deliberately not cleared, so one unlucky launch
-/// can't discard a hand-picked path that might reappear.
+/// A saved path only wins while its file still EXISTS: honoring a dead
+/// entry would pin the initials square forever. Falling through re-detects
+/// instead, and the dead entry stands until something better overwrites it
+/// — deliberately not cleared, so one unlucky launch can't discard a
+/// hand-picked path that might reappear.
 ///
 /// A fresh detection is remembered, so the scan runs once per project rather
 /// than every launch. `set_icon` persists on its own — as every setter on
 /// [`SavedProjects`] does — so there is no `save()` here; adding one would
 /// write the file twice for a single change.
-///
-/// Blocking (stats the project dir); call off a UI thread for remote work.
-pub fn resolve_icon(
-    saved: &mut SavedProjects,
-    key: &str,
-    local_dir: Option<&Path>,
-    hint: Option<String>,
-) -> Option<String> {
+pub fn resolve_icon(saved: &mut SavedProjects, key: &str, dir: &Path) -> Option<String> {
     if let Some(path) = saved.get_icon(key)
         && is_usable_icon(Path::new(path))
     {
         return Some(path.clone());
     }
-    // A local project scans its own disk; a remote one has no local dir and
-    // falls through to the hint — the icon its probe already pulled into the
-    // cache. The hint is only ever set for remote projects, but the order
-    // makes the precedence explicit rather than incidental.
-    let detected = local_dir.and_then(detect_icon).or(hint);
+    let detected = detect_icon(dir);
     if let Some(path) = &detected {
         log::info!("Auto-detected project icon: {path}");
         saved.set_icon(key, Some(path.clone()));
     }
     detected
-}
-
-/// Whether `key` has a saved icon whose file is still there. The remote
-/// probes decide "skip the icon fetch" by asking THIS, not bare `get_icon`:
-/// every fetched icon lives in `~/.cache/tuxflow/icons/`, and after a
-/// cleared cache a presence-only check would suppress the one code path
-/// that could restore the file its entry points at.
-pub fn has_usable_saved_icon(saved: &SavedProjects, key: &str) -> bool {
-    saved
-        .get_icon(key)
-        .is_some_and(|path| is_usable_icon(Path::new(path)))
 }
 
 #[cfg(test)]
@@ -220,7 +201,7 @@ mod tests {
         let expected = project.join("logo.svg").to_string_lossy().into_owned();
 
         let mut saved = scratch_saved(tmp.path());
-        let resolved = resolve_icon(&mut saved, "k", Some(&project), None);
+        let resolved = resolve_icon(&mut saved, "k", &project);
         assert_eq!(resolved.as_deref(), Some(expected.as_str()));
 
         // Reload from disk: the remembering has to survive the process, which
@@ -230,8 +211,7 @@ mod tests {
     }
 
     /// A saved icon — the user's pick in Edit Project — outranks whatever is
-    /// on disk, and costs no scan. That short-circuit is what keeps a remote
-    /// project's probe from opening an ssh round trip it doesn't need.
+    /// on disk, and costs no scan.
     #[test]
     fn a_saved_icon_wins_over_detection() {
         let tmp = tempfile::tempdir().expect("temp dir");
@@ -245,13 +225,12 @@ mod tests {
         let mut saved = scratch_saved(tmp.path());
         saved.set_icon("k", Some(chosen.clone()));
 
-        let resolved = resolve_icon(&mut saved, "k", Some(&project), None);
+        let resolved = resolve_icon(&mut saved, "k", &project);
         assert_eq!(resolved.as_deref(), Some(chosen.as_str()));
     }
 
-    /// A saved entry whose file is GONE — a cleared ~/.cache is the everyday
-    /// case, since that is where every fetched remote icon lives — must heal
-    /// by re-detection instead of pinning the initials square forever. The
+    /// A saved entry whose file is GONE — moved, or a project copied from
+    /// another machine — must heal by re-detection instead of pinning the initials square forever. The
     /// fresh detection also overwrites the dead entry.
     #[test]
     fn a_dead_saved_icon_heals_by_redetection() {
@@ -264,68 +243,12 @@ mod tests {
         let mut saved = scratch_saved(tmp.path());
         saved.set_icon("k", Some("/gone/cleared-cache.png".into()));
 
-        let resolved = resolve_icon(&mut saved, "k", Some(&project), None);
+        let resolved = resolve_icon(&mut saved, "k", &project);
         assert_eq!(resolved.as_deref(), Some(expected.as_str()));
         assert_eq!(saved.get_icon("k").map(String::as_str), Some(&*expected));
     }
 
-    /// The probe-side twin of the heal: "skip the icon fetch" must ask
-    /// whether the saved icon's file still exists, not whether an entry
-    /// does — a dead entry would otherwise suppress its own repair.
-    #[test]
-    fn a_dead_saved_icon_does_not_suppress_the_fetch() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let mut saved = scratch_saved(tmp.path());
-
-        assert!(!has_usable_saved_icon(&saved, "k"), "no entry at all");
-
-        saved.set_icon("k", Some("/gone/cleared-cache.png".into()));
-        assert!(!has_usable_saved_icon(&saved, "k"), "entry, file gone");
-
-        let live = tmp.path().join("live.png");
-        std::fs::write(&live, b"png").expect("write icon");
-        saved.set_icon("k", Some(live.to_string_lossy().into_owned()));
-        assert!(has_usable_saved_icon(&saved, "k"), "entry with a real file");
-    }
-
-    /// A remote project has no local dir to scan, so it falls through to the
-    /// hint — the icon its probe already pulled into the cache — and that is
-    /// remembered like any other detection.
-    #[test]
-    fn a_remote_project_falls_back_to_the_probes_hint() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let hint = "/home/me/.cache/tuxflow/icons/abc.png";
-
-        let mut saved = scratch_saved(tmp.path());
-        let resolved = resolve_icon(&mut saved, "ssh://h/d", None, Some(hint.into()));
-
-        assert_eq!(resolved.as_deref(), Some(hint));
-        assert_eq!(saved.get_icon("ssh://h/d").map(String::as_str), Some(hint));
-    }
-
-    /// A local project prefers what is actually on its disk over a hint.
-    #[test]
-    fn a_local_icon_outranks_a_hint() {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let project = tmp.path().join("proj");
-        std::fs::create_dir_all(&project).expect("project dir");
-        std::fs::write(project.join("logo.svg"), b"<svg/>").expect("write icon");
-
-        let mut saved = scratch_saved(tmp.path());
-        let resolved = resolve_icon(
-            &mut saved,
-            "k",
-            Some(&project),
-            Some("/cached/hint.png".into()),
-        );
-
-        assert_eq!(
-            resolved,
-            Some(project.join("logo.svg").to_string_lossy().into_owned())
-        );
-    }
-
-    /// Nothing on disk and no hint: the caller gets None and draws initials.
+    /// Nothing on disk: the caller gets None and draws initials.
     /// Nothing is remembered either — an entry pointing at nothing would be
     /// re-read next launch as a project with a broken icon.
     #[test]
@@ -335,7 +258,7 @@ mod tests {
         std::fs::create_dir_all(&project).expect("project dir");
 
         let mut saved = scratch_saved(tmp.path());
-        let resolved = resolve_icon(&mut saved, "k", Some(&project), None);
+        let resolved = resolve_icon(&mut saved, "k", &project);
 
         assert_eq!(resolved, None);
         assert_eq!(saved.get_icon("k"), None);

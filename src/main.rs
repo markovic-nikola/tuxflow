@@ -817,7 +817,7 @@ enum UpdateCard {
 }
 
 /// Probe success: project name if configured, process configs, live tmux
-/// sessions, and the local cache path of a fetched icon. Failure: message +
+/// sessions, and whatever the icon plan fetched. Failure: message +
 /// whether it's worth retrying.
 type ProbeResult = Result<ProbeOk, (String, bool)>;
 
@@ -843,9 +843,9 @@ struct ProbeOk {
     /// Project resolves the Hidden group from (see `detected_full`).
     detected_full: Vec<ProcessConfig>,
     live_sessions: Vec<String>,
-    /// Icon pulled into `~/.cache/tuxflow/icons/`, when the project had none
-    /// saved and the host had one to give.
-    icon: Option<String>,
+    /// The icon plan's result — a copy pulled into `~/.cache/tuxflow/icons/`
+    /// and its host ref, when the saved entry alone doesn't give one here.
+    icon: Option<remote::icon::Fetched>,
 }
 
 /// One command-palette row's target. GTK's palette is a flat list of
@@ -1524,12 +1524,7 @@ impl App {
                 // Local detection is a handful of stats on a directory we are
                 // already reading configs from — cheap enough to stay inline,
                 // unlike the remote half, which rides the probe worker.
-                project.icon = usable_icon(icon_detector::resolve_icon(
-                    &mut self.saved,
-                    key,
-                    Some(&dir),
-                    None,
-                ));
+                project.icon = usable_icon(icon_detector::resolve_icon(&mut self.saved, key, &dir));
                 project.detected_configs = load.clone();
                 if !authored {
                     self.saved.withhold_new_detections(key, &mut load);
@@ -1742,13 +1737,11 @@ impl App {
         ) else {
             return Task::none();
         };
-        // A project whose saved icon still exists skips the fetch entirely —
-        // it is a second ssh round trip, and the saved path wins over it
-        // anyway. Existence-aware on purpose: fetched icons live in
-        // ~/.cache, and after a cleared cache the fetch is the only way the
-        // file comes back.
-        let fetch_icon =
-            !icon_detector::has_usable_saved_icon(&self.saved, &self.projects[pidx].key());
+        // Decided here, where the saved entry lives: a project whose icon
+        // copy is already on disk costs no second round trip; one synced in
+        // from another machine fetches exactly the file that machine picked.
+        let key = self.projects[pidx].key();
+        let icon_plan = remote::icon::plan(self.saved.get_icon(&key).map(String::as_str), &key);
         Task::perform(
             tokio::task::spawn_blocking(move || {
                 // Full detection, filtered here: the load list stays the
@@ -1769,10 +1762,10 @@ impl App {
                         };
                         // Own ssh permit inside: the probe released its own
                         // on return and the fetch opens channels of its own.
-                        let icon = fetch_icon
+                        let icon = (icon_plan != remote::icon::IconPlan::Ready)
                             .then(|| {
                                 let _permit = remote::ssh_permit();
-                                remote::icon::fetch_remote_icon(&host, &dir)
+                                remote::icon::run(&icon_plan, &host, &dir)
                             })
                             .flatten();
                         ProbeOk {
@@ -2266,7 +2259,7 @@ impl App {
         // A fetched remote icon lives in our cache — delete it with the
         // project so removals don't orphan cache files (GTK parity).
         if let Some(icon) = self.saved.get_icon(&key) {
-            remote::icon::discard_if_cached(icon);
+            remote::icon::discard_if_cached(icon, &key);
         }
         self.projects.remove(pidx);
         self.saved.remove(&key);
@@ -3007,15 +3000,16 @@ impl App {
         // Same epoch stride as the add forms: an icon fetch or listing in
         // flight when this form closes must not land in the next one.
         self.add_form_epoch += 1 << 32;
+        // The SAVED value (a host ref for a remote pick), not the card's
+        // path: Save writes it back, and a card showing a display-only
+        // detection must not turn that into an entry.
+        let icon = self.saved.get_icon(&key).cloned();
         self.edit_project = Some(edit_project::State {
             project,
             name: p.name.clone(),
             key,
             remote: p.location.is_remote(),
-            icon: p
-                .icon
-                .as_ref()
-                .map(|path| path.to_string_lossy().into_owned()),
+            icon,
             icon_path: String::new(),
             suggestions: Vec::new(),
             stamp: self.add_form_epoch,
@@ -3256,9 +3250,10 @@ impl App {
     }
 
     /// Commit the icon field: a local path is checked and adopted as-is; a
-    /// remote one is pulled into the icon cache on a worker first — every
-    /// saved icon is a local file, which is what keeps Save synchronous
-    /// (GTK's picker runs the same `cache_remote_icon` at pick time).
+    /// remote one is pulled into the icon cache on a worker first, so the
+    /// preview has a file and Save stays synchronous (GTK's picker runs the
+    /// same `cache_remote_icon` at pick time). What the form keeps is the
+    /// host ref — the value projects.toml saves.
     fn commit_icon_path(&mut self) -> Task<Event> {
         let (id, key) = match &self.edit_project {
             Some(state) => (state.project, state.key.clone()),
@@ -3294,7 +3289,7 @@ impl App {
                     tokio::task::spawn_blocking(move || {
                         // Own ssh permit, as the probe's fetch takes one.
                         let _permit = remote::ssh_permit();
-                        remote::icon::cache_remote_icon(&host, &path, &key)
+                        remote::icon::cache_remote_icon(&host, &path, &key).map(|i| i.source)
                     }),
                     move |joined| {
                         Event::EditProjectMsg(edit_project::Msg::IconFetched {
@@ -3340,7 +3335,7 @@ impl App {
                 Task::perform(
                     tokio::task::spawn_blocking(move || {
                         let _permit = remote::ssh_permit();
-                        remote::icon::fetch_remote_icon(&host, &dir)
+                        remote::icon::fetch_remote_icon(&host, &dir).map(|i| i.source)
                     }),
                     move |joined| {
                         Event::EditProjectMsg(edit_project::Msg::IconFetched {
@@ -3385,7 +3380,11 @@ impl App {
         // The icon pick, mirrored into the card the way the load resolves
         // it. `set_icon(None)` clears the entry — Reset to Initials.
         self.saved.set_icon(&key, state.icon.clone());
-        self.projects[pidx].icon = usable_icon(state.icon.clone());
+        self.projects[pidx].icon = state
+            .icon
+            .as_deref()
+            .and_then(|v| remote::icon::local_path(v, &key))
+            .filter(|p| p.is_file());
 
         // Disables first, GTK's order — each is the full deletion the
         // context menu's Delete Command performs (stop, drop the custom
@@ -4902,13 +4901,22 @@ impl App {
                             self.projects[pidx].name = name;
                         }
                         // Remote projects have no local dir to scan — the icon
-                        // arrives already fetched into the cache by the probe.
-                        self.projects[pidx].icon = usable_icon(icon_detector::resolve_icon(
-                            &mut self.saved,
-                            &key,
-                            None,
-                            icon,
-                        ));
+                        // arrives already fetched into the cache by the probe,
+                        // and only the host ref is saved (the synced file must
+                        // not name this machine's cache).
+                        if let Some(fetched) = &icon
+                            && fetched.persist
+                        {
+                            self.saved.set_icon(&key, Some(fetched.icon.source.clone()));
+                        }
+                        let saved_local = self
+                            .saved
+                            .get_icon(&key)
+                            .and_then(|v| remote::icon::local_path(v, &key));
+                        self.projects[pidx].icon = icon
+                            .map(|f| PathBuf::from(f.icon.local))
+                            .or(saved_local)
+                            .filter(|p| p.is_file());
                         self.projects[pidx].detected_configs = load.clone();
                         self.projects[pidx].detected_full = detected_full;
                         if !authored {

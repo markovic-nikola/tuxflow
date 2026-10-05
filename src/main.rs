@@ -3058,7 +3058,10 @@ impl App {
             key,
             remote: p.location.is_remote(),
             icon,
-            icon_path: String::new(),
+            // Browsing starts in the project's own directory, where its
+            // images usually live; the trailing slash lists it on the
+            // first keystroke.
+            icon_path: format!("{}/", p.location.dir_str().trim_end_matches('/')),
             suggestions: Vec::new(),
             stamp: self.add_form_epoch,
             fetch_stamp: self.add_form_epoch,

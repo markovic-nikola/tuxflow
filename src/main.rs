@@ -1966,6 +1966,7 @@ impl App {
         // one try_wait on the mic worker while the bridge is up.
         if let Some(host) = project.location.host() {
             remote::mic::register_host(host);
+            remote::mux_guard::watch(host);
         }
         let entry = &mut project.entries[index];
         let separator_label = run_label(&entry.status);
@@ -2287,11 +2288,22 @@ impl App {
     fn finalize_exit(&mut self, pidx: usize, index: usize) -> Task<Event> {
         self.drop_hold_relay(self.projects[pidx].entries[index].term_id);
         let project = &mut self.projects[pidx];
-        let connection_loss = project.location.is_remote()
-            && project.entries[index].config.category != ProcessCategory::SSH
-            && project.entries[index].last_exit == Some(255);
-
         let host = project.location.host().map(String::from);
+        let entry = &project.entries[index];
+        let remote_process = host.is_some() && entry.config.category != ProcessCategory::SSH;
+        // The guard ended this run on purpose to move it off a slow path:
+        // same reconnect, but no outage to announce. A multiplexed client
+        // sees its master go and exits 255; a direct one is SIGTERMed, and
+        // ssh dies OF that signal (no exit code at all) about one time in
+        // four rather than exiting 255 — which would otherwise read as a
+        // crash and leave the agent stopped.
+        let rerouted = remote_process
+            && !entry.stopping
+            && matches!(entry.last_exit, Some(255) | None)
+            && host
+                .as_deref()
+                .is_some_and(remote::mux_guard::rerouted_recently);
+        let connection_loss = remote_process && (entry.last_exit == Some(255) || rerouted);
         let entry = &mut project.entries[index];
 
         // The terminal stays — it holds the run's output, which is what the
@@ -2299,7 +2311,11 @@ impl App {
         // into its VTE, and it matters most on remote projects: an error
         // printed inside the tmux pane dies with the session, leaving only
         // tmux's bare "[exited]" behind.
-        if let Some(code) = entry.last_exit
+        if rerouted {
+            if let Some(term) = entry.terminal.as_mut() {
+                term.feed(banner::reroute_banner().as_bytes());
+            }
+        } else if let Some(code) = entry.last_exit
             && let Some(msg) = banner::exit_banner(
                 code,
                 connection_loss,
@@ -2342,7 +2358,7 @@ impl App {
             Status::Restarting(attempt) if ns.on_auto_restart && allowed => {
                 notify::auto_restart(ns, &project_name, &name, *attempt, icon.as_deref())
             }
-            Status::Reconnecting(_) if !entry.outage_notified => {
+            Status::Reconnecting(_) if !entry.outage_notified && !rerouted => {
                 entry.outage_notified = true;
                 if allowed {
                     notify::disconnect(ns, &project_name, &name, icon.as_deref());

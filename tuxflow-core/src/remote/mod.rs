@@ -3,6 +3,7 @@ pub mod git;
 pub mod hold;
 pub mod icon;
 pub mod mic;
+pub mod mux_guard;
 pub mod ports;
 pub mod probe;
 pub mod tunnel;
@@ -88,7 +89,7 @@ pub fn sh_quote(s: &str) -> String {
 }
 
 /// Directory for ssh ControlMaster sockets.
-fn control_dir() -> PathBuf {
+pub(crate) fn control_dir() -> PathBuf {
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(base).join("tuxflow")
 }

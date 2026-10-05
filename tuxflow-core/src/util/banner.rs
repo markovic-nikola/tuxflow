@@ -51,6 +51,17 @@ pub fn exit_banner(
     Some(format!("\r\n{msg}\r\n"))
 }
 
+/// What a remote terminal says when `remote::mux_guard` moved it off a slow
+/// network path — the same exit 255 as an outage, but nothing went wrong.
+///
+/// Ready to feed, like [`exit_banner`].
+pub fn reroute_banner() -> String {
+    String::from(
+        "\r\n\x1b[2m[tuxflow] moving to a faster connection — reconnecting, the process keeps \
+         running on the host\x1b[0m\r\n",
+    )
+}
+
 /// The dim rule a new run starts under, so two runs in one terminal read as
 /// two runs. `cols` is the terminal's current width; the rule stops one
 /// column short of it, since filling the last cell leaves the grid in a

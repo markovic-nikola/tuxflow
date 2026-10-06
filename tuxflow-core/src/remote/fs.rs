@@ -48,6 +48,22 @@ pub fn remote_dir_exists(host: &str, dir: &str) -> Result<bool, String> {
     }
 }
 
+/// The login directory on `host` — where an `ssh host` lands — or `None`
+/// when the host can't be reached. For prefilling the add-remote path
+/// field, so a project is one completion away. Call from a worker thread.
+pub fn remote_home(host: &str) -> Option<String> {
+    let out = Command::new("ssh")
+        .args(ssh_mux_options())
+        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
+        .arg(host)
+        .arg("--")
+        .arg("pwd")
+        .output()
+        .ok()?;
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && dir.starts_with('/')).then_some(dir)
+}
+
 /// Raw `ls -1dp` over ssh for `prefix*`: absolute paths, dirs marked with a
 /// trailing '/'. `remote_filter` is a grep -iE pattern applied on the host
 /// BEFORE the result cap — filtering after `head` would let unwanted

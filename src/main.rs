@@ -8398,36 +8398,41 @@ impl App {
                 Some(false) => text("No matches").size(11).color(CRASHED).into(),
                 _ => text("").size(11).into(),
             };
+            // The input eats the first Esc to unfocus itself; the sensor
+            // hears it first, so one Esc closes the bar like GTK's.
             col = col
                 .push(
-                    container(
-                        row![
-                            text_input("Search scrollback (regex)\u{2026}", &self.search_query)
-                                .id(self.search_input.clone())
-                                .on_input(Event::SearchQueryChanged)
-                                .on_submit(Event::SearchSubmit)
-                                .style(theme::input(accent))
-                                .padding([5, 12])
-                                .size(12.5),
-                            hint,
-                            button(text("\u{25b4}").size(12))
-                                .padding([3, 9])
-                                .style(theme::pill_button(accent))
-                                .on_press(Event::SearchStep(SearchDirection::Left)),
-                            button(text("\u{25be}").size(12))
-                                .padding([3, 9])
-                                .style(theme::pill_button(accent))
-                                .on_press(Event::SearchStep(SearchDirection::Right)),
-                            button(text("\u{00d7}").size(11))
-                                .padding([3, 8])
-                                .style(theme::ghost(CRASHED))
-                                .on_press(Event::SearchClose),
-                        ]
-                        .spacing(8)
-                        .align_y(iced::Alignment::Center),
+                    dnd::DragArea::new(
+                        container(
+                            row![
+                                text_input("Search scrollback (regex)\u{2026}", &self.search_query)
+                                    .id(self.search_input.clone())
+                                    .on_input(Event::SearchQueryChanged)
+                                    .on_submit(Event::SearchSubmit)
+                                    .style(theme::input(accent))
+                                    .padding([5, 12])
+                                    .size(12.5),
+                                hint,
+                                button(text("\u{25b4}").size(12))
+                                    .padding([3, 9])
+                                    .style(theme::pill_button(accent))
+                                    .on_press(Event::SearchStep(SearchDirection::Left)),
+                                button(text("\u{25be}").size(12))
+                                    .padding([3, 9])
+                                    .style(theme::pill_button(accent))
+                                    .on_press(Event::SearchStep(SearchDirection::Right)),
+                                button(text("\u{00d7}").size(11))
+                                    .padding([3, 8])
+                                    .style(theme::ghost(CRASHED))
+                                    .on_press(Event::SearchClose),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .padding([6, 10])
+                        .style(theme::chrome),
                     )
-                    .padding([6, 10])
-                    .style(theme::chrome),
+                    .on_escape(|| Event::SearchClose),
                 )
                 .push(hline());
         }

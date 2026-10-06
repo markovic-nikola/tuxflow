@@ -2763,11 +2763,48 @@ impl App {
                 state.host_choice = label.clone();
                 state.host = match label == add_project::CUSTOM_HOST {
                     true => String::new(),
-                    false => label,
+                    false => label.clone(),
                 };
                 state.suggestions.clear();
                 state.error = None;
-                self.complete_path()
+                if label == add_project::CUSTOM_HOST {
+                    return self.complete_path();
+                }
+                // Prefill the path: next to the host's other projects when
+                // any are open, else its login directory (one round trip).
+                let usual =
+                    add_project::usual_parent(&label, self.projects.iter().map(|p| &p.location));
+                match usual {
+                    Some(dir) => {
+                        state.prefill_path(&dir);
+                        self.complete_path()
+                    }
+                    None => Task::batch([
+                        self.complete_path(),
+                        Task::perform(
+                            tokio::task::spawn_blocking({
+                                let host = label.clone();
+                                move || remote::fs::remote_home(&host)
+                            }),
+                            move |joined| {
+                                Event::AddProjectMsg(add_project::Msg::HostHome {
+                                    host: label.clone(),
+                                    dir: joined.ok().flatten(),
+                                })
+                            },
+                        ),
+                    ]),
+                }
+            }
+            Msg::HostHome { host, dir } => {
+                // Only for the host still in the field, and only into a
+                // path the user hasn't started typing meanwhile.
+                match dir {
+                    Some(dir) if state.host == host && state.prefill_path(&dir) => {
+                        self.complete_path()
+                    }
+                    _ => Task::none(),
+                }
             }
             Msg::HostInput(value) => {
                 state.host = value;

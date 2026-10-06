@@ -79,6 +79,10 @@ pub struct State {
     pub busy: Option<String>,
     pub error: Option<String>,
     pub configure: Option<Configure>,
+    /// What the app last put in the path field on its own (see
+    /// [`State::prefill_path`]), so picking another host replaces it while
+    /// anything the user typed is left alone.
+    pub prefilled: Option<String>,
 }
 
 /// The tail of the flow: name the project, and — when detection found enough
@@ -133,6 +137,12 @@ pub enum Msg {
         dirs: Vec<String>,
     },
     UseSuggestion(String),
+    /// The login directory of a host picked from the list, for prefilling
+    /// the path when no open project says where that host keeps them.
+    HostHome {
+        host: String,
+        dir: Option<String>,
+    },
     /// Commit the Locate stage: verify (remote) and run detection.
     Locate,
     Detected(Box<Detected>),
@@ -180,7 +190,23 @@ impl State {
             busy: None,
             error: None,
             configure: None,
+            prefilled: None,
         }
+    }
+
+    /// Offer `dir` as the path for the host just picked — only into a field
+    /// the user hasn't typed in (empty, or still holding the last offer).
+    /// Lands with a trailing '/' so completion lists the directory's
+    /// children straight away. Returns whether the field changed.
+    pub fn prefill_path(&mut self, dir: &str) -> bool {
+        let pristine = self.path.is_empty() || self.prefilled.as_deref() == Some(&self.path);
+        if !pristine {
+            return false;
+        }
+        let dir = format!("{}/", dir.trim_end_matches('/'));
+        self.path = dir.clone();
+        self.prefilled = Some(dir);
+        true
     }
 
     /// The host to complete paths against — `None` for the local half.
@@ -242,6 +268,39 @@ impl State {
         self.busy = None;
         self.error = None;
     }
+}
+
+/// Where `host`'s projects usually live: the parent directory shared by the
+/// most of its open projects (ties go to the first seen), `None` when there
+/// are none. Each project is also a sibling of the next one far more often
+/// than it is a child of the login directory.
+pub fn usual_parent<'a>(
+    host: &str,
+    locations: impl IntoIterator<Item = &'a ProjectLocation>,
+) -> Option<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for location in locations {
+        let ProjectLocation::Ssh { host: h, dir } = location else {
+            continue;
+        };
+        if h != host {
+            continue;
+        }
+        let Some((parent, _)) = dir.trim_end_matches('/').rsplit_once('/') else {
+            continue;
+        };
+        let parent = if parent.is_empty() { "/" } else { parent };
+        match counts.iter_mut().find(|(p, _)| p == parent) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((parent.to_string(), 1)),
+        }
+    }
+    // max_by_key keeps the LAST of equals; reverse so the first seen wins.
+    counts
+        .into_iter()
+        .rev()
+        .max_by_key(|(_, n)| *n)
+        .map(|(p, _)| p)
 }
 
 // ── View ────────────────────────────────────────────────────────────────
@@ -583,6 +642,51 @@ mod tests {
         assert!(s.can_locate());
         s.busy = Some("Connecting to vps…".into());
         assert!(!s.can_locate());
+    }
+
+    fn ssh(host: &str, dir: &str) -> ProjectLocation {
+        ProjectLocation::Ssh {
+            host: host.into(),
+            dir: dir.into(),
+        }
+    }
+
+    /// The parent most of the host's projects share wins; other hosts and
+    /// local projects don't count; ties go to the first seen.
+    #[test]
+    fn usual_parent_picks_the_common_one() {
+        let projects = [
+            ssh("vps", "/srv/one"),
+            ssh("vps", "/home/d/Projects/a"),
+            ssh("other", "/opt/x"),
+            ssh("other", "/opt/y"),
+            ProjectLocation::Local("/home/d/Projects/b".into()),
+            ssh("vps", "/home/d/Projects/b/"),
+        ];
+        assert_eq!(
+            usual_parent("vps", &projects).as_deref(),
+            Some("/home/d/Projects")
+        );
+        assert_eq!(usual_parent("vps", &projects[..2]).as_deref(), Some("/srv"));
+        assert_eq!(
+            usual_parent("vps", &[ssh("vps", "/app")]).as_deref(),
+            Some("/")
+        );
+        assert_eq!(usual_parent("new", &projects), None);
+    }
+
+    /// The offer fills an untouched field and replaces its own earlier
+    /// offer, but never overwrites what the user typed.
+    #[test]
+    fn prefill_respects_typing() {
+        let mut s = state_with(Kind::Remote, "vps", "");
+        assert!(s.prefill_path("/home/d/Projects"));
+        assert_eq!(s.path, "/home/d/Projects/");
+        assert!(s.prefill_path("/root/"));
+        assert_eq!(s.path, "/root/");
+        s.path = "/root/ap".into();
+        assert!(!s.prefill_path("/home/d"));
+        assert_eq!(s.path, "/root/ap");
     }
 
     /// Completion needs an absolute path, and on the remote half a host too

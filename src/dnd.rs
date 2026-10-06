@@ -8,7 +8,9 @@
 //! (`mouse_area::on_move` gives the point but not the row's height), and
 //! how close the pointer is to the sidebar's visible edges (auto-scroll).
 //! [`DragArea`] senses all three by peeking at the event BEFORE handing it
-//! to its content, then delegates everything else untouched.
+//! to its content, then delegates everything else untouched. The same peek
+//! serves one keyboard need: an Esc pressed inside a text field, which the
+//! field captures to unfocus itself before anything outside can see it.
 //!
 //! The permutation math lives here too, pure and unit-tested: GTK's
 //! `reorder_in_box` / `reorder_process` in index terms, plus the remap that
@@ -16,9 +18,10 @@
 //! its row.
 
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{Operation, Tree, tree};
+use iced::advanced::widget::operation::Focusable;
+use iced::advanced::widget::{Id, Operation, Tree, tree};
 use iced::advanced::{Clipboard, Shell, Widget, overlay, renderer};
-use iced::{Element, Event, Length, Point, Rectangle, Size, Vector, mouse};
+use iced::{Element, Event, Length, Point, Rectangle, Size, Vector, keyboard, mouse};
 
 /// GTK's default `gtk-dnd-drag-threshold`: a press becomes a drag once the
 /// pointer has travelled this far on either axis (GTK checks the axes
@@ -120,6 +123,7 @@ pub struct DragArea<'a, Message> {
     on_press: Option<Box<dyn Fn(Grab) -> Message + 'a>>,
     on_over: Option<Box<dyn Fn(Over) -> Message + 'a>>,
     on_track: Option<Box<dyn Fn(Option<Edges>) -> Message + 'a>>,
+    on_escape: Option<Box<dyn Fn() -> Message + 'a>>,
 }
 
 /// The pointer and bounds at the last look. A scroll moves the content
@@ -139,6 +143,7 @@ impl<'a, Message> DragArea<'a, Message> {
             on_press: None,
             on_over: None,
             on_track: None,
+            on_escape: None,
         }
     }
 
@@ -165,6 +170,16 @@ impl<'a, Message> DragArea<'a, Message> {
     /// is the sidebar's visible window.
     pub fn on_track(mut self, f: impl Fn(Option<Edges>) -> Message + 'a) -> Self {
         self.on_track = Some(Box::new(f));
+        self
+    }
+
+    /// Esc was pressed while something inside the content held keyboard
+    /// focus. A `text_input` captures that Esc to unfocus itself, so a
+    /// window-level listener only ever hears the SECOND press — a search
+    /// bar that takes two Escs to close. Not captured here: the field
+    /// still unfocuses as usual.
+    pub fn on_escape(mut self, f: impl Fn() -> Message + 'a) -> Self {
+        self.on_escape = Some(Box::new(f));
         self
     }
 
@@ -281,6 +296,23 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for DragArea<'_, Mess
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if let Some(on_escape) = &self.on_escape
+            && let Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) = event
+        {
+            let mut focus = AnyFocused(false);
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut focus,
+            );
+            if focus.0 {
+                shell.publish(on_escape());
+            }
+        }
         self.sense(tree, event, layout, cursor, viewport, shell);
         self.content.as_widget_mut().update(
             &mut tree.children[0],
@@ -347,6 +379,19 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for DragArea<'_, Mess
             viewport,
             translation,
         )
+    }
+}
+
+/// Whether any focusable in the subtree holds keyboard focus.
+struct AnyFocused(bool);
+
+impl Operation for AnyFocused {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(&mut self, _id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+        self.0 |= state.is_focused();
     }
 }
 

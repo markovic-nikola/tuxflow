@@ -2865,6 +2865,14 @@ impl App {
                 }
                 Task::none()
             }
+            Msg::ToggleAgent(index, on) => {
+                if let Some(c) = &mut state.configure
+                    && let Some(slot) = c.agents.get_mut(index)
+                {
+                    *slot = on;
+                }
+                Task::none()
+            }
             Msg::Confirm => self.finish_add_project(),
         }
     }
@@ -3057,6 +3065,34 @@ impl App {
                 }
                 self.saved.add_custom_command(&key, pc);
             }
+        }
+        // Agents persist the way the add-agent form saves one, named around
+        // whatever detection brought (`claude`, then `claude-2`…). They
+        // don't start — that stays the user's click, as for the commands.
+        let mut taken: Vec<String> = c.flat().map(|p| p.name.clone()).collect();
+        for (preset, _) in agents::AGENT_PRESETS
+            .iter()
+            .zip(&c.agents)
+            .filter(|(_, on)| **on)
+        {
+            let name = agents::unique_agent_name(&taken, preset.slug);
+            taken.push(name.clone());
+            self.saved.add_custom_command(
+                &key,
+                ProcessConfig {
+                    name,
+                    command: preset.command.to_string(),
+                    working_dir: None,
+                    start_with_project: false,
+                    auto_restart: false,
+                    open_in_browser: false,
+                    restart_when_changed: Vec::new(),
+                    env: Default::default(),
+                    category: ProcessCategory::Agent,
+                    auto_named: false,
+                    display_name: None,
+                },
+            );
         }
         self.saved.save();
 

@@ -23,6 +23,7 @@ use tuxflow_core::config::schema::ProcessConfig;
 use tuxflow_core::config::ssh::SshHost;
 use tuxflow_core::detect::detector::{self, DetectedStack};
 use tuxflow_core::remote::ProjectLocation;
+use tuxflow_core::util::agents::AGENT_PRESETS;
 
 use crate::theme::{self, CRASHED, bold, pal};
 use crate::widgets::{group, switch_row_owned};
@@ -104,6 +105,10 @@ pub struct Configure {
     pub config_loaded: bool,
     /// Show the command list, or just ask for a name (GTK's two dialogs).
     pub select: bool,
+    /// Parallel to `AGENT_PRESETS`: the agents to add with the project.
+    /// Offered whatever detection found — agents are never detected, and
+    /// most projects get one.
+    pub agents: Vec<bool>,
 }
 
 impl Configure {
@@ -121,6 +126,28 @@ impl Configure {
 
     pub fn chosen(&self) -> usize {
         self.selected.iter().filter(|s| **s).count()
+    }
+
+    pub fn chosen_agents(&self) -> usize {
+        self.agents.iter().filter(|s| **s).count()
+    }
+
+    /// The commit button: what it will add beyond the bare project.
+    pub fn commit_label(&self) -> String {
+        let plural = |n: usize, one: &str| match n {
+            1 => format!("1 {one}"),
+            n => format!("{n} {one}s"),
+        };
+        let commands = match self.select {
+            true => self.chosen(),
+            false => 0,
+        };
+        match (commands, self.chosen_agents()) {
+            (0, 0) => "Add Project".to_string(),
+            (c, 0) => format!("Add {}", plural(c, "Command")),
+            (0, a) => format!("Add Project + {}", plural(a, "Agent")),
+            (c, a) => format!("Add {} + {}", plural(c, "Command"), plural(a, "Agent")),
+        }
     }
 }
 
@@ -152,6 +179,8 @@ pub enum Msg {
     },
     NameInput(String),
     Toggle(usize, bool),
+    /// Index into `AGENT_PRESETS`.
+    ToggleAgent(usize, bool),
     SetAll(bool),
     /// Commit the Configure stage — the project is added here.
     Confirm,
@@ -263,6 +292,7 @@ impl State {
             selected: vec![false; total],
             config_loaded: d.config_loaded,
             select,
+            agents: vec![false; AGENT_PRESETS.len()],
         });
         self.stage = Stage::Configure;
         self.busy = None;
@@ -547,14 +577,26 @@ fn view_configure<'a>(state: &'a State, c: &'a Configure, accent: iced::Color) -
         }
     }
 
+    let agents = AGENT_PRESETS
+        .iter()
+        .enumerate()
+        .map(|(i, preset)| {
+            switch_row_owned(
+                preset.label.to_string(),
+                preset.command.to_string(),
+                c.agents.get(i).copied().unwrap_or(false),
+                accent,
+                move |on| Msg::ToggleAgent(i, on),
+            )
+        })
+        .collect();
+    content = content.push(group("Agents", agents));
+
     if let Some(line) = status_line(state) {
         content = content.push(line);
     }
 
-    let label = match c.select && c.chosen() > 0 {
-        true => format!("Add {} Commands", c.chosen()),
-        false => "Add Project".to_string(),
-    };
+    let label = c.commit_label();
     content = content.push(
         row![
             button(text("Back").size(12))
@@ -687,6 +729,34 @@ mod tests {
         s.path = "/root/ap".into();
         assert!(!s.prefill_path("/home/d"));
         assert_eq!(s.path, "/root/ap");
+    }
+
+    /// The button names what it adds; commands hidden behind a skipped
+    /// selection step don't count.
+    #[test]
+    fn commit_label_counts_commands_and_agents() {
+        let mut s = State::new(Vec::new(), 0);
+        s.configured(Detected {
+            stamp: 0,
+            key: "/srv/app".into(),
+            location: ProjectLocation::Local("/srv/app".into()),
+            name: "app".into(),
+            stacks: Vec::new(),
+            config_loaded: false,
+        });
+        let c = s.configure.as_mut().unwrap();
+        assert_eq!(c.commit_label(), "Add Project");
+        c.agents[0] = true;
+        assert_eq!(c.commit_label(), "Add Project + 1 Agent");
+        c.select = true;
+        c.selected = vec![true, true, false];
+        c.agents[1] = true;
+        assert_eq!(c.commit_label(), "Add 2 Commands + 2 Agents");
+        c.agents = vec![false; AGENT_PRESETS.len()];
+        c.selected = vec![true];
+        assert_eq!(c.commit_label(), "Add 1 Command");
+        c.select = false;
+        assert_eq!(c.commit_label(), "Add Project");
     }
 
     /// Completion needs an absolute path, and on the remote half a host too

@@ -7,7 +7,7 @@ use crate::config::persist::{Baseline, read_toml, save_merged};
 use crate::config::schema::ProcessConfig;
 
 /// Keys moved to `config::state`, dropped from the file on save.
-const RETIRED_KEYS: &[&str] = &["last_used", "expanded"];
+const RETIRED_KEYS: &[&str] = &["last_used"];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedProjects {
@@ -28,14 +28,17 @@ pub struct SavedProjects {
     /// later detection against. No entry = not baselined yet.
     #[serde(default)]
     pub known_detected: BTreeMap<String, Vec<String>>,
-    /// Where `last_used` and `expanded` lived before they moved to the
-    /// machine-local state file ([`crate::config::state::LocalState`]).
-    /// Read once to seed that file, never written back — this file is
-    /// synced between machines and must only change when the user does.
+    /// Sidebar group open/closed per project key. Absent = open. Synced on
+    /// purpose: both machines work the same projects, so switching desks
+    /// should land on the same sidebar — and unlike `last_used` it only
+    /// moves on a deliberate click.
+    #[serde(default)]
+    pub expanded: BTreeMap<String, bool>,
+    /// Where `last_used` lived before it moved to the machine-local state
+    /// file ([`crate::config::state::LocalState`]). Read once to seed that
+    /// file, never written back — it moved on every start.
     #[serde(rename = "last_used", default, skip_serializing)]
     pub(crate) legacy_last_used: BTreeMap<String, u64>,
-    #[serde(rename = "expanded", default, skip_serializing)]
-    pub(crate) legacy_expanded: BTreeMap<String, bool>,
     /// The file every mutation writes back to, stamped by [`Self::load_from`].
     /// `None` — which is what `default()` gives — means **nowhere**; see
     /// [`Self::save`] for why that is the safe default rather than the real
@@ -125,6 +128,7 @@ impl SavedProjects {
         self.deleted_processes.remove(dir);
         self.custom_commands.remove(dir);
         self.known_detected.remove(dir);
+        self.expanded.remove(dir);
         self.save();
     }
 
@@ -151,6 +155,45 @@ impl SavedProjects {
 
     pub fn get_name(&self, dir: &str) -> Option<&String> {
         self.names.get(dir)
+    }
+
+    /// Record the sidebar's open/closed state for these projects, in one
+    /// save. Only entries that differ from what is recorded (absent = open)
+    /// are written, so passing every project after a click touches just
+    /// the lines that click changed.
+    pub fn record_expanded(&mut self, states: impl IntoIterator<Item = (String, bool)>) {
+        let mut changed = false;
+        for (dir, expanded) in states {
+            if self.is_expanded(&dir).unwrap_or(true) != expanded {
+                self.expanded.insert(dir, expanded);
+                changed = true;
+            }
+        }
+        if changed {
+            self.save();
+        }
+    }
+
+    pub fn is_expanded(&self, dir: &str) -> Option<bool> {
+        self.expanded.get(dir).copied()
+    }
+
+    /// One-time move of the open/closed map back from the machine-local
+    /// state file (it lived there 2026-09-24 → 2026-10-09). Only while this
+    /// file has none: once one machine has written it, the synced copy
+    /// wins and every other machine's local leftovers are dropped.
+    pub fn adopt_expanded(&mut self, local: BTreeMap<String, bool>) {
+        if !self.expanded.is_empty() {
+            return;
+        }
+        let known: BTreeMap<String, bool> = local
+            .into_iter()
+            .filter(|(key, _)| self.directories.contains(key))
+            .collect();
+        if !known.is_empty() {
+            self.expanded = known;
+            self.save();
+        }
     }
 
     pub fn reorder_to_match(&mut self, new_order: &[String]) {

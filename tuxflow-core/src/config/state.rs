@@ -4,11 +4,14 @@
 //! `settings.toml` and `projects.toml` are the user's configuration, and
 //! people sync them between machines (chezmoi, a dotfiles repo). What lives
 //! here is what the app remembers about ONE machine's session: the window
-//! geometry (a portrait monitor's size is wrong on a laptop), when each
-//! project was last used and which sidebar groups are open. All three move
-//! on ordinary use — `last_used` on every start — so kept in the synced
-//! files they turned each working day into a commit, and two machines
-//! syncing the same file into a guaranteed conflict.
+//! geometry (a portrait monitor's size is wrong on a laptop) and when each
+//! project was last used. Both move on ordinary use — `last_used` on every
+//! start — so kept in the synced files they turned each working day into a
+//! commit, and two machines syncing the same file into a guaranteed
+//! conflict. Which sidebar groups are open lived here too until 2026-10-09
+//! and went back to `projects.toml`: it moves only on a click, and the
+//! machines share the same projects, so switching desks should not mean
+//! re-opening the sidebar.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,8 +28,11 @@ pub struct LocalState {
     /// Unix seconds of the last user-visible activity (a process starting)
     /// per project key. Drives the sidebar's "recently used first" sort.
     pub last_used: BTreeMap<String, u64>,
-    /// Sidebar group open/closed per project key. Absent = open.
-    pub expanded: BTreeMap<String, bool>,
+    /// Where the sidebar's open/closed map lived 2026-09-24 → 2026-10-09.
+    /// Read to hand to [`SavedProjects::adopt_expanded`], never written
+    /// back — the next save of this file drops it.
+    #[serde(rename = "expanded", skip_serializing)]
+    legacy_expanded: BTreeMap<String, bool>,
     pub window: WindowSettings,
     /// The file every mutation writes back to; `None` (what `default()`
     /// gives) writes nowhere — the same safety rule as `SavedProjects`.
@@ -96,7 +102,7 @@ impl LocalState {
     pub fn from_legacy(settings: &AppSettings, saved: &SavedProjects) -> Self {
         Self {
             last_used: saved.legacy_last_used.clone(),
-            expanded: saved.legacy_expanded.clone(),
+            legacy_expanded: BTreeMap::new(),
             window: settings.legacy_window.clone().unwrap_or_default(),
             path: None,
         }
@@ -123,19 +129,14 @@ impl LocalState {
         self.last_used.get(key).copied().unwrap_or(0)
     }
 
-    pub fn set_expanded(&mut self, key: &str, expanded: bool) {
-        self.expanded.insert(key.to_string(), expanded);
-        self.save();
-    }
-
-    pub fn is_expanded(&self, key: &str) -> Option<bool> {
-        self.expanded.get(key).copied()
+    /// The pre-2026-10-09 open/closed map, for [`SavedProjects::adopt_expanded`].
+    pub fn take_legacy_expanded(&mut self) -> BTreeMap<String, bool> {
+        std::mem::take(&mut self.legacy_expanded)
     }
 
     /// A project was removed from the workspace.
     pub fn forget(&mut self, key: &str) {
-        let had = self.last_used.remove(key).is_some() | self.expanded.remove(key).is_some();
-        if had {
+        if self.last_used.remove(key).is_some() {
             self.save();
         }
     }
@@ -190,7 +191,6 @@ directories = ["/p/one", "/p/two"]
         assert_eq!(state.window.width, 1080);
         assert_eq!(state.window.monitor.as_deref(), Some("DP-0"));
         assert_eq!(state.get_last_used("/p/two"), 200);
-        assert_eq!(state.is_expanded("/p/one"), Some(false));
         assert!(file.exists(), "the migration must be written at once");
 
         let reloaded = LocalState::load_from(&file, || panic!("migrated twice"));
@@ -200,7 +200,8 @@ directories = ["/p/one", "/p/two"]
 
     /// The point of the split: the synced files stop carrying the keys.
     /// They still PARSE them (that is how the migration reads them), and
-    /// the rest of each file survives the round trip.
+    /// the rest of each file survives the round trip — `[expanded]`
+    /// included, which is synced again since 2026-10-09.
     #[test]
     fn the_synced_files_no_longer_write_machine_state() {
         let (settings, saved) = legacy();
@@ -211,7 +212,7 @@ directories = ["/p/one", "/p/two"]
 
         let projects_out = toml::to_string_pretty(&saved).expect("projects serialise");
         assert!(!projects_out.contains("last_used"), "{projects_out}");
-        assert!(!projects_out.contains("expanded"), "{projects_out}");
+        assert!(projects_out.contains("[expanded]"), "{projects_out}");
         assert!(projects_out.contains("/p/two"), "{projects_out}");
     }
 
@@ -236,7 +237,6 @@ directories = ["/p/one", "/p/two"]
 
         let mut state = LocalState::load_from(&file, LocalState::default);
         state.set_last_used("/p/one", 42);
-        state.set_expanded("/p/one", false);
         assert_eq!(
             LocalState::load_from(&file, LocalState::default).get_last_used("/p/one"),
             42
@@ -245,7 +245,57 @@ directories = ["/p/one", "/p/two"]
         state.forget("/p/one");
         let reloaded = LocalState::load_from(&file, LocalState::default);
         assert_eq!(reloaded.get_last_used("/p/one"), 0);
-        assert_eq!(reloaded.is_expanded("/p/one"), None);
+    }
+
+    /// The open/closed map moves back to the synced file once, and the
+    /// state file stops carrying it on its next save. A synced file that
+    /// already has one (another machine moved first) keeps it.
+    #[test]
+    fn expanded_moves_back_to_the_synced_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let state_file = dir.path().join("state.toml");
+        let projects_file = dir.path().join("projects.toml");
+        fs::write(
+            &state_file,
+            "[last_used]\n\"/p/one\" = 1\n\n[expanded]\n\"/p/one\" = false\n\"/p/gone\" = false\n",
+        )
+        .expect("write state");
+        fs::write(&projects_file, "directories = [\"/p/one\", \"/p/two\"]\n")
+            .expect("write projects");
+
+        let mut state = LocalState::load_from(&state_file, || panic!("must not migrate"));
+        let mut saved = SavedProjects::load_from(&projects_file);
+        saved.adopt_expanded(state.take_legacy_expanded());
+        assert_eq!(saved.is_expanded("/p/one"), Some(false));
+        assert_eq!(
+            saved.is_expanded("/p/gone"),
+            None,
+            "removed projects are not carried over"
+        );
+
+        let reloaded = SavedProjects::load_from(&projects_file);
+        assert_eq!(reloaded.is_expanded("/p/one"), Some(false));
+
+        state.set_last_used("/p/one", 2);
+        let state_out = fs::read_to_string(&state_file).expect("read state");
+        assert!(!state_out.contains("expanded"), "{state_out}");
+
+        let mut other = reloaded;
+        other.record_expanded([("/p/two".to_string(), true)]);
+        assert_eq!(
+            other.is_expanded("/p/two"),
+            None,
+            "open is the default, not written"
+        );
+        other.record_expanded([("/p/two".to_string(), false)]);
+        assert_eq!(other.is_expanded("/p/two"), Some(false));
+
+        other.adopt_expanded(BTreeMap::from([("/p/one".to_string(), true)]));
+        assert_eq!(
+            other.is_expanded("/p/one"),
+            Some(false),
+            "the synced copy wins"
+        );
     }
 
     #[test]

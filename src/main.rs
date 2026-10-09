@@ -1301,8 +1301,8 @@ impl App {
             &settings.appearance.local_accent_color,
             &settings.appearance.remote_accent_color,
         );
-        let saved = SavedProjects::load();
-        let state = LocalState::load();
+        let mut saved = SavedProjects::load();
+        let mut state = LocalState::load();
         // Insurance: keep a .bak of the last known-good (non-empty)
         // workspace before this process ever saves. One wipe was enough.
         if !saved.directories.is_empty()
@@ -1311,6 +1311,7 @@ impl App {
             let file = dir.join("tuxflow/projects.toml");
             let _ = std::fs::copy(&file, file.with_extension("toml.bak"));
         }
+        saved.adopt_expanded(state.take_legacy_expanded());
         let mut app = App {
             projects: Vec::new(),
             active: 0,
@@ -1505,7 +1506,7 @@ impl App {
                 .get_name(key)
                 .cloned()
                 .unwrap_or_else(|| location.base_name()),
-            expanded: self.state.is_expanded(key).unwrap_or(true),
+            expanded: self.saved.is_expanded(key).unwrap_or(true),
             phase: Phase::Loading,
             entries: Vec::new(),
             selected: 0,
@@ -5601,8 +5602,7 @@ impl App {
                             }
                         }
                     }
-                    let key = self.projects[pidx].key();
-                    self.state.set_expanded(&key, self.projects[pidx].expanded);
+                    self.persist_expanded();
                     // A project is otherwise activated by selecting one of
                     // its processes; one with none has only its header, so
                     // without this its pane — the only place a first
@@ -9416,6 +9416,19 @@ impl App {
         for (i, project) in self.projects.iter_mut().enumerate() {
             project.expanded = i == self.active;
         }
+        self.persist_expanded();
+    }
+
+    /// Save every project's open/closed state — single-expand changes the
+    /// OTHER projects too, and saving only the clicked one brought them
+    /// back open at the next launch (or on the other machine).
+    fn persist_expanded(&mut self) {
+        let states: Vec<(String, bool)> = self
+            .projects
+            .iter()
+            .map(|p| (p.key(), p.expanded))
+            .collect();
+        self.saved.record_expanded(states);
     }
 
     /// GTK's sidebar order (`sort_project_rows` in project_list.rs), not a

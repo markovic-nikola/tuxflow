@@ -461,3 +461,17 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     what a touchpad reports (winit on Wayland), so the terminal scrolled
     against the finger while every iced scrollable beside it was right.
     Both now treat positive y as up, which is iced's own convention.
+31. **Wide and composed glyphs** (the per-cell path in `view.rs`). Upstream
+    centred every glyph on ITS cell and drew `cell.c` alone. A
+    `WIDE_CHAR` cell (emoji, CJK) owns the spacer cell after it, so its
+    glyph hung half a cell into the left neighbour; it now centres
+    across both, and the cursor block/outline on it spans both too, as
+    Alacritty draws it. `cell.zerowidth()` — combining marks, VS16 (❤️),
+    skin tones (👍🏽), ZWJ members (👨‍👩‍👧) — was never read, so those
+    showed as their bare base; they are now appended to the cell's text,
+    which the Advanced shaping already on that path joins into one
+    glyph. A cell carrying zero-width chars never merges into an ASCII
+    run (`e` + U+0301 would otherwise lose its accent). Colour comes for
+    free: iced's font system loads system fonts and cosmic-text falls
+    back to Noto Color Emoji. Widths stay alacritty's — a VS16 sequence
+    on a narrow base still occupies one cell and spills, as in Alacritty.

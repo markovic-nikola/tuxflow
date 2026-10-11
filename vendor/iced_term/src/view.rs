@@ -744,7 +744,6 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                 // Precompute constants used in the inner loop
                 let display_offset = content.display_offset as f32;
                 let cell_size = Size::new(cell_width, cell_height);
-                let half_w = cell_width * 0.5;
                 let half_h = cell_height * 0.5;
                 // We use the background pallete color as a default
                 // because the widget global background color must be the same
@@ -768,7 +767,17 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                     let y = layout_offset_y
                         + (((line as f32) + display_offset) * cell_height);
                     let cell_center_y = y + half_h;
-                    let cell_center_x = x + half_w;
+                    // A wide glyph (emoji, CJK) owns this cell and the
+                    // spacer after it, so it centres on their shared edge.
+                    let wide =
+                        indexed.cell.flags.contains(cell::Flags::WIDE_CHAR);
+                    let glyph_w =
+                        if wide { cell_width * 2.0 } else { cell_width };
+                    let cell_center_x = x + glyph_w * 0.5;
+                    // Combining marks, variation selectors, skin tones and
+                    // ZWJ members ride on the base cell; the font shapes
+                    // them together with it.
+                    let zerowidth = indexed.cell.zerowidth();
 
                     // Resolve colors for this cell
                     let mut fg = self.term.theme.get_color(indexed.fg);
@@ -877,8 +886,10 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                         let cursor_color =
                             self.term.theme.get_color(content.cursor.fg);
                         if cursor_focused {
-                            let cursor_rect =
-                                Path::rectangle(Point::new(x, y), cell_size);
+                            let cursor_rect = Path::rectangle(
+                                Point::new(x, y),
+                                Size::new(glyph_w, cell_height),
+                            );
                             frame.fill(&cursor_rect, cursor_color);
                         } else {
                             // One-pixel outline inset by half a pixel so
@@ -888,7 +899,7 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                             let outline = Path::rectangle(
                                 Point::new(x + inset, y + inset),
                                 Size::new(
-                                    cell_size.width - HOLLOW_CURSOR_STROKE,
+                                    glyph_w - HOLLOW_CURSOR_STROKE,
                                     cell_size.height - HOLLOW_CURSOR_STROKE,
                                 ),
                             );
@@ -928,6 +939,7 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
 
                         if can_merge
                             && indexed.c.is_ascii_graphic()
+                            && zerowidth.is_none()
                             && !is_cursor_cell
                         {
                             let col = indexed.point.column.0;
@@ -980,8 +992,10 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                             if italic {
                                 font.style = FontStyle::Italic;
                             }
+                            let mut content = String::from(indexed.c);
+                            content.extend(zerowidth.into_iter().flatten());
                             frame.fill_text(Text {
-                                content: indexed.cell.c.to_string(),
+                                content,
                                 position: Point::new(
                                     cell_center_x,
                                     cell_center_y,

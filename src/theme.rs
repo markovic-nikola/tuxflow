@@ -208,6 +208,56 @@ pub fn accent_soft(remote: bool) -> Color {
     )
 }
 
+/// The attention colour's settings NAME — resolved per call, because what
+/// it means depends on the scheme (light twins) and, for "accent", on
+/// which project is asking.
+static ATTENTION: RwLock<String> = RwLock::new(String::new());
+
+/// Make `name` (Settings → Waiting Agent Color) the attention colour.
+pub fn set_attention(name: &str) {
+    *ATTENTION.write().expect("attention slot") = name.to_string();
+}
+
+fn attention() -> &'static palette::AttentionColor {
+    palette::attention_by_name(&ATTENTION.read().expect("attention slot"))
+}
+
+/// The dot on an agent waiting for the user, for a project on this machine
+/// or a remote one.
+pub fn attention_for(remote: bool) -> Color {
+    match attention().hues {
+        Some((dark, light)) => hex(if pal().light { light } else { dark }),
+        None => accent_for(remote),
+    }
+}
+
+/// The attention badge on an avatar or a toolbar button: a disc ringed in
+/// `surface`, the colour of what it sits on, so it reads as cut out of the
+/// corner rather than stuck over it.
+/// The halo around the badge of an agent that needs the user.
+pub fn attention_halo(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(alpha(color, 0.35))),
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub fn attention_badge(color: Color, surface: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Color(color)),
+        border: Border {
+            color: surface,
+            width: 2.0,
+            radius: 6.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
 pub fn hex(hex_str: &str) -> Color {
     let (r, g, b) = palette::hex_rgb(hex_str);
     Color::from_rgb(r, g, b)
@@ -469,44 +519,53 @@ const SWEEP_PEAK: f32 = 0.025;
 /// this is a slow breath across a sidebar card, not a loading skeleton.
 const SWEEP_HALF: f32 = 0.32;
 
-/// Ring alpha with nothing sweeping — GTK's `.project-has-running` edge.
-const RING_REST: f32 = 0.35;
-/// …and the range it breathes through while an agent works. This is the
+/// The ACTIVE card's border: solid accent, a half pixel heavier than the
+/// rest. Until 2026-10-13 every card with anything running wore a 0.35
+/// accent ring and the active one only a corner wash, so with every
+/// project up (the normal day) all cards looked alike and the open one
+/// was hard to find (Nikola, off the calibration bench). The strong ring
+/// now means "open"; a running background card keeps a faint one.
+const OPEN_RING: f32 = 0.70;
+const OPEN_RING_WIDTH: f32 = 1.5;
+/// A running BACKGROUND card's ring: half the GTK-era 0.35, enough to tell
+/// a running card from an idle one at a glance without competing with the
+/// open card. Below [`RING_MIN`], so a breath starting on it rises rather
+/// than steps down.
+const RUNNING_RING: f32 = 0.18;
+/// The range a BACKGROUND card's ring breathes through while an agent in
+/// it works. This is the
 /// half of the signal that never crosses a row, which is why the band
 /// could go as quiet as it did: the ring carries the motion, the band
 /// only tints the surface it passes.
 const RING_MIN: f32 = 0.22;
 const RING_MAX: f32 = 0.60;
 
-/// A project card. Two orthogonal signals, as in GTK, where they are two
-/// unrelated CSS classes: an accent border RING says something inside is
-/// running (`.project-has-running`, which lights the container's left
-/// border to full accent and its title), and the corner-to-corner accent
-/// gradient says this is the ACTIVE project owning the main pane
-/// (`.project-active`, a background wash). GTK's ring is a 2px left edge;
-/// iced borders are all-or-nothing per side, so it goes around the whole
-/// card at a lower alpha for the same weight of ink.
+/// A project card. `active` is the open card: the project owning the main
+/// pane, and only while something in it runs (the caller's rule — a
+/// stopped project still owns the pane but should not look selected). It
+/// is the only card with a solid border ring ([`OPEN_RING`]), over the
+/// corner-to-corner accent wash it has always had. A `running` card that
+/// is not open keeps a faint ring ([`RUNNING_RING`], GTK's
+/// `.project-has-running` turned down so it no longer reads as selected).
 ///
-/// `sweep` is the third: a 0..1 phase while an agent inside is producing
-/// output. It drives BOTH a band of accent light travelling the same
-/// diagonal and a breath in the ring, in step. Splitting the signal across
-/// the two is what let the band drop to a whisper: a bright thing sliding
-/// under a row label reads as interference however legible it measures, so
-/// the carrying motion sits on the border, where there is no text.
-///
-/// The two halves are gated differently, and asymmetrically on purpose
-/// (Nikola): the RING breathes on every card with a working agent, because
-/// "something over there is busy" is exactly what a background card needs
-/// to be able to say. The BAND rides the ACTIVE card only — it is a
-/// modulation of the active wash, and on a background card, where there is
-/// no wash under it, a lone band sliding across a dark card is the only
-/// motion in an otherwise still sidebar, so it pulls the eye to the card
-/// you are not looking at.
+/// `sweep` is a 0..1 phase while an agent inside is producing output. On
+/// the active card it drives a band of accent light travelling the wash's
+/// diagonal; on a background card it breathes the ring.
+/// The asymmetry is on purpose (Nikola): "something over there is busy" is
+/// exactly what a background card needs to be able to say, while a band on
+/// a card with no wash under it is the only motion in an otherwise still
+/// sidebar and pulls the eye to the card you are not looking at. The open
+/// ring holds still — breathing it would dim the one mark that says which
+/// card is open, and the band already says the agent is working.
+/// `attention`: an agent in the card is waiting for the user — the ring
+/// takes that colour, solid enough to find on a collapsed card, and it
+/// wins over both of the others (an open card keeps the heavier width).
 pub fn project_card(
     accent: Color,
-    running: bool,
     active: bool,
+    running: bool,
     sweep: Option<f32>,
+    attention: Option<Color>,
 ) -> impl Fn(&Theme) -> container::Style {
     move |_| {
         let background = match card_gradient(accent, active, sweep) {
@@ -516,12 +575,14 @@ pub fn project_card(
         container::Style {
             background: Some(background),
             border: Border {
-                color: if running {
-                    alpha(accent, ring_alpha(sweep))
-                } else {
-                    alpha(pal().wash, 0.05)
+                color: match (attention, sweep) {
+                    (Some(c), _) => alpha(c, ATTENTION_RING),
+                    _ if active => alpha(accent, OPEN_RING),
+                    (None, Some(phase)) => alpha(accent, ring_alpha(phase)),
+                    _ if running => alpha(accent, RUNNING_RING),
+                    _ => alpha(pal().wash, 0.05),
                 },
-                width: 1.0,
+                width: if active { OPEN_RING_WIDTH } else { 1.0 },
                 radius: 10.0.into(),
             },
             shadow: Shadow {
@@ -534,24 +595,21 @@ pub fn project_card(
     }
 }
 
-/// The ring's alpha at `sweep`: resting when nothing is working, else a
-/// cosine breath in step with the band — dimmest as the band waits off the
-/// top-left corner, fullest as it crosses the middle. Cosine rather than
-/// the band's own triangle because the ring has no position to give it
-/// away, only brightness, and a linear ramp reads as a flicker at the
-/// turn. Periodic, so the phase wrapping 1 → 0 costs nothing; the one
-/// seam is the pass where work ENDS, which leaves the ring at RING_MIN and
-/// steps it back to rest — 0.13 alpha on a 1px border, once per finished
-/// run, against a trough deep enough to read as breathing rather than
-/// blinking. That trade was the point of dipping below rest at all.
-fn ring_alpha(sweep: Option<f32>) -> f32 {
-    match sweep {
-        Some(phase) => {
-            let breath = 0.5 - (phase * std::f32::consts::TAU).cos() / 2.0;
-            RING_MIN + (RING_MAX - RING_MIN) * breath
-        }
-        None => RING_REST,
-    }
+/// The attention ring's alpha: well over the working ring's breath, so a
+/// waiting card stands out from a merely busy one.
+const ATTENTION_RING: f32 = 0.75;
+
+/// A background card's ring alpha at sweep `phase`: a cosine breath in
+/// step with the band — dimmest as the band waits off the top-left corner,
+/// fullest as it crosses the middle. Cosine rather than the band's own
+/// triangle because the ring has no position to give it away, only
+/// brightness, and a linear ramp reads as a flicker at the turn. Periodic,
+/// so the phase wrapping 1 → 0 costs nothing; the seams are where work
+/// starts and ends, stepping between the idle hairline and RING_MIN once
+/// per run.
+fn ring_alpha(phase: f32) -> f32 {
+    let breath = 0.5 - (phase * std::f32::consts::TAU).cos() / 2.0;
+    RING_MIN + (RING_MAX - RING_MIN) * breath
 }
 
 /// Accent strength of the static wash at `t` along the diagonal.
@@ -1208,34 +1266,39 @@ mod tests {
 
     #[test]
     fn the_ring_breathes_in_step_with_the_band() {
-        assert!((ring_alpha(None) - RING_REST).abs() < 1e-6);
         // Dimmest where the band waits off-card, fullest mid-crossing.
-        assert!((ring_alpha(Some(0.0)) - RING_MIN).abs() < 1e-6);
-        assert!((ring_alpha(Some(0.5)) - RING_MAX).abs() < 1e-6);
+        assert!((ring_alpha(0.0) - RING_MIN).abs() < 1e-6);
+        assert!((ring_alpha(0.5) - RING_MAX).abs() < 1e-6);
         // Periodic: the phase wrapping 1 -> 0 must not step the border.
-        assert!((ring_alpha(Some(1.0)) - ring_alpha(Some(0.0))).abs() < 1e-6);
+        assert!((ring_alpha(1.0) - ring_alpha(0.0)).abs() < 1e-6);
         // Monotone up over the first half, so it reads as one breath.
-        let mut prev = ring_alpha(Some(0.0));
+        let mut prev = ring_alpha(0.0);
         for i in 1..=25 {
-            let a = ring_alpha(Some(i as f32 / 50.0));
+            let a = ring_alpha(i as f32 / 50.0);
             assert!(a > prev, "phase {i}/50 fell back to {a}");
             prev = a;
         }
     }
 
     #[test]
-    fn the_ring_breathes_whether_or_not_the_card_is_selected() {
-        // The asymmetry (Nikola): the background belongs to the active
-        // card alone, but "an agent in here is working" has to read from
-        // any card, so the ring's half of the signal ignores selection.
-        let ring = |active| {
-            project_card(REMOTE_ACCENT, true, active, Some(0.5))(&Theme::Dark)
-                .border
-                .color
-                .a
+    fn only_the_open_card_rings_and_only_background_cards_breathe() {
+        let border = |active, sweep| {
+            project_card(REMOTE_ACCENT, active, true, sweep, None)(&Theme::Dark).border
         };
-        assert!((ring(false) - RING_MAX).abs() < 1e-6);
-        assert!((ring(false) - ring(true)).abs() < 1e-6);
+        // The open card's ring holds still whatever its agents do.
+        for sweep in [None, Some(0.0), Some(0.5)] {
+            assert!((border(true, sweep).color.a - OPEN_RING).abs() < 1e-6);
+            assert!((border(true, sweep).width - OPEN_RING_WIDTH).abs() < 1e-6);
+        }
+        // A running background card keeps a faint ring, well under the
+        // open one, and breathes up from it while an agent works.
+        assert!((border(false, Some(0.5)).color.a - RING_MAX).abs() < 1e-6);
+        assert!((border(false, None).color.a - RUNNING_RING).abs() < 1e-6);
+        assert!(RUNNING_RING < RING_MIN && RUNNING_RING < OPEN_RING / 2.0);
+        assert!((border(false, None).width - 1.0).abs() < 1e-6);
+        // Idle: a hairline.
+        let idle = project_card(REMOTE_ACCENT, false, false, None, None)(&Theme::Dark).border;
+        assert!(idle.color.a < RUNNING_RING);
     }
 
     #[test]

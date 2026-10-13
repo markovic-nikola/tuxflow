@@ -102,6 +102,25 @@ pub struct ProcessEntry {
     /// set when it fires, cleared by the next repaint, so a quiet agent
     /// notifies once per silence rather than once per tick.
     pub idle_notified: bool,
+    /// An agent finished its turn, or needs the user, while they were
+    /// looking elsewhere — the marker on its row, its card and its avatar.
+    /// Set by Claude's hooks (or, without them, the bell or the silence
+    /// fallback), cleared once its terminal is on screen in a focused
+    /// window, when the user answers from anywhere, or when the run ends.
+    pub attention: Option<Attention>,
+    /// This run's agent reports through Claude Code hooks
+    /// (`mcp::agent_hooks`): its bell and the silence guess are then
+    /// redundant, and ignored.
+    pub hooked: bool,
+}
+
+/// Why an agent is waiting on the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Attention {
+    /// Its turn ended.
+    Finished,
+    /// A permission dialog or a question — it can't go on without them.
+    NeedsYou,
 }
 
 impl ProcessEntry {
@@ -131,6 +150,8 @@ impl ProcessEntry {
             last_activity: None,
             working: false,
             idle_notified: false,
+            attention: None,
+            hooked: false,
         }
     }
 
@@ -186,6 +207,42 @@ impl ProcessEntry {
         self.idle_notified = true;
         true
     }
+}
+
+/// TuxFlow's Claude Code plugin, written on this machine once per launch
+/// (the first local agent's spawn); `None` when it couldn't be.
+fn local_plugin_dir() -> Option<&'static str> {
+    static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        tuxflow_core::mcp::agent_hooks::install_local().map(|d| d.to_string_lossy().into_owned())
+    })
+    .as_deref()
+}
+
+/// `TUXFLOW_PROCESS` and the plugin directory added to an agent's env. A
+/// remote agent's plugin is the copy the MCP provisioning keeps on the
+/// host, spelled from `~/` (the tmux wrap makes that the host's home). A
+/// list the user already set locally keeps its entries.
+fn agent_hooks_env(env: &mut std::collections::BTreeMap<String, String>, name: &str, remote: bool) {
+    use tuxflow_core::mcp::agent_hooks::{PLUGIN_DIR, PLUGIN_DIRS_ENV, PROCESS_ENV};
+    env.insert(PROCESS_ENV.to_string(), name.to_string());
+    let ours = if remote {
+        format!("~/{PLUGIN_DIR}")
+    } else {
+        let Some(dir) = local_plugin_dir() else {
+            return;
+        };
+        let theirs = env
+            .get(PLUGIN_DIRS_ENV)
+            .cloned()
+            .or_else(|| std::env::var(PLUGIN_DIRS_ENV).ok())
+            .filter(|v| !v.is_empty());
+        match theirs {
+            Some(theirs) => format!("{dir}:{theirs}"),
+            None => dir.to_string(),
+        }
+    };
+    env.insert(PLUGIN_DIRS_ENV.to_string(), ours);
 }
 
 /// SSH-category entries are ssh invocations run locally (spawn_settings
@@ -292,6 +349,13 @@ pub fn spawn_settings(
             tuxflow_core::mcp::server::SOCKET_ENV.to_string(),
             socket.to_string(),
         );
+        // An agent also gets its name and TuxFlow's Claude Code plugin,
+        // whose hooks report over that socket (`mcp::agent_hooks`). The
+        // plugin rides the MCP setting: without the socket it could not
+        // report anywhere.
+        if entry.config.category == ProcessCategory::Agent {
+            agent_hooks_env(&mut config_env, &entry.config.name, location.is_remote());
+        }
     }
     let run_command = entry
         .command_override

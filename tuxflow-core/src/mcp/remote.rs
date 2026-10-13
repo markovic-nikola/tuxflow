@@ -31,9 +31,9 @@ const REMOTE_SOCKET_DIR: &str = ".cache/tuxflow/mcp";
 /// The host-side socket for `project_name`, spelled with `~` — this is the
 /// value of [`super::server::SOCKET_ENV`] in a remote process's
 /// environment, set BEFORE provisioning has resolved the host's `$HOME`
-/// (the env travels inside the tmux wrap, quoted, so the remote shell
-/// never expands it either). The shim expands `~` itself; the absolute
-/// path the forward binds comes back from [`provision`].
+/// (the tmux wrap turns a leading `~/` into the host's `$HOME`, and the
+/// shim expands `~` itself for anything older). The absolute path the
+/// forward binds comes back from [`provision`].
 pub fn remote_socket_path(project_name: &str) -> String {
     format!("~/{REMOTE_SOCKET_DIR}/{}.sock", sanitize_name(project_name))
 }
@@ -156,10 +156,12 @@ fn provision(host: &str, project_name: &str, remote_dir: &str) -> Result<String,
         "mkdir -p ~/{dir} ~/.local/bin && chmod 700 ~/.cache/tuxflow ~/{dir} && \
          printf '%s' {shim} > ~/.local/bin/tuxflow-mcp && chmod +x ~/.local/bin/tuxflow-mcp && \
          rm -f ~/{dir}/{name}.sock && printf '%s' {pdir} > ~/{dir}/{name}.sock.dir && \
+         {hooks} && \
          echo \"$HOME/{dir}/{name}.sock\"",
         dir = REMOTE_SOCKET_DIR,
         shim = sh_quote(SHIM),
         pdir = sh_quote(remote_dir),
+        hooks = super::agent_hooks::remote_install_script(),
     );
     ssh_stream_stdin(host, &script, &[])
 }

@@ -122,6 +122,13 @@ pub enum McpCommand {
         lines: usize,
         reply: oneshot::Sender<CommandResult>,
     },
+    /// A Claude Code hook's report on agent `name` (`mcp::agent_hooks`);
+    /// `None` for a hook whose event changes nothing. No reply: the hook
+    /// has already hung up.
+    AgentEvent {
+        name: String,
+        event: Option<crate::mcp::agent_hooks::AgentEvent>,
+    },
 }
 
 pub enum CommandResult {

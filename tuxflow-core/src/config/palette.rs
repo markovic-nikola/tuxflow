@@ -147,6 +147,70 @@ pub fn accent_name(index: u32) -> &'static str {
         .unwrap_or(FALLBACK_LOCAL)
 }
 
+// ── Attention: an agent waiting on you ──────────────────────────────────
+
+/// The marker on an agent that finished its turn while the user was
+/// looking elsewhere — a dot on its project's avatar and its row. A hue no
+/// other sidebar signal uses (the accents, restarting amber, crashed red),
+/// so the dot can't be read as one of them; "accent" draws it in the
+/// project's own colour instead and leaves the meaning to the dot's place.
+pub struct AttentionColor {
+    pub name: &'static str,
+    pub label: &'static str,
+    /// (dark, light) — the light twin for the light shell, as with the
+    /// accents. `None`: the project's accent.
+    pub hues: Option<(&'static str, &'static str)>,
+}
+
+pub const ATTENTION_COLORS: &[AttentionColor] = &[
+    AttentionColor {
+        name: "blue",
+        label: "Blue",
+        hues: Some(("#78aeed", "#1c71d8")),
+    },
+    AttentionColor {
+        name: "violet",
+        label: "Violet",
+        hues: Some(("#c88cf0", "#813d9c")),
+    },
+    AttentionColor {
+        name: "pink",
+        label: "Pink",
+        hues: Some(("#f58fc7", "#b5317a")),
+    },
+    AttentionColor {
+        name: "teal",
+        label: "Teal",
+        hues: Some(("#5ee0d0", "#0e7c70")),
+    },
+    AttentionColor {
+        name: "neutral",
+        label: "Neutral",
+        hues: Some(("#ececf1", "#2e3436")),
+    },
+    AttentionColor {
+        name: "accent",
+        label: "Project Accent",
+        hues: None,
+    },
+];
+
+/// `AppearanceSettings::default` carries the same name.
+pub const FALLBACK_ATTENTION: &str = "pink";
+
+/// An attention colour by name; unknown names (hand-edited settings) get
+/// the default rather than nothing, as with the accents.
+pub fn attention_by_name(name: &str) -> &'static AttentionColor {
+    let by_name = |n: &str| ATTENTION_COLORS.iter().find(|c| c.name == n);
+    by_name(name)
+        .or_else(|| by_name(FALLBACK_ATTENTION))
+        .expect("fallback attention colour is in the table")
+}
+
+pub fn attention_choices() -> Vec<&'static str> {
+    ATTENTION_COLORS.iter().map(|c| c.label).collect()
+}
+
 // ── Terminal color schemes ──────────────────────────────────────────────
 
 pub struct TerminalTheme {
@@ -784,6 +848,30 @@ mod tests {
                 "{name} light {light_hex} is {light:.2}:1 on {LIGHT_SIDEBAR}"
             );
         }
+    }
+
+    /// The attention dot is a status light like the ones above, and its
+    /// whole job is to be seen from across the sidebar.
+    #[test]
+    fn attention_dots_are_visible_in_both_schemes() {
+        for c in ATTENTION_COLORS {
+            let Some((dark_hex, light_hex)) = c.hues else {
+                continue;
+            };
+            let dark = contrast(dark_hex, DARK_SIDEBAR);
+            let light = contrast(light_hex, LIGHT_SIDEBAR);
+            assert!(
+                dark >= MIN_DOT_CONTRAST,
+                "{} dark {dark_hex} is {dark:.2}:1 on {DARK_SIDEBAR}",
+                c.name
+            );
+            assert!(
+                light >= MIN_DOT_CONTRAST,
+                "{} light {light_hex} is {light:.2}:1 on {LIGHT_SIDEBAR}",
+                c.name
+            );
+        }
+        assert_eq!(attention_by_name("no-such-colour").name, FALLBACK_ATTENTION);
     }
 
     #[test]

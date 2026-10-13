@@ -120,8 +120,10 @@ pub fn start_mcp_server(
                 match accepted {
                     Ok((stream, _addr)) => {
                         let server = TuxFlowMcpServer::new(bridge.clone());
+                        let commands = bridge.command_tx.clone();
                         tokio::spawn(async move {
-                            let Some(transport) = answer_preinit_probes(stream).await else {
+                            let Some(transport) = answer_preinit_probes(stream, commands).await
+                            else {
                                 return;
                             };
                             match server.serve(transport).await {
@@ -152,9 +154,12 @@ pub fn start_mcp_server(
 /// reply, while newer clients open with a capability probe
 /// (`server/discover`) and wait for "method not found" before falling back
 /// to the classic handshake — so every such request is answered here and
-/// the connection kept. `None` when the client left first.
+/// the connection kept. `None` when the client left first, or when it was
+/// an agent hook delivering its one line (`agent_hooks`), which goes to the
+/// app as a command and ends the connection.
 async fn answer_preinit_probes(
     stream: UnixStream,
+    commands: tokio::sync::mpsc::UnboundedSender<bridge::McpCommand>,
 ) -> Option<(
     impl AsyncRead + Send + Unpin + 'static,
     tokio::net::unix::OwnedWriteHalf,
@@ -165,6 +170,11 @@ async fn answer_preinit_probes(
     loop {
         line.clear();
         if reader.read_line(&mut line).await.ok()? == 0 {
+            return None;
+        }
+        if let Some((name, event)) = crate::mcp::agent_hooks::parse_event_line(&line) {
+            log::debug!("agent hook from {name}: {event:?}");
+            let _ = commands.send(bridge::McpCommand::AgentEvent { name, event });
             return None;
         }
         let Some(reply) = preinit_refusal(&line) else {

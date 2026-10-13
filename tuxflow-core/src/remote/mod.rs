@@ -254,6 +254,22 @@ pub fn remote_session_name(project_key: &str, process_name: &str) -> String {
     format!("tf-{}-{:08x}", slug, hash as u32)
 }
 
+/// One `K=V` word for the host's `env`, quoted against the shell — except
+/// that a value starting `~/` is the HOST's home: `~` means nothing inside
+/// quotes, and a path the remote side must open (the agent hooks' plugin
+/// directory) can't be spelled any other way before provisioning has
+/// resolved `$HOME`.
+fn env_assignment(key: &str, value: &str) -> String {
+    match value.strip_prefix("~/") {
+        Some(rest) => format!(
+            "{}\"$HOME\"{}",
+            sh_quote(&format!("{key}=")),
+            sh_quote(&format!("/{rest}"))
+        ),
+        None => sh_quote(&format!("{key}={value}")),
+    }
+}
+
 /// Wrap a process command so it runs on `host` in `remote_dir` with `env`,
 /// inside the remote user's login shell (profile sourcing preserved).
 /// The result replaces ProcessConfig.command in the local `$SHELL -li -c` argv;
@@ -288,7 +304,7 @@ pub fn wrap_remote_command(
         env_prefix = format!(
             "env {} ",
             keys.iter()
-                .map(|k| sh_quote(&format!("{k}={}", env[*k])))
+                .map(|k| env_assignment(k, &env[*k]))
                 .collect::<Vec<_>>()
                 .join(" ")
         );
@@ -1001,6 +1017,26 @@ mod tests {
     fn sh_quote_escapes_single_quotes() {
         assert_eq!(sh_quote("it's"), r#"'it'\''s'"#);
         assert_eq!(sh_quote("plain"), "'plain'");
+    }
+
+    /// Run by a real shell: `~/` reaches the program as the host's home,
+    /// anything else (quotes, `$`, spaces) verbatim.
+    #[test]
+    fn env_assignment_expands_only_a_leading_home() {
+        let run = |k: &str, v: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("env {} printenv {k}", env_assignment(k, v)))
+                .env("HOME", "/home/someone")
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .trim_end()
+                .to_string()
+        };
+        assert_eq!(run("P", "~/.cache/x y"), "/home/someone/.cache/x y");
+        assert_eq!(run("Q", "it's $HOME ~/no"), "it's $HOME ~/no");
     }
 
     #[test]

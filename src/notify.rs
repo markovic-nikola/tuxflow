@@ -379,8 +379,9 @@ pub fn finish(
     );
 }
 
-/// An agent finished its turn — GTK's `notify_agent_idle`, fired on the
-/// terminal bell (the primary signal) or by the silence fallback. Carries
+/// An agent finished its turn or needs the user — GTK's `notify_agent_idle`,
+/// fired by Claude's hooks, else the terminal bell or the silence fallback;
+/// `detail` says which ("waiting for input" when only the bell knows). Carries
 /// the agent's own sound when one is configured. OpenCode emits its own
 /// desktop notifications, so TuxFlow stays silent for it.
 pub fn agent_idle(
@@ -390,6 +391,7 @@ pub fn agent_idle(
     icon: Option<&Path>,
     kind: AgentKind,
     term: Option<u64>,
+    detail: &str,
 ) {
     if kind == AgentKind::OpenCode {
         return;
@@ -398,7 +400,7 @@ pub fn agent_idle(
         ns,
         NotificationKind::AgentIdle,
         project,
-        &format!("{process}: waiting for input"),
+        &format!("{process}: {detail}"),
         icon,
         per_agent_sound(ns, kind),
         term,

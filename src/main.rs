@@ -51,7 +51,7 @@ use tuxflow_core::util::update::{self, InstallKind, UpdateInfo};
 use tuxflow_core::util::watch::{self, WatchSet};
 
 use keys::{AppAction, AppKeys};
-use processes::{ProcessEntry, Status, plan_after_exit};
+use processes::{Attention, ProcessEntry, Status, plan_after_exit};
 use status_dot::{spinner, status_dot};
 use theme::{CRASHED, LOCAL_ACCENT, accent_for, pal};
 use tuxflow_core::config::settings::AppSettings;
@@ -233,8 +233,8 @@ impl Anim {
 }
 
 /// The working-agent sweep: the shared phase driving every card whose
-/// agent is producing output — a breath in the card's border ring, and,
-/// on the ACTIVE card only, a band of light crossing its wash
+/// agent is producing output — a breath in a BACKGROUND card's border
+/// ring, and on the ACTIVE card only, a band of light crossing its wash
 /// ([`theme::project_card`]). Same tick-chain idiom as [`Anim`] and
 /// generation-stamped for the same reason, but it LOOPS rather than
 /// settling — and it is linear, since an ease would make a repeating pass
@@ -1303,6 +1303,7 @@ impl App {
             &settings.appearance.local_accent_color,
             &settings.appearance.remote_accent_color,
         );
+        theme::set_attention(&settings.appearance.attention_color);
         let mut saved = SavedProjects::load();
         let mut state = LocalState::load();
         // Insurance: keep a .bak of the last known-good (non-empty)
@@ -1695,7 +1696,7 @@ impl App {
     /// "Waiting for input" for an agent, behind every gate GTK's bell
     /// handler applies: agents only, the Agent Idle flag, the focus gate.
     /// Fired by the terminal bell and by the silence fallback.
-    fn notify_agent_idle(&self, pidx: usize, index: usize) {
+    fn notify_agent_idle(&self, pidx: usize, index: usize, detail: &str) {
         let project = &self.projects[pidx];
         let entry = &project.entries[index];
         if entry.config.category != ProcessCategory::Agent || !entry.is_running() {
@@ -1717,7 +1718,96 @@ impl App {
             project.icon.as_deref(),
             agents::AgentKind::from_command(&entry.config.command),
             entry.term_id,
+            detail,
         );
+    }
+
+    /// Is the user looking at this process's terminal right now? A focused
+    /// window showing it — what the attention dot waits for.
+    fn seen(&self, pidx: usize, index: usize) -> bool {
+        self.window_focused && self.terminal_visible(pidx, index)
+    }
+
+    /// An agent finished its turn: mark it for the user unless they are
+    /// watching it already. Independent of the notification settings —
+    /// the dot is how a turn that ended in another project is found, with
+    /// banners on or off.
+    fn mark_waiting(&mut self, pidx: usize, index: usize, why: Attention) {
+        let entry = &self.projects[pidx].entries[index];
+        if entry.config.category == ProcessCategory::Agent
+            && entry.is_running()
+            && !self.seen(pidx, index)
+        {
+            self.projects[pidx].entries[index].attention = Some(why);
+        }
+    }
+
+    /// The marker as drawn: set, and not on the terminal the user is
+    /// looking at — `clear_seen_attention` drops it at the next event, this
+    /// keeps the frame in between from showing it.
+    fn shows_attention(&self, pidx: usize, index: usize) -> Option<Attention> {
+        self.projects[pidx].entries[index]
+            .attention
+            .filter(|_| !self.seen(pidx, index))
+    }
+
+    /// The card's marker: the most urgent of its agents'.
+    fn project_attention(&self, pidx: usize) -> Option<Attention> {
+        (0..self.projects[pidx].entries.len())
+            .filter_map(|index| self.shows_attention(pidx, index))
+            .max()
+    }
+
+    /// The bell and the silence guess, for an agent whose hooks are not
+    /// speaking for it.
+    fn agent_went_quiet(&mut self, pidx: usize, index: usize) {
+        if self.projects[pidx].entries[index].hooked {
+            return;
+        }
+        self.mark_waiting(pidx, index, Attention::Finished);
+        self.notify_agent_idle(pidx, index, "waiting for input");
+    }
+
+    /// A Claude Code hook's report (`mcp::agent_hooks`). Any report marks
+    /// the run as hooked, so its bell stops counting.
+    fn agent_event(
+        &mut self,
+        project: u64,
+        name: &str,
+        event: Option<tuxflow_core::mcp::agent_hooks::AgentEvent>,
+    ) {
+        use tuxflow_core::mcp::agent_hooks::AgentEvent;
+        let Some((pidx, index)) = self.entry_by_name(project, name) else {
+            return;
+        };
+        self.projects[pidx].entries[index].hooked = true;
+        match event {
+            Some(AgentEvent::Finished) => {
+                self.mark_waiting(pidx, index, Attention::Finished);
+                self.notify_agent_idle(pidx, index, "finished");
+            }
+            Some(AgentEvent::NeedsInput { reason }) => {
+                self.mark_waiting(pidx, index, Attention::NeedsYou);
+                let detail = reason.unwrap_or_else(|| String::from("needs you"));
+                self.notify_agent_idle(pidx, index, &detail);
+            }
+            Some(AgentEvent::Resumed) => {
+                self.projects[pidx].entries[index].attention = None;
+            }
+            None => {}
+        }
+    }
+
+    /// The selected terminal of the active project, on screen in a focused
+    /// window, has been seen.
+    fn clear_seen_attention(&mut self) {
+        let pidx = self.active;
+        let Some(index) = self.projects.get(pidx).map(|p| p.selected) else {
+            return;
+        };
+        if index < self.projects[pidx].entries.len() && self.seen(pidx, index) {
+            self.projects[pidx].entries[index].attention = None;
+        }
     }
 
     /// The idle-silence fallback (GTK's `check_agent_silence`, on the same
@@ -1739,7 +1829,7 @@ impl App {
             }
         }
         for (pidx, index) in due {
-            self.notify_agent_idle(pidx, index);
+            self.agent_went_quiet(pidx, index);
         }
     }
 
@@ -2032,6 +2122,8 @@ impl App {
                 // repaint (GTK stamps `last_activity` at handler build).
                 entry.last_activity = Some(Instant::now());
                 entry.idle_notified = false;
+                // Until this run's hooks speak, its bell is the signal.
+                entry.hooked = false;
                 let name = entry.config.name.clone();
                 project.ports.clear(&name);
                 project.selected = index;
@@ -2310,6 +2402,11 @@ impl App {
                 .is_some_and(remote::mux_guard::rerouted_recently);
         let connection_loss = remote_process && (entry.last_exit == Some(255) || rerouted);
         let entry = &mut project.entries[index];
+        // A finished run waits for nothing. A dropped link is not an end:
+        // the agent still waits on the host, and the reconnect resumes it.
+        if !connection_loss {
+            entry.attention = None;
+        }
 
         // The terminal stays — it holds the run's output, which is what the
         // user reaches for when a run ends badly. GTK feeds the same line
@@ -4896,6 +4993,10 @@ impl App {
         // checked here for the same reason as the git view above: the
         // statuses move from many places (clicks, async exits, reattach).
         self.refresh_recent_order();
+        // The attention dot of whatever the user is now looking at — the
+        // selection, the active project and the window focus all move from
+        // many places.
+        self.clear_seen_attention();
         // And the MCP snapshot tables, for the same reason: a status or a
         // detected URL moves from as many places, and the agent asking
         // must see the state the sidebar shows.
@@ -6805,7 +6906,7 @@ impl App {
                                 "bell from {}",
                                 self.projects[pidx].entries[index].config.name
                             );
-                            self.notify_agent_idle(pidx, index);
+                            self.agent_went_quiet(pidx, index);
                         }
                         AEvent::ClipboardStore(ty, data) if !data.is_empty() => {
                             // OSC 52 — agents' and tmux's copies; empty
@@ -7567,31 +7668,62 @@ impl App {
             .padding(7)
             .style(theme::tooltip)
         };
-        let buttons = [
-            btn(
-                ICON_SIDEBAR,
-                self.sidebar_visible,
-                format!("Toggle Sidebar ({})", kb.toggle_sidebar),
-                Event::ToggleSidebar,
-            ),
+        // On the rail the cards are out of sight, so the toggle that brings
+        // them back carries the attention badge for all of them. Always a
+        // stack there, badge or not, so its arrival keeps the tree's shape.
+        let toggle = btn(
+            ICON_SIDEBAR,
+            self.sidebar_visible,
+            format!("Toggle Sidebar ({})", kb.toggle_sidebar),
+            Event::ToggleSidebar,
+        );
+        let toggle: Element<'_, Event> = if vertical {
+            let most = (0..self.projects.len())
+                .filter_map(|p| self.project_attention(p).map(|why| (why, p)))
+                .max();
+            let badge: Element<'_, Event> = match most {
+                Some((why, p)) => attention_badge(
+                    theme::attention_for(self.projects[p].location.is_remote()),
+                    pal().ground,
+                    why,
+                ),
+                None => iced::widget::Space::new().into(),
+            };
+            iced::widget::stack![
+                toggle,
+                container(badge)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Alignment::End)
+                    .align_y(iced::Alignment::Start),
+            ]
+            .into()
+        } else {
+            toggle.into()
+        };
+        let buttons: [Element<'_, Event>; 4] = [
+            toggle,
             btn(
                 ICON_FIND,
                 self.filter_open,
                 format!("Filter Sidebar ({})", kb.filter_processes),
                 Event::ToggleFilter,
-            ),
+            )
+            .into(),
             btn(
                 ICON_GEAR,
                 self.settings_ui.is_some(),
                 format!("Settings ({})", kb.settings),
                 Event::OpenSettings,
-            ),
+            )
+            .into(),
             btn(
                 ICON_ADD,
                 self.add_project.is_some(),
                 String::from("Add Project"),
                 Event::OpenAddProject,
-            ),
+            )
+            .into(),
         ];
         if vertical {
             let mut col = column![].spacing(2).align_x(iced::Alignment::Center);
@@ -7756,15 +7888,30 @@ impl App {
 
         // 26px avatar: the project's own artwork, or an initials square —
         // the shared drawing, so the Edit Project preview can't disagree.
-        let icon: Element<'a, Event> =
-            widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0);
+        // The attention badge rides its top-right corner. The stack is
+        // there with or without it: a conditional wrapper would change the
+        // header's tree shape whenever an agent finished.
+        let badge: Element<'a, Event> = match self.project_attention(pidx) {
+            Some(why) => attention_badge(theme::attention_for(remote), pal().card, why),
+            None => iced::widget::Space::new().into(),
+        };
+        let icon: Element<'a, Event> = iced::widget::stack![
+            widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0),
+            container(badge)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Alignment::End)
+                .align_y(iced::Alignment::Start),
+        ]
+        .into();
 
         // GTK's hover controls on the project row: start the marked set,
         // restart the running, stop everything. They take the counter
         // pill's seat while the pointer is on the header.
         // GTK's `.project-has-running .project-name`: the title lights up in
-        // the project's accent while anything inside is up, alongside the
-        // card's border ring. Idle cards keep the plain title.
+        // the project's accent while anything inside is up. (The border
+        // ring that went with it now marks the open card instead.) Idle
+        // cards keep the plain title.
         let running = project.has_running();
         let row_id = (project.id, None);
         let pointed = self.hovered_row == Some(row_id);
@@ -7926,10 +8073,22 @@ impl App {
         }
 
         let sweep = project.sweeping.then_some(self.sweep.phase);
+        let attention = self
+            .project_attention(pidx)
+            .map(|_| theme::attention_for(remote));
+        // The card is marked open only while something in it runs: a
+        // project stopped from its header still owns the pane, but a ring
+        // around a card with nothing up read as "still selected" (Nikola).
         container(block)
             .width(Length::Fill)
             .padding(8)
-            .style(theme::project_card(accent, running, active, sweep))
+            .style(theme::project_card(
+                accent,
+                active && running,
+                running,
+                sweep,
+                attention,
+            ))
             .into()
     }
 
@@ -8125,10 +8284,18 @@ impl App {
             content = content.push(self.slide_in(cluster));
         }
 
+        // A waiting agent's row wears the selected row's wash in the
+        // attention colour; its status dot stays what it is.
+        let waiting = self.shows_attention(pidx, index).is_some();
+        let wash = if waiting {
+            theme::attention_for(remote)
+        } else {
+            accent
+        };
         let base = button(content)
             .width(Length::Fill)
             .padding([5, 9])
-            .style(theme::process_row(accent, selected))
+            .style(theme::process_row(wash, selected || waiting))
             .on_press(Event::SelectProcess {
                 project: project.id,
                 index,
@@ -9209,6 +9376,13 @@ impl App {
                 self.settings.appearance.remote_accent_color = accent_name_for_label(label);
                 self.apply_accents();
             }
+            Msg::AttentionColor(label) => {
+                let palette = tuxflow_core::config::palette::ATTENTION_COLORS;
+                if let Some(c) = palette.iter().find(|c| c.label == label) {
+                    self.settings.appearance.attention_color = c.name.to_string();
+                    theme::set_attention(c.name);
+                }
+            }
             Msg::FocusIndicator(label) => {
                 // Read by the view each frame — nothing to broadcast.
                 if let Some((name, _)) = tuxflow_core::config::settings::FOCUS_INDICATOR_CHOICES
@@ -9666,6 +9840,10 @@ impl App {
             McpCommand::StartProcess { name, reply } => (name, reply, "start"),
             McpCommand::StopProcess { name, reply } => (name, reply, "stop"),
             McpCommand::RestartProcess { name, reply } => (name, reply, "restart"),
+            McpCommand::AgentEvent { name, event } => {
+                self.agent_event(project, &name, event);
+                return Task::none();
+            }
             McpCommand::ReadLogs { name, lines, reply } => {
                 let result = match self.entry_by_name(project, &name) {
                     Some((pidx, index)) => match &self.projects[pidx].entries[index].terminal {
@@ -10203,6 +10381,28 @@ fn hline() -> Element<'static, Event> {
 /// The sidebar card's group separator: the air under the project header
 /// and between one category's rows and the next.
 /// The sidebar dot's colour for a status (GTK's status-dot classes).
+/// The attention badge: a 10 px disc whose 2 px ring is the colour of the
+/// surface under it (`theme::attention_badge`). An agent that can't go on
+/// without the user adds a halo — the "!" of the design round, which at
+/// this size reads as a smudge where a halo still reads as louder.
+fn attention_badge<'a>(
+    color: iced::Color,
+    surface: iced::Color,
+    why: Attention,
+) -> Element<'a, Event> {
+    let disc = container(iced::widget::Space::new())
+        .width(10)
+        .height(10)
+        .style(theme::attention_badge(color, surface));
+    match why {
+        Attention::Finished => disc.into(),
+        Attention::NeedsYou => container(disc)
+            .padding(2)
+            .style(theme::attention_halo(color))
+            .into(),
+    }
+}
+
 fn dot_color(status: &Status, accent: iced::Color) -> iced::Color {
     match status {
         Status::Running => accent,

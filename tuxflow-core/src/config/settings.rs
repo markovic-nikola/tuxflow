@@ -39,6 +39,9 @@ pub struct AppearanceSettings {
     /// from `ui::accent` (unknown names fall back there).
     pub local_accent_color: String,
     pub remote_accent_color: String,
+    /// The dot on an agent waiting for the user in another project. A
+    /// name from `palette::ATTENTION_COLORS`; unknown names fall back.
+    pub attention_color: String,
     pub font_family: String,
     pub font_size: u32,
     pub font_weight: u32,
@@ -170,6 +173,7 @@ impl Default for AppearanceSettings {
             accent_color: "green".to_string(),
             local_accent_color: "green".to_string(),
             remote_accent_color: "yellow".to_string(),
+            attention_color: "pink".to_string(),
             font_family: "Monospace".to_string(),
             font_size: 12,
             font_weight: 400,

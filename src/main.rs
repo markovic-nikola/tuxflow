@@ -1216,6 +1216,8 @@ enum Event {
     /// A second `tuxflow [keys…]` launch handed over its projects (empty
     /// = a bare launch: raise the window).
     InstanceOpen(Vec<String>),
+    /// A desktop notification about this terminal's process was clicked.
+    NotificationClicked(u64),
     SearchQueryChanged(String),
     SearchStep(SearchDirection),
     /// Enter in the search field: next match, or previous with Shift held.
@@ -1491,6 +1493,7 @@ impl App {
         ));
         // Later launches (`tuxflow /path` from another shell) arrive here.
         tasks.push(Task::run(instance_stream(), Event::InstanceOpen));
+        tasks.push(Task::run(notify::clicks(), Event::NotificationClicked));
         (app, Task::batch(tasks))
     }
 
@@ -1713,6 +1716,7 @@ impl App {
             &entry.config.name,
             project.icon.as_deref(),
             agents::AgentKind::from_command(&entry.config.command),
+            entry.term_id,
         );
     }
 
@@ -2352,21 +2356,22 @@ impl App {
         let ns = &self.settings.notifications;
         let entry = &mut self.projects[pidx].entries[index];
         let name = entry.config.name.clone();
+        let term = entry.term_id;
         match &entry.status {
             Status::Crashed(code) if ns.on_crash && allowed => {
-                notify::crash(ns, &project_name, &name, *code, icon.as_deref())
+                notify::crash(ns, &project_name, &name, *code, icon.as_deref(), term)
             }
             Status::Restarting(attempt) if ns.on_auto_restart && allowed => {
-                notify::auto_restart(ns, &project_name, &name, *attempt, icon.as_deref())
+                notify::auto_restart(ns, &project_name, &name, *attempt, icon.as_deref(), term)
             }
             Status::Reconnecting(_) if !entry.outage_notified && !rerouted => {
                 entry.outage_notified = true;
                 if allowed {
-                    notify::disconnect(ns, &project_name, &name, icon.as_deref());
+                    notify::disconnect(ns, &project_name, &name, icon.as_deref(), term);
                 }
             }
             Status::Stopped if !stopping_was && ns.on_process_finish && allowed => {
-                notify::finish(ns, &project_name, &name, icon.as_deref())
+                notify::finish(ns, &project_name, &name, icon.as_deref(), term)
             }
             _ => {}
         }
@@ -5154,6 +5159,7 @@ impl App {
                             &self.projects[pidx].name,
                             &name,
                             self.projects[pidx].icon.as_deref(),
+                            self.projects[pidx].entries[index].term_id,
                         );
                     }
                     if self.projects[pidx].entries[index].is_running() {
@@ -6412,6 +6418,27 @@ impl App {
                 // anything was opened.
                 tasks.push(iced::window::oldest().and_then(iced::window::gain_focus));
                 Task::batch(tasks)
+            }
+            Event::NotificationClicked(term) => {
+                // The window comes forward whatever the click finds; the
+                // process may have been deleted since it notified.
+                let raise = iced::window::oldest().and_then(iced::window::gain_focus);
+                let Some((pidx, index)) = self.entry_for_term(term) else {
+                    return raise;
+                };
+                // Under a card the selection is what the card acts on (the
+                // chord gate's reason), so the card keeps it. A context
+                // menu is transient, and Settings saves per change, so
+                // both give way; Git Changes and the forms hold typing
+                // and close only by the usual project-switch rules.
+                if self.notice.is_some() || self.update_card.is_some() || self.confirm.is_some() {
+                    return raise;
+                }
+                self.context_menu = None;
+                self.settings_ui = None;
+                let project = self.projects[pidx].id;
+                let select = self.update(Event::SelectProcess { project, index });
+                Task::batch([raise, select])
             }
             Event::OpenBadge => {
                 if let Some(project) = self.active_project()

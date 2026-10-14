@@ -5,14 +5,15 @@
 //! the corner leaves gets squeezed into a pill. Growing the avatar's box
 //! to make room would move the title beside it and heighten every card.
 //! [`Badged`] lays out exactly as its content does and lays the badge out
-//! on its own, centred [`Badged::inset`] in from the top-right corner;
-//! nothing clips it there, so it draws over the gap around the content.
+//! on its own, centred [`Badged::inset`] in from the top-right corner,
+//! drawn in a layer above the content (pictures included) and over the
+//! gap around it.
 //! It is paint only: every event, operation and overlay goes to the
 //! content (the rail's toggle is a button with a tooltip).
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree};
-use iced::advanced::{Clipboard, Shell, Widget, overlay, renderer};
+use iced::advanced::{Clipboard, Renderer as _, Shell, Widget, overlay, renderer};
 use iced::{Element, Event, Length, Point, Rectangle, Size, Vector, mouse};
 
 pub struct Badged<'a, Message> {
@@ -158,15 +159,25 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Badged<'_, Messag
             cursor,
             viewport,
         );
-        self.badge.as_widget().draw(
-            &tree.children[1],
-            renderer,
-            theme,
-            style,
-            badge,
-            mouse::Cursor::Unavailable,
-            viewport,
-        );
+        // A layer of its own: within one layer the renderer paints images
+        // after every quad, so an avatar picture would cover the badge
+        // drawn after it. A layer doesn't inherit the clip around it, so
+        // it is cut to the viewport here — a card scrolled out of the
+        // sidebar must not leave its badge over the toolbar.
+        let Some(clip) = badge.bounds().intersection(viewport) else {
+            return;
+        };
+        renderer.with_layer(clip, |renderer| {
+            self.badge.as_widget().draw(
+                &tree.children[1],
+                renderer,
+                theme,
+                style,
+                badge,
+                mouse::Cursor::Unavailable,
+                &clip,
+            );
+        });
     }
 
     fn overlay<'b>(

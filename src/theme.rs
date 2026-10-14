@@ -231,28 +231,39 @@ pub fn attention_for(remote: bool) -> Color {
     }
 }
 
-/// The attention badge on an avatar or a toolbar button: a disc ringed in
-/// `surface`, the colour of what it sits on, so it reads as cut out of the
-/// corner rather than stuck over it.
 /// The halo around the badge of an agent that needs the user.
 pub fn attention_halo(color: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(alpha(color, 0.35))),
         border: Border {
-            radius: 8.0.into(),
+            radius: 10.0.into(),
             ..Default::default()
         },
         ..Default::default()
     }
 }
 
+/// The "!" on a needs-you badge: dark on a light attention colour, white
+/// on a dark one (the light-scheme twins, the neutral ink).
+pub fn attention_ink(color: Color) -> Color {
+    let luma = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+    if luma > 0.45 {
+        Color::from_rgb8(0x12, 0x12, 0x17)
+    } else {
+        Color::WHITE
+    }
+}
+
+/// The attention badge on an avatar or a toolbar button: a disc ringed in
+/// `surface`, the colour of what it sits on, so it reads as cut out of the
+/// corner rather than stuck over it.
 pub fn attention_badge(color: Color, surface: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(color)),
         border: Border {
             color: surface,
             width: 2.0,
-            radius: 6.0.into(),
+            radius: 8.0.into(),
         },
         ..Default::default()
     }

@@ -40,7 +40,8 @@ const PLUGIN_JSON: &str = r#"{"name":"tuxflow","version":"1.0.0","description":"
 /// not worth that.
 const HOOK_COMMAND: &str = "command -v python3 >/dev/null 2>&1 && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/tuxflow-event.py\" >/dev/null 2>&1; exit 0";
 
-/// The hooks: `Stop` (turn finished — not fired on an Esc interrupt),
+/// The hooks: `Stop` (turn finished — not fired on an Esc interrupt; its
+/// last message decides finished vs [`closing_ask`]),
 /// `PermissionRequest` (the permission dialog is about to show), the
 /// `Notification`s that mean "waiting on you", and `UserPromptSubmit`
 /// (the user answered, wherever from).
@@ -56,6 +57,8 @@ const SCRIPT: &str = r#"#!/usr/bin/env python3
 # TuxFlow agent hook (auto-installed; safe to delete)
 import json, os, socket, sys
 
+TAIL = 2000  # enough for the closing paragraphs; the line stays small
+
 path = os.environ.get("TUXFLOW_MCP_SOCKET")
 process = os.environ.get("TUXFLOW_PROCESS")
 if path and process:
@@ -64,6 +67,9 @@ if path and process:
     except ValueError:
         sys.exit(0)
     keep = {k: hook[k] for k in ("hook_event_name", "notification_type", "message", "tool_name") if k in hook}
+    last = hook.get("last_assistant_message")
+    if isinstance(last, str):
+        keep["last_assistant_message"] = last[-TAIL:]
     line = json.dumps({"jsonrpc": "2.0", "method": "tuxflow/agent_event", "params": {"process": process, "hook": keep}})
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(2)
@@ -156,7 +162,12 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
     let hook = params.get("hook")?;
     let field = |k: &str| hook.get(k).and_then(|v| v.as_str());
     let event = match field("hook_event_name")? {
-        "Stop" => Some(AgentEvent::Finished),
+        "Stop" => Some(
+            match field("last_assistant_message").and_then(closing_ask) {
+                Some(ask) => AgentEvent::NeedsInput { reason: Some(ask) },
+                None => AgentEvent::Finished,
+            },
+        ),
         "PermissionRequest" => Some(AgentEvent::NeedsInput {
             reason: field("tool_name").map(|t| format!("wants to use {t}")),
         }),
@@ -172,6 +183,136 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
         _ => None,
     };
     Some((process, event))
+}
+
+/// The longest ask quoted in a notification.
+const ASK_MAX_CHARS: usize = 120;
+
+/// Openings of a closing paragraph that hand the next step to the user.
+/// Kept to requests that wait on a reply or an action — a parting "let me
+/// know if…" or "try it now" is a finished turn, not a question.
+const ASK_OPENINGS: &[&str] = &[
+    "paste ",
+    "send me",
+    "share ",
+    "tell me",
+    "reply ",
+    "confirm ",
+    "choose ",
+    "pick ",
+    "please ",
+    "run this",
+    "run these",
+    "run the ",
+    "can you ",
+    "could you ",
+    "would you ",
+    "should i ",
+    "do you want",
+    "want me to",
+    "which ",
+];
+
+/// A turn that ENDED by asking the user something: to Claude that is a
+/// plain `Stop` — only a blocking dialog fires `PermissionRequest` — but
+/// to the user it is the same "needs you" as a permission prompt. Read off
+/// the last message's closing paragraph (code blocks dropped, so "Run this
+/// on the server:" above a fenced command still counts; a closing list
+/// reads with the line that introduced it), and `Some(the ask)` when it is
+/// a question, a request from [`ASK_OPENINGS`], or the message carries a
+/// `! command` line — Claude's form for a command the user must run in
+/// the prompt. A guess from wording, deliberately narrow: a missed ask
+/// still gets the finished dot, a false one would cry wolf on every turn.
+pub fn closing_ask(message: &str) -> Option<String> {
+    let mut paragraphs: Vec<Vec<&str>> = vec![Vec::new()];
+    let mut in_fence = false;
+    let mut bang_command = false;
+    for line in message.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            paragraphs.push(Vec::new());
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if trimmed.starts_with("! ") {
+            bang_command = true;
+        }
+        match trimmed {
+            "" => paragraphs.push(Vec::new()),
+            _ => paragraphs.last_mut().expect("never empty").push(trimmed),
+        }
+    }
+    paragraphs.retain(|p| !p.is_empty());
+    let is_list = |p: &[&str]| p.iter().all(|l| is_list_item(l));
+    let last = paragraphs.pop()?;
+    let mut closing = Vec::new();
+    if is_list(&last) {
+        closing.extend(paragraphs.pop().filter(|p| !is_list(p)));
+    }
+    closing.push(last);
+    let asks = closing.iter().any(|p| {
+        let first = p[0].trim_start_matches(['*', '_', '>', ' ']);
+        sentences(&plain(p)).iter().any(|s| s.ends_with('?')) || opens_ask(first)
+    }) || bang_command;
+    asks.then(|| ask_excerpt(&closing))
+}
+
+fn is_list_item(line: &str) -> bool {
+    line.starts_with("- ")
+        || line.starts_with("* ")
+        || line
+            .split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn opens_ask(sentence: &str) -> bool {
+    let lower = sentence.to_lowercase();
+    ASK_OPENINGS.iter().any(|o| lower.starts_with(o))
+}
+
+/// A paragraph's lines as one line of text, emphasis and code marks gone.
+fn plain(paragraph: &[&str]) -> String {
+    paragraph.join(" ").replace(['*', '_', '`'], "")
+}
+
+/// `text` cut after each `.`, `?` or `!` that ends a sentence.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        let end = i + c.len_utf8();
+        if matches!(c, '.' | '?' | '!') && (end == text.len() || text[end..].starts_with(' ')) {
+            out.push(text[start..end].trim());
+            start = end;
+        }
+    }
+    out.push(text[start..].trim());
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// The sentence that asks — the closing paragraph's last question, else
+/// its sentence that opens with a request, else its last sentence (the
+/// introducing line stands for a closing list of options) — cut to
+/// [`ASK_MAX_CHARS`].
+fn ask_excerpt(closing: &[Vec<&str>]) -> String {
+    let text = plain(&closing[0]);
+    let sentences = sentences(&text);
+    let sentence = sentences
+        .iter()
+        .rev()
+        .find(|s| s.ends_with('?'))
+        .or_else(|| sentences.iter().find(|s| opens_ask(s)))
+        .or(sentences.last())
+        .copied()
+        .unwrap_or_default();
+    match sentence.char_indices().nth(ASK_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", sentence[..cut].trim_end()),
+        None => sentence.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -221,6 +362,72 @@ mod tests {
         assert_eq!(
             parse(serde_json::json!({"hook_event_name": "UserPromptSubmit"})),
             Some(Some(AgentEvent::Resumed))
+        );
+    }
+
+    /// A turn that ends by asking is "needs you", quoting the ask; a plain
+    /// summary stays "finished".
+    #[test]
+    fn a_turn_ending_in_an_ask_needs_the_user() {
+        let stop = |msg: &str| {
+            parse_event_line(&line(serde_json::json!({
+                "hook_event_name": "Stop",
+                "last_assistant_message": msg,
+            })))
+            .and_then(|(_, e)| e)
+        };
+        let needs = |reason: &str| {
+            Some(AgentEvent::NeedsInput {
+                reason: Some(reason.into()),
+            })
+        };
+        // The report that started this: a `!` command, then a request.
+        assert_eq!(
+            stop(
+                "That command was my mistake. Here's the real one:\n\n! ssh host 'sqlite3 -readonly db'\nselect 1;\n\nThe first result answers it.\n\nPaste the output here and I'll read it."
+            ),
+            needs("Paste the output here and I'll read it.")
+        );
+        assert_eq!(
+            stop("Both are ready. Want me to commit this? It builds clean."),
+            needs("Want me to commit this?")
+        );
+        // A question introducing a closing list of options.
+        assert_eq!(
+            stop(
+                "Two ways to go.\n\nWhich do you prefer?\n- **Exact.** Halo only for blocks.\n- **Guess.** Read the wording."
+            ),
+            needs("Which do you prefer?")
+        );
+        // A request above a fenced command.
+        assert_eq!(
+            stop("Run this on the server:\n\n```bash\nsystemctl status caddy\n```"),
+            needs("Run this on the server:")
+        );
+        assert_eq!(
+            stop("Fixed the badge.\n\n**Could you check it on the VPS?**"),
+            needs("Could you check it on the VPS?")
+        );
+        // Summaries — including a question earlier on, a parting offer and
+        // a code block with a `?` inside — are finished turns.
+        assert_eq!(
+            stop("Why did it fail? The socket was stale.\n\nRemoved it; the forward is back up."),
+            Some(AgentEvent::Finished)
+        );
+        assert_eq!(
+            stop("Done — tests pass. Let me know if you want the light theme too."),
+            Some(AgentEvent::Finished)
+        );
+        assert_eq!(
+            stop("Here's the change:\n\n```rust\nlet x = y?;\n```"),
+            Some(AgentEvent::Finished)
+        );
+        assert_eq!(stop(""), Some(AgentEvent::Finished));
+        // An older plugin's line, without the message.
+        assert_eq!(
+            parse_event_line(&line(serde_json::json!({"hook_event_name": "Stop"})))
+                .and_then(|(_, e)| e),
+            Some(AgentEvent::Finished)
         );
     }
 

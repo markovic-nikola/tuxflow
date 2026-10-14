@@ -9,6 +9,7 @@
 
 mod add_project;
 mod add_ssh;
+mod badged;
 mod dnd;
 mod edit_project;
 mod git_view;
@@ -7669,8 +7670,8 @@ impl App {
             .style(theme::tooltip)
         };
         // On the rail the cards are out of sight, so the toggle that brings
-        // them back carries the attention badge for all of them. Always a
-        // stack there, badge or not, so its arrival keeps the tree's shape.
+        // them back carries the attention badge for all of them. Always the
+        // same wrapper, badge or not, so its arrival keeps the tree's shape.
         let toggle = btn(
             ICON_SIDEBAR,
             self.sidebar_visible,
@@ -7681,23 +7682,11 @@ impl App {
             let most = (0..self.projects.len())
                 .filter_map(|p| self.project_attention(p).map(|why| (why, p)))
                 .max();
-            let badge: Element<'_, Event> = match most {
-                Some((why, p)) => attention_badge(
-                    theme::attention_for(self.projects[p].location.is_remote()),
-                    pal().ground,
-                    why,
-                ),
-                None => iced::widget::Space::new().into(),
-            };
-            iced::widget::stack![
-                toggle,
-                container(badge)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(iced::Alignment::End)
-                    .align_y(iced::Alignment::Start),
-            ]
-            .into()
+            let badge = most.map(|(why, p)| {
+                let color = theme::attention_for(self.projects[p].location.is_remote());
+                (color, pal().ground, why)
+            });
+            attention_corner(toggle, badge)
         } else {
             toggle.into()
         };
@@ -7891,19 +7880,13 @@ impl App {
         // The attention badge rides its top-right corner. The stack is
         // there with or without it: a conditional wrapper would change the
         // header's tree shape whenever an agent finished.
-        let badge: Element<'a, Event> = match self.project_attention(pidx) {
-            Some(why) => attention_badge(theme::attention_for(remote), pal().card, why),
-            None => iced::widget::Space::new().into(),
-        };
-        let icon: Element<'a, Event> = iced::widget::stack![
+        let badge = self
+            .project_attention(pidx)
+            .map(|why| (theme::attention_for(remote), pal().card, why));
+        let icon = attention_corner(
             widgets::avatar(project.icon.as_deref(), &project.name, accent, remote, 26.0),
-            container(badge)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::Alignment::End)
-                .align_y(iced::Alignment::Start),
-        ]
-        .into();
+            badge,
+        );
 
         // GTK's hover controls on the project row: start the marked set,
         // restart the running, stop everything. They take the counter
@@ -10385,22 +10368,43 @@ fn hline() -> Element<'static, Event> {
 /// surface under it (`theme::attention_badge`). An agent that can't go on
 /// without the user adds a halo — the "!" of the design round, which at
 /// this size reads as a smudge where a halo still reads as louder.
-fn attention_badge<'a>(
-    color: iced::Color,
-    surface: iced::Color,
-    why: Attention,
+/// `host` wearing the attention badge on its top-right corner (an avatar,
+/// the rail's sidebar toggle); `None` draws none, through the same wrapper
+/// so the badge's arrival keeps the tree's shape. "Finished" is a 10 px
+/// dot tucked into the corner; "needs you" a 12 px disc carrying a "!",
+/// ringed in `surface` and haloed, centred on the same point and so
+/// spilling past the corner ([`badged`]) — inside it, it would cover most
+/// of a 26 px avatar.
+fn attention_corner<'a>(
+    host: impl Into<Element<'a, Event>>,
+    badge: Option<(iced::Color, iced::Color, Attention)>,
 ) -> Element<'a, Event> {
-    let disc = container(iced::widget::Space::new())
-        .width(10)
-        .height(10)
-        .style(theme::attention_badge(color, surface));
-    match why {
-        Attention::Finished => disc.into(),
-        Attention::NeedsYou => container(disc)
-            .padding(2)
-            .style(theme::attention_halo(color))
+    let badge: Element<'a, Event> = match badge {
+        None => iced::widget::Space::new().into(),
+        Some((color, surface, Attention::Finished)) => container(iced::widget::Space::new())
+            .width(10)
+            .height(10)
+            .style(theme::attention_badge(color, surface))
             .into(),
-    }
+        Some((color, surface, Attention::NeedsYou)) => {
+            let bang = text("!")
+                .size(10)
+                .line_height(1.0)
+                .font(iced::Font {
+                    weight: iced::font::Weight::ExtraBold,
+                    ..iced::Font::DEFAULT
+                })
+                .color(theme::attention_ink(color));
+            let disc = container(bang)
+                .center(16)
+                .style(theme::attention_badge(color, surface));
+            container(disc)
+                .padding(2)
+                .style(theme::attention_halo(color))
+                .into()
+        }
+    };
+    badged::Badged::new(host, badge).into()
 }
 
 fn dot_color(status: &Status, accent: iced::Color) -> iced::Color {

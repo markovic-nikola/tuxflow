@@ -471,7 +471,17 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     showed as their bare base; they are now appended to the cell's text,
     which the Advanced shaping already on that path joins into one
     glyph. A cell carrying zero-width chars never merges into an ASCII
-    run (`e` + U+0301 would otherwise lose its accent). Colour comes for
-    free: iced's font system loads system fonts and cosmic-text falls
-    back to Noto Color Emoji. Widths stay alacritty's — a VS16 sequence
+    run (`e` + U+0301 would otherwise lose its accent). Colour does NOT
+    come for free — see patch 32. Widths stay alacritty's — a VS16 sequence
     on a narrow base still occupies one cell and spills, as in Alacritty.
+32. **Emoji ask for the colour font by name** (`is_emoji`, `EMOJI_FAMILY`
+    in `view.rs`). cosmic-text's Unix fallback list tries Noto Sans
+    Symbols2 before Noto Color Emoji, and Symbols2 has monochrome outlines
+    for part of the emoji range — 👍 and 👀 rendered as line art while
+    ✅ beside them was in colour. A VS16 sequence, or a wide cell in
+    U+2300–2BFF / U+1F000–1FAFF (where width 2 means Emoji_Presentation;
+    CJK is wide too and must keep the user's font), now sets the family
+    to "Noto Color Emoji" at regular weight, upright — cosmic-text only
+    matches a named family at the exact weight, so a bold emoji would
+    miss the font's single face. Without the family installed, shaping
+    falls through to the ordinary chain.

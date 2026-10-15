@@ -986,11 +986,18 @@ impl Widget<Event, Theme, iced::Renderer> for TerminalView<'_> {
                                 );
                             }
                             let mut font = base_font;
-                            if bold {
-                                font.weight = bold_weight;
-                            }
-                            if italic {
-                                font.style = FontStyle::Italic;
+                            if is_emoji(indexed.c, wide, zerowidth) {
+                                // Regular and upright: cosmic-text matches
+                                // a named family only at the exact weight,
+                                // and the colour font has one face.
+                                font.family = EMOJI_FAMILY;
+                            } else {
+                                if bold {
+                                    font.weight = bold_weight;
+                                }
+                                if italic {
+                                    font.style = FontStyle::Italic;
+                                }
                             }
                             let mut content = String::from(indexed.c);
                             content.extend(zerowidth.into_iter().flatten());
@@ -1267,6 +1274,22 @@ impl<'a> From<TerminalView<'a>> for Element<'a, Event, Theme, iced::Renderer> {
 
 /// Stroke of the unfocused cursor's outline, in pixels.
 const HOLLOW_CURSOR_STROKE: f32 = 1.0;
+
+/// Asked for by name on emoji cells. cosmic-text's own Unix fallback list
+/// puts Noto Sans Symbols2 ahead of it, and Symbols2 carries monochrome
+/// outlines for a share of emoji (👍, 👀), so plain fallback drew those
+/// as line art beside colour neighbours. A system without the family
+/// falls through to the ordinary fallback chain.
+const EMOJI_FAMILY: iced::font::Family =
+    iced::font::Family::Name("Noto Color Emoji");
+
+/// Emoji presentation as the grid shows it: a VS16 sequence (❤️), or a
+/// wide cell in the blocks where width 2 means Emoji_Presentation. CJK is
+/// wide too, so the blocks matter — it must keep the user's bold.
+fn is_emoji(c: char, wide: bool, zerowidth: Option<&[char]>) -> bool {
+    zerowidth.is_some_and(|zw| zw.contains(&'\u{FE0F}'))
+        || (wide && matches!(c as u32, 0x2300..=0x2BFF | 0x1F000..=0x1FAFF))
+}
 
 #[derive(Debug, Clone)]
 struct TerminalViewState {
@@ -2092,6 +2115,25 @@ mod tests {
             let mode = TermMode::empty();
             let out = paste_content(&mode, "line1\r\nline2\nline3");
             assert_eq!(out, b"line1\rline2\rline3".to_vec());
+        }
+    }
+
+    mod is_emoji_tests {
+        use super::*;
+
+        #[test]
+        fn wide_emoji_and_vs16_sequences_take_the_colour_font() {
+            assert!(is_emoji('\u{1F44D}', true, None)); // 👍
+            assert!(is_emoji('\u{2705}', true, None)); // ✅
+            assert!(is_emoji('\u{2764}', false, Some(&['\u{FE0F}']))); // ❤️
+        }
+
+        #[test]
+        fn cjk_and_text_presentation_keep_the_user_font() {
+            assert!(!is_emoji('\u{4E2D}', true, None)); // 中
+            assert!(!is_emoji('\u{20000}', true, None)); // CJK Ext B
+            assert!(!is_emoji('\u{2764}', false, None)); // ❤ as text
+            assert!(!is_emoji('e', false, Some(&['\u{0301}'])));
         }
     }
 

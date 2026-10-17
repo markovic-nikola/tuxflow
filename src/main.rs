@@ -8114,11 +8114,7 @@ impl App {
         // its own: every working row turns in step, and a busy agent still
         // costs exactly one timer no matter how many rows are lit.
         let working = entry.working.then_some(self.sweep.phase);
-        let name = entry
-            .config
-            .display_name
-            .as_deref()
-            .unwrap_or(&entry.config.name);
+        let name = entry.label();
 
         // GTK hangs the command off the whole row (`set_tooltip_text` in
         // sidebar/process_row.rs); here it rides the NAME instead, because
@@ -8399,11 +8395,7 @@ impl App {
                 let Some(entry) = project.entries.get(index) else {
                     return column![].into();
                 };
-                let name = entry
-                    .config
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&entry.config.name);
+                let name = entry.label();
                 (
                     row![
                         status_dot(dot_color(&entry.status, accent), None),

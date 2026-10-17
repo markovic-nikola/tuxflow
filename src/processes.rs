@@ -160,14 +160,31 @@ impl ProcessEntry {
     }
 
     /// What to call this process on screen: the OSC title its program set,
-    /// falling back to the configured name until it sets one (and again if
+    /// falling back to its sidebar label until it sets one (and again if
     /// it clears it).
     pub fn display_title(&self) -> &str {
+        self.osc_title().unwrap_or(self.label())
+    }
+
+    /// What the sidebar calls this process. An auto-named one (an ad-hoc
+    /// terminal, a GTK-era agent) follows its program's OSC title live, as
+    /// GTK's rows did; anything else shows the name it was given. GTK also
+    /// wrote that title into `display_name`, which nothing updates any
+    /// more, so for auto-named rows it is a stale task name and ignored —
+    /// and the live title is not saved in its place: it changes through
+    /// use, and projects.toml is synced between machines.
+    pub fn label(&self) -> &str {
+        match self.osc_title() {
+            Some(title) if self.config.auto_named => title,
+            _ => configured_label(&self.config),
+        }
+    }
+
+    fn osc_title(&self) -> Option<&str> {
         self.title
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .unwrap_or(&self.config.name)
     }
 
     /// The next `working` state, from the repaints counted since the last
@@ -392,10 +409,7 @@ pub fn launch_entry(
     let script = remote::remote_launch_script(&remote_dir, &env, &command, None, &session, false);
     Some(remote::launch::LaunchEntry {
         name: config.name.clone(),
-        title: config
-            .display_name
-            .clone()
-            .unwrap_or_else(|| config.name.clone()),
+        title: configured_label(config).to_string(),
         category: match config.category {
             ProcessCategory::Agent => "agent",
             ProcessCategory::Terminal => "terminal",
@@ -405,6 +419,16 @@ pub fn launch_entry(
         session,
         script,
     })
+}
+
+/// A process's label before any OSC title: what it was named, or for
+/// auto-named ones the bare name (their `display_name` is a stale GTK-era
+/// title — see `ProcessEntry::label`).
+pub fn configured_label(config: &ProcessConfig) -> &str {
+    match &config.display_name {
+        Some(name) if !config.auto_named => name,
+        _ => &config.name,
+    }
 }
 
 /// What a project's launch list is built from, hashed without allocating —
@@ -422,7 +446,7 @@ pub fn launch_fingerprint<'a>(
     mcp_socket.hash(&mut h);
     for c in configs {
         c.name.hash(&mut h);
-        c.display_name.hash(&mut h);
+        configured_label(c).hash(&mut h);
         c.command.hash(&mut h);
         c.working_dir.hash(&mut h);
         c.env.hash(&mut h);
@@ -840,6 +864,31 @@ mod tests {
             auto_named: false,
             display_name: None,
         }
+    }
+
+    /// Auto-named rows follow the live OSC title and never show the stale
+    /// GTK-era `display_name`; named rows (an SSH connection's typed name)
+    /// keep theirs whatever the program sets.
+    #[test]
+    fn sidebar_label_follows_title_only_when_auto_named() {
+        let mut agent = pc("claude");
+        agent.auto_named = true;
+        agent.display_name = Some("✳ Leaderboard intro copy".into());
+        let mut entry = ProcessEntry::new(agent);
+        assert_eq!(entry.label(), "claude");
+        assert_eq!(configured_label(&entry.config), "claude");
+        entry.title = Some("✳ ServerVerify crawler CPU load".into());
+        assert_eq!(entry.label(), "✳ ServerVerify crawler CPU load");
+        assert_eq!(entry.display_title(), entry.label());
+
+        let mut ssh = pc("ssh-2");
+        ssh.display_name = Some("prod".into());
+        let mut entry = ProcessEntry::new(ssh);
+        entry.title = Some("deployer@prod: ~".into());
+        assert_eq!(entry.label(), "prod");
+        assert_eq!(entry.display_title(), "deployer@prod: ~");
+        entry.title = None;
+        assert_eq!(entry.display_title(), "prod");
     }
 
     /// A custom command with a detected process's name is the user's edit —

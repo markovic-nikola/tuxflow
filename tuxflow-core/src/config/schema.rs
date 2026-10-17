@@ -42,7 +42,7 @@ pub struct ProcessConfig {
     pub display_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
 pub enum ProcessCategory {

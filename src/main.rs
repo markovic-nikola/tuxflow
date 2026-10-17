@@ -492,6 +492,9 @@ struct ProjectState {
     /// started at boot (before the first spawn, so every process is born
     /// knowing its socket), stopped with the project or the setting.
     mcp: Option<McpLink>,
+    /// What this remote project's launch list on the host was last built
+    /// from ([`processes::launch_fingerprint`]); 0 = never published.
+    launch_fingerprint: u64,
 }
 
 /// One project's live MCP server: the socket, the bridge its snapshots
@@ -1530,6 +1533,7 @@ impl App {
             was_running: false,
             clip_seen: 0,
             mcp: None,
+            launch_fingerprint: 0,
             location,
         };
 
@@ -2371,6 +2375,10 @@ impl App {
         // project so removals don't orphan cache files (GTK parity).
         if let Some(icon) = self.saved.get_icon(&key) {
             remote::icon::discard_if_cached(icon, &key);
+        }
+        // A removed project is no longer startable from the host either.
+        if let Some(host) = self.projects[pidx].location.host() {
+            remote::launch::submit(host, &key, remote::launch::unpublish_script(&key));
         }
         self.projects.remove(pidx);
         self.saved.remove(&key);
@@ -5002,6 +5010,9 @@ impl App {
         // detected URL moves from as many places, and the agent asking
         // must see the state the sidebar shows.
         self.sync_mcp_snapshots();
+        // The host-side launch lists the phone picker starts processes
+        // from: the process list moves from as many places again.
+        self.sync_launch_lists();
         match event {
             Event::WindowResized(size) => {
                 self.window_size = size;
@@ -9777,6 +9788,51 @@ impl App {
         let project = &self.projects[pidx];
         if let Some(host) = project.location.host() {
             tuxflow_core::mcp::remote::close(&project.key(), host, &project.name);
+        }
+    }
+
+    /// Republish a remote project's launch list on its host (core
+    /// `remote::launch`) when what it is built from has moved: a process
+    /// added, renamed, edited or removed, the project renamed, the MCP
+    /// setting flipped. Only once the probe has delivered the real process
+    /// list — an empty list published during load would wipe the host's.
+    /// Runs on every event; the fingerprint is hashed without allocating,
+    /// and the publish itself goes to a background worker.
+    fn sync_launch_lists(&mut self) {
+        for pidx in 0..self.projects.len() {
+            let project = &self.projects[pidx];
+            let Some(host) = project.location.host() else {
+                continue;
+            };
+            if !matches!(project.phase, Phase::Ready) {
+                continue;
+            }
+            let mcp_socket = self.mcp_socket_for(pidx);
+            let project = &self.projects[pidx];
+            let fingerprint = processes::launch_fingerprint(
+                &project.name,
+                mcp_socket.as_deref(),
+                project.entries.iter().map(|e| &e.config),
+            );
+            if fingerprint == project.launch_fingerprint {
+                continue;
+            }
+            let key = project.key();
+            let entries: Vec<_> = project
+                .entries
+                .iter()
+                .filter_map(|e| {
+                    processes::launch_entry(&project.location, &e.config, mcp_socket.as_deref())
+                })
+                .collect();
+            let script = remote::launch::publish_script(
+                &key,
+                &project.name,
+                &project.location.dir_str(),
+                &entries,
+            );
+            remote::launch::submit(host, &key, script);
+            self.projects[pidx].launch_fingerprint = fingerprint;
         }
     }
 

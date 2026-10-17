@@ -2,6 +2,7 @@ pub mod fs;
 pub mod git;
 pub mod hold;
 pub mod icon;
+pub mod launch;
 pub mod mic;
 pub mod mux_guard;
 pub mod ports;
@@ -219,7 +220,7 @@ const TMUX_OPTIONS: &str = "set -g exit-empty off \\; \
 /// FNV-1a by hand — std's DefaultHasher isn't guaranteed stable across
 /// releases, and these hashes end up in persistent names (tmux sessions,
 /// icon cache files).
-fn fnv64_iter(bytes: impl Iterator<Item = u8>) -> u64 {
+pub(crate) fn fnv64_iter(bytes: impl Iterator<Item = u8>) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
         hash ^= b as u64;
@@ -290,6 +291,30 @@ fn env_assignment(key: &str, value: &str) -> String {
 /// session explicitly on the no-tmux fallback path.
 pub fn wrap_remote_command(
     host: &str,
+    remote_dir: &str,
+    env: &std::collections::BTreeMap<String, String>,
+    command: &str,
+    pidfile: Option<&str>,
+    session: &str,
+    fresh_session: bool,
+) -> String {
+    let remote = remote_launch_script(remote_dir, env, command, pidfile, session, fresh_session);
+    // LogLevel=ERROR mutes the mux client's "Shared connection … closed"
+    // noise after the replayed output; real errors still print.
+    format!(
+        "exec ssh -t -o LogLevel=ERROR {} {} {}",
+        ssh_mux_options_str(),
+        sh_quote(host),
+        sh_quote(&remote)
+    )
+}
+
+/// The host-side half of [`wrap_remote_command`]: the script ssh runs
+/// there. Split out so the launch lists (`remote::launch`) hand a client on
+/// the host the very script TuxFlow itself would run — same session name,
+/// same tmux bootstrap, same exit-file protocol — instead of a second copy
+/// of it that could drift.
+pub fn remote_launch_script(
     remote_dir: &str,
     env: &std::collections::BTreeMap<String, String>,
     command: &str,
@@ -374,7 +399,7 @@ pub fn wrap_remote_command(
     // no longer even accepts one), so this is the belt to that braces: a
     // replay must never be able to touch the clipboard, whatever ends up in
     // the scrollback. Both terminators are covered — BEL and ESC-backslash.
-    let remote = format!(
+    format!(
         "cd {dir_q} && {pid_capture}\
          if command -v tmux >/dev/null 2>&1; then \
          {ef_assign}; rm -f \"$ef\" \"$of\"; {kill_stale}\
@@ -388,14 +413,6 @@ pub fn wrap_remote_command(
          if [ -f \"$ef\" ]; then s=\"$(cat \"$ef\")\"; rm -f \"$ef\"; exit \"$s\"; \
          else exit \"$tst\"; fi; \
          else exec {login_shell}; fi"
-    );
-    // LogLevel=ERROR mutes the mux client's "Shared connection … closed"
-    // noise after the replayed output; real errors still print.
-    format!(
-        "exec ssh -t -o LogLevel=ERROR {} {} {}",
-        ssh_mux_options_str(),
-        sh_quote(host),
-        sh_quote(&remote)
     )
 }
 

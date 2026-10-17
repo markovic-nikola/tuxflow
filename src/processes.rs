@@ -323,6 +323,114 @@ pub fn merge_saved(
 /// interactive login shell instead.
 ///
 /// Remote: the command is wrapped by `remote::wrap_remote_command` — an
+/// The environment a run gets: the process's own `env` plus the project's
+/// MCP socket, told to the process rather than left to `tuxflow-mcp`'s cwd
+/// guess (core `mcp::server::SOCKET_ENV`). On a remote project the value
+/// names the HOST-side socket the forward binds, and the SSH category is
+/// left alone — that shell is on another machine altogether. Shared by
+/// spawns and the host's launch lists, so both start the same process.
+pub fn spawn_env(
+    location: &ProjectLocation,
+    config: &ProcessConfig,
+    mcp_socket: Option<&str>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut env = config.env.clone();
+    if let Some(socket) = mcp_socket
+        && config.category != ProcessCategory::SSH
+    {
+        env.insert(
+            tuxflow_core::mcp::server::SOCKET_ENV.to_string(),
+            socket.to_string(),
+        );
+        // An agent also gets its name and TuxFlow's Claude Code plugin,
+        // whose hooks report over that socket (`mcp::agent_hooks`). The
+        // plugin rides the MCP setting: without the socket it could not
+        // report anywhere.
+        if config.category == ProcessCategory::Agent {
+            agent_hooks_env(&mut env, &config.name, location.is_remote());
+        }
+    }
+    env
+}
+
+/// Where on the host a remote run starts, and what it runs. A plain
+/// terminal on a remote project is a login shell on the host, inside tmux
+/// like everything else.
+fn remote_dir_and_command(
+    location: &ProjectLocation,
+    config: &ProcessConfig,
+    run_command: &str,
+) -> (String, String) {
+    let remote_dir = config
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| location.dir_str());
+    let command = if run_command.is_empty() {
+        String::from("exec \"${SHELL:-/bin/sh}\" -l")
+    } else {
+        run_command.to_string()
+    };
+    (remote_dir, command)
+}
+
+/// How a client ON the host starts this process (core `remote::launch`):
+/// the script a fresh spawn would run there, minus the ssh around it and
+/// the pidfile (that only serves hosts without tmux, which have no session
+/// for a phone to come back to anyway). `None` for local projects and the
+/// SSH category, which run on this machine.
+pub fn launch_entry(
+    location: &ProjectLocation,
+    config: &ProcessConfig,
+    mcp_socket: Option<&str>,
+) -> Option<remote::launch::LaunchEntry> {
+    if !location.is_remote() || config.category == ProcessCategory::SSH {
+        return None;
+    }
+    let env = spawn_env(location, config, mcp_socket);
+    let (remote_dir, command) = remote_dir_and_command(location, config, &config.command);
+    let session = remote::remote_session_name(&location.key(), &config.name);
+    let script = remote::remote_launch_script(&remote_dir, &env, &command, None, &session, false);
+    Some(remote::launch::LaunchEntry {
+        name: config.name.clone(),
+        title: config
+            .display_name
+            .clone()
+            .unwrap_or_else(|| config.name.clone()),
+        category: match config.category {
+            ProcessCategory::Agent => "agent",
+            ProcessCategory::Terminal => "terminal",
+            _ => "command",
+        }
+        .to_string(),
+        session,
+        script,
+    })
+}
+
+/// What a project's launch list is built from, hashed without allocating —
+/// checked on every event like the MCP snapshots, republished only when it
+/// moves. Status is deliberately absent: the list says what CAN start, and
+/// `tf` asks tmux what is running.
+pub fn launch_fingerprint<'a>(
+    project_name: &str,
+    mcp_socket: Option<&str>,
+    configs: impl Iterator<Item = &'a ProcessConfig>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    project_name.hash(&mut h);
+    mcp_socket.hash(&mut h);
+    for c in configs {
+        c.name.hash(&mut h);
+        c.display_name.hash(&mut h);
+        c.command.hash(&mut h);
+        c.working_dir.hash(&mut h);
+        c.env.hash(&mut h);
+        c.category.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// `exec ssh -t` whose remote side runs the command inside a tmux session
 /// (deterministic name, so reconnects/relaunches reattach via
 /// `new-session -A`), exit code round-tripping through the session's exit
@@ -336,27 +444,7 @@ pub fn spawn_settings(
     mcp_socket: Option<&str>,
 ) -> iced_term::settings::Settings {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
-    // The project's MCP socket, told to the process rather than left to
-    // `tuxflow-mcp`'s cwd guess (core `mcp::server::SOCKET_ENV`). On a
-    // remote project the value names the HOST-side socket the forward
-    // binds, and the SSH category is left alone — that shell is on another
-    // machine altogether.
-    let mut config_env = entry.config.env.clone();
-    if let Some(socket) = mcp_socket
-        && entry.config.category != ProcessCategory::SSH
-    {
-        config_env.insert(
-            tuxflow_core::mcp::server::SOCKET_ENV.to_string(),
-            socket.to_string(),
-        );
-        // An agent also gets its name and TuxFlow's Claude Code plugin,
-        // whose hooks report over that socket (`mcp::agent_hooks`). The
-        // plugin rides the MCP setting: without the socket it could not
-        // report anywhere.
-        if entry.config.category == ProcessCategory::Agent {
-            agent_hooks_env(&mut config_env, &entry.config.name, location.is_remote());
-        }
-    }
+    let config_env = spawn_env(location, &entry.config, mcp_socket);
     let run_command = entry
         .command_override
         .take()
@@ -365,17 +453,7 @@ pub fn spawn_settings(
 
     let (args, working_directory, env) = match location {
         ProjectLocation::Ssh { host, .. } if config.category != ProcessCategory::SSH => {
-            let remote_dir = config
-                .working_dir
-                .clone()
-                .unwrap_or_else(|| location.dir_str());
-            // A plain terminal on a remote project is a login shell on the
-            // host, inside tmux like everything else.
-            let command = if run_command.is_empty() {
-                String::from("exec \"${SHELL:-/bin/sh}\" -l")
-            } else {
-                run_command.clone()
-            };
+            let (remote_dir, command) = remote_dir_and_command(location, config, &run_command);
             let pidfile = remote::new_remote_pidfile();
             let fresh = std::mem::take(&mut entry.remote_fresh_next);
             let session = entry
@@ -496,6 +574,98 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote_agent() -> (ProjectLocation, ProcessConfig) {
+        let location = ProjectLocation::parse("ssh://box/srv/app");
+        let mut config = ProcessConfig {
+            name: "claude-work".into(),
+            command: "claude".into(),
+            working_dir: None,
+            start_with_project: false,
+            auto_restart: false,
+            open_in_browser: false,
+            restart_when_changed: Vec::new(),
+            env: Default::default(),
+            category: ProcessCategory::Agent,
+            auto_named: false,
+            display_name: None,
+        };
+        config
+            .env
+            .insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-private".into());
+        (location, config)
+    }
+
+    /// The phone picker must start what ▶ would: the same tmux session
+    /// (or the desktop would not reattach it) and the same environment
+    /// (or the agent would run without its hooks, or as the wrong account).
+    #[test]
+    fn launch_entry_starts_what_a_spawn_would() {
+        let (location, config) = remote_agent();
+        let socket = "/home/me/.cache/tuxflow/mcp-app.sock";
+        let launch = launch_entry(&location, &config, Some(socket)).unwrap();
+
+        let mut entry = ProcessEntry::new(config.clone());
+        let settings = spawn_settings(
+            &location,
+            &mut entry,
+            iced_term::settings::FontSettings::default(),
+            1000,
+            iced_term::ColorPalette::default(),
+            Some(socket),
+        );
+        assert_eq!(Some(&launch.session), entry.remote_session.as_ref());
+        let spawned = &settings.backend.args[2];
+        for word in [
+            "CLAUDE_CONFIG_DIR",
+            tuxflow_core::mcp::server::SOCKET_ENV,
+            tuxflow_core::mcp::agent_hooks::PROCESS_ENV,
+            "claude-work",
+            launch.session.as_str(),
+        ] {
+            assert!(launch.script.contains(word), "launch script lacks {word}");
+            assert!(spawned.contains(word), "spawn lacks {word}");
+        }
+        assert_eq!(launch.category, "agent");
+        assert!(
+            !launch.script.contains("pf="),
+            "no pidfile in a host-side launch"
+        );
+    }
+
+    #[test]
+    fn only_remote_non_ssh_processes_are_startable_from_the_host() {
+        let (_, mut config) = remote_agent();
+        let local = ProjectLocation::parse("/srv/app");
+        assert!(launch_entry(&local, &config, None).is_none());
+        config.category = ProcessCategory::SSH;
+        let remote = ProjectLocation::parse("ssh://box/srv/app");
+        assert!(launch_entry(&remote, &config, None).is_none());
+    }
+
+    #[test]
+    fn launch_fingerprint_ignores_status_but_not_identity() {
+        let (_, config) = remote_agent();
+        let base = launch_fingerprint("app", None, [&config].into_iter());
+        assert_eq!(base, launch_fingerprint("app", None, [&config].into_iter()));
+        let mut renamed = config.clone();
+        renamed.name = "claude-2".into();
+        assert_ne!(
+            base,
+            launch_fingerprint("app", None, [&renamed].into_iter())
+        );
+        let mut env = config.clone();
+        env.env.insert("X".into(), "1".into());
+        assert_ne!(base, launch_fingerprint("app", None, [&env].into_iter()));
+        assert_ne!(
+            base,
+            launch_fingerprint("app", Some("/s"), [&config].into_iter())
+        );
+        assert_ne!(
+            base,
+            launch_fingerprint("app 2", None, [&config].into_iter())
+        );
+    }
 
     #[test]
     fn backoff_curve_matches_gtk_app() {

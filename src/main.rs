@@ -6192,9 +6192,9 @@ impl App {
                         self.settings_ui = None;
                         return Task::none();
                     }
-                    // The commit box is a text_editor, which — like the
-                    // filter's text_input — eats the first Esc to unfocus
-                    // itself. The second reaches here and closes the view.
+                    // The commit box is a text_editor, which eats the first
+                    // Esc to unfocus itself. The second reaches here and
+                    // closes the view.
                     if self.git_ui.is_some() {
                         self.git_ui = None;
                         return self.focus_selected_terminal();
@@ -7822,14 +7822,20 @@ impl App {
             })
         ];
         if self.filter_open {
+            // The input eats the first Esc to unfocus itself; the sensor
+            // hears it first, so one Esc closes and clears the filter like
+            // the terminal search bar.
             inner = inner.push(
                 container(
-                    text_input("Filter projects & processes\u{2026}", &self.filter_query)
-                        .id(self.filter_input.clone())
-                        .on_input(Event::FilterInput)
-                        .style(theme::input(LOCAL_ACCENT))
-                        .padding([6, 12])
-                        .size(12),
+                    dnd::DragArea::new(
+                        text_input("Filter projects & processes\u{2026}", &self.filter_query)
+                            .id(self.filter_input.clone())
+                            .on_input(Event::FilterInput)
+                            .style(theme::input(LOCAL_ACCENT))
+                            .padding([6, 12])
+                            .size(12),
+                    )
+                    .on_escape(|| Event::ToggleFilter),
                 )
                 .padding(iced::Padding {
                     top: 6.0,

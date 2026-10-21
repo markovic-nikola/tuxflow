@@ -3201,7 +3201,7 @@ impl App {
                     restart_when_changed: Vec::new(),
                     env: Default::default(),
                     category: ProcessCategory::Agent,
-                    auto_named: false,
+                    auto_named: true,
                     display_name: None,
                 },
             );
@@ -6864,7 +6864,11 @@ impl App {
                     } else {
                         ProcessCategory::Command
                     },
-                    auto_named: false,
+                    // An agent left at the preset's name (`claude`,
+                    // `claude-2`) is auto-named, as GTK's were: its row
+                    // follows the task title the agent sets. A typed name
+                    // is the user's and stays.
+                    auto_named: form.agent && !form.name_touched,
                     display_name: None,
                 };
                 // Persist as a custom command — survives restarts and

@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>TuxFlow — dev servers, agents and terminals in one window</title>
+  <meta name="description" content="A Linux desktop app that runs a project's dev servers, AI coding agents and terminals in one window — on this machine, or on a server over SSH where they keep running when you disconnect.">
+  <meta property="og:title" content="TuxFlow — dev servers, agents and terminals in one window">
+  <meta property="og:description" content="Run a project's processes, AI coding agents and terminals together, on this machine or on a server over SSH. One Rust binary for X11 and Wayland.">
+  <meta property="og:image" content="https://markovic-nikola.github.io/tuxflow/og.png">
+  <meta property="og:url" content="https://markovic-nikola.github.io/tuxflow/">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="logo.svg" type="image/svg+xml">
+</head>
+<body>
+
+<!-- Icons used more than once live here and are referenced with <use>. -->
+<svg width="0" height="0" class="icon-defs" aria-hidden="true">
+  <symbol id="icon-github" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+</svg>
+
+<header class="site-header">
+  <a href="#top" class="brand">
+    <img src="logo.svg" alt="" width="26" height="26">
+    TuxFlow
+  </a>
+  <nav aria-label="Page">
+    <a href="#remote">Remote projects</a>
+    <a href="#agents">Agents</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/markovic-nikola/tuxflow" class="nav-github">
+      <svg aria-hidden="true"><use href="#icon-github"/></svg>
+      GitHub
+    </a>
+  </nav>
+</header>
+
+<main id="top">
+
+<section class="hero">
+  <h1>Dev servers, agents and terminals in one window.</h1>
+  <p class="lede">TuxFlow is a Linux desktop app that runs everything a project needs side by side. The project can live on this machine, or on a server over SSH, where it keeps running after you close the lid.</p>
+  <div class="hero-actions">
+    <a href="#install" class="button button-primary">Install TuxFlow</a>
+    <a href="https://github.com/markovic-nikola/tuxflow/releases/latest" class="release-link" data-latest-release>See the latest release</a>
+  </div>
+
+  <figure class="shot">
+    <img src="shots/hero.webp" width="2240" height="1400" alt="The TuxFlow window. The sidebar lists two projects, storefront and billing-api, each with its agents, commands and terminals and a light showing which are running. The main pane shows the Vite dev server output of storefront, and the status bar shows its git branch and changed lines.">
+    <figcaption>
+      <span class="legend legend-there">storefront runs on a server</span>
+      <span class="legend legend-here">billing-api runs on this machine</span>
+    </figcaption>
+  </figure>
+</section>
+
+<section class="places" id="remote">
+  <h2>The same window, wherever the project lives</h2>
+  <p class="section-intro">The sidebar colours a project by where it runs, so you never restart the wrong server. Everything below works the same way in both.</p>
+
+  <div class="places-grid">
+    <article class="place place-here">
+      <h3>On this machine</h3>
+      <dl>
+        <dt>A real terminal per process</dt>
+        <dd>Start, stop and restart each dev server, worker and shell on its own. Output stays when a process stops, so the last run is still there to read.</dd>
+        <dt>Restarts after a crash</dt>
+        <dd>A crashed process comes back with exponential backoff, and stops retrying after repeated failures so you can fix the cause.</dd>
+        <dt>Restarts when files change</dt>
+        <dd>Give a process glob patterns to watch and it restarts when a matching file is saved.</dd>
+        <dt>Opens the right URL</dt>
+        <dd>TuxFlow reads the address a dev server prints, ignores build-tool noise, and opens the browser once the server answers.</dd>
+      </dl>
+    </article>
+
+    <article class="place place-there">
+      <h3>On a server, over SSH</h3>
+      <dl>
+        <dt>Processes outlive the connection</dt>
+        <dd>Each one runs in a tmux session on the host. A dropped connection or quitting TuxFlow only detaches. It reattaches the next time you open the project.</dd>
+        <dt>Ports come to localhost</dt>
+        <dd>TuxFlow asks the host what a run is listening on and forwards every port, so the browser button opens the remote app.</dd>
+        <dt>Clipboard and files cross over</dt>
+        <dd>Select text in a remote terminal and it is on your clipboard. Paste a screenshot or drop a file and it uploads to the host, with the path typed for you.</dd>
+        <dt>Your microphone, their agent</dt>
+        <dd>Hold to talk to an agent running on the server. The recording comes from this machine over the same SSH connection.</dd>
+        <dt>Editor and git follow</dt>
+        <dd>The editor button opens the project on the host, and the git view works over SSH.</dd>
+      </dl>
+      <p class="place-note">Needs <code>ssh</code> here and <code>tmux</code> on the host. Without tmux, processes still run but stop with the connection.</p>
+    </article>
+  </div>
+</section>
+
+<section class="feature" id="agents">
+  <div class="feature-text">
+    <h2>Agents sit next to the servers they work on</h2>
+    <p>Add Claude Code, Codex, Gemini CLI, OpenCode, Aider or any other command as an agent. Each gets a row in the sidebar that shows when it is working.</p>
+    <dl>
+      <dt>Know when a turn ends</dt>
+      <dd>A desktop notification and a sound per agent when one finishes and waits for you. Nothing fires for the terminal you are looking at.</dd>
+      <dt>Write without lag</dt>
+      <dd>A message box under the terminal takes your prompt locally and sends it on <kbd>Enter</kbd>. Pasted images go along as attachments.</dd>
+      <dt>Let the agent read your logs</dt>
+      <dd>An MCP server lets agents list processes, read their output, and start, stop or restart them.</dd>
+    </dl>
+    <div class="code" data-copy>
+      <pre><code>claude mcp add --scope user tuxflow -- tuxflow-mcp</code></pre>
+    </div>
+    <p class="fine">Codex, Gemini CLI and Amp have the same one-line setup under Settings, Integrations.</p>
+  </div>
+  <figure class="shot">
+    <img src="shots/palette.webp" width="1166" height="990" loading="lazy" alt="The command palette listing new Claude Code, Codex, Gemini CLI, OpenCode, Aider and custom agents, followed by new command, terminal, SSH connection and project.">
+  </figure>
+</section>
+
+<section class="feature feature-flip">
+  <div class="feature-text">
+    <h2>Review and commit without leaving</h2>
+    <p>The status bar shows the branch, how far it is ahead or behind, and the lines changed. One click fetches, pulls and pushes.</p>
+    <p>Open the changes to read a diff with the edited words marked inside each line, then commit and push from the same view.</p>
+  </div>
+  <figure class="shot">
+    <img src="shots/git.webp" width="1108" height="984" loading="lazy" alt="The Git Changes view showing the diff of useCart.ts with added and removed lines and the changed words marked.">
+  </figure>
+</section>
+
+<section class="rest">
+  <h2>The rest of it</h2>
+  <div class="rest-grid">
+    <dl>
+      <div>
+        <dt>Finds your commands</dt>
+        <dd>Detects Node.js, Rust, Go, Python, PHP and Laravel, and Docker projects and offers their usual commands when you add one.</dd>
+      </div>
+      <div>
+        <dt>Many projects, one sidebar</dt>
+        <dd>Drag to reorder, sort by most recently used, and filter by name.</dd>
+      </div>
+      <div>
+        <dt>A proper terminal</dt>
+        <dd>True colour, mouse support, scrollback search, clickable URLs and 46 colour schemes.</dd>
+      </div>
+      <div>
+        <dt>SSH connections</dt>
+        <dd>Hosts from <code>~/.ssh/config</code> open as terminals that reconnect on their own.</dd>
+      </div>
+      <div>
+        <dt>Looks like your desktop</dt>
+        <dd>Dark, light or follow the system, with accent colours you pick.</dd>
+      </div>
+      <div>
+        <dt>Picks up where you left off</dt>
+        <dd>Open projects, process order and window position come back on the next launch.</dd>
+      </div>
+      <div>
+        <dt>Everything from the keyboard</dt>
+        <dd>The command palette reaches every action, process and project.</dd>
+      </div>
+      <div>
+        <dt>Updates itself</dt>
+        <dd>New releases arrive through apt, or from the status bar in the app.</dd>
+      </div>
+    </dl>
+    <div class="config">
+      <p>Configuration lives in the app. If you would rather keep it in the repository, add a <code>tuxflow.toml</code>:</p>
+      <div class="code">
+        <pre><code>[project]
+name = "storefront"
+
+[[process]]
+name = "dev"
+command = "npm run dev"
+start_with_project = true
+auto_restart = true
+open_in_browser = true
+
+[[process]]
+name = "claude"
+command = "claude"
+category = "agent"</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="install" id="install">
+  <h2>Install</h2>
+  <p class="section-intro">For x86_64 Linux, on X11 or Wayland. The binary needs no desktop toolkit.</p>
+
+  <div class="tabs" role="tablist" aria-label="Install method">
+    <button role="tab" id="tab-apt" aria-controls="panel-apt" aria-selected="true">apt repository</button>
+    <button role="tab" id="tab-deb" aria-controls="panel-deb" aria-selected="false" tabindex="-1">Single .deb</button>
+    <button role="tab" id="tab-tarball" aria-controls="panel-tarball" aria-selected="false" tabindex="-1">Tarball</button>
+    <button role="tab" id="tab-source" aria-controls="panel-source" aria-selected="false" tabindex="-1">From source</button>
+  </div>
+
+  <div role="tabpanel" id="panel-apt" aria-labelledby="tab-apt">
+    <div class="code" data-copy>
+<pre><code>curl -fsSL https://markovic-nikola.github.io/tuxflow/KEY.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tuxflow.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/tuxflow.gpg] \
+https://markovic-nikola.github.io/tuxflow stable main" \
+  | sudo tee /etc/apt/sources.list.d/tuxflow.list
+
+sudo apt update &amp;&amp; sudo apt install tuxflow</code></pre>
+    </div>
+    <p class="fine">For Debian and Ubuntu. New releases then arrive with <code>apt upgrade</code>.</p>
+  </div>
+
+  <div role="tabpanel" id="panel-deb" aria-labelledby="tab-deb" hidden>
+    <div class="code" data-copy>
+<pre><code>sudo apt install ./tuxflow_*_amd64.deb</code></pre>
+    </div>
+    <p class="fine">Download the <code>.deb</code> from <a href="https://github.com/markovic-nikola/tuxflow/releases/latest">the latest release</a> first. The app offers later releases from its status bar.</p>
+  </div>
+
+  <div role="tabpanel" id="panel-tarball" aria-labelledby="tab-tarball" hidden>
+    <div class="code" data-copy>
+<pre><code>tar xzf tuxflow-*-x86_64-linux.tar.gz
+cd tuxflow-*-x86_64-linux
+./install.sh --user</code></pre>
+    </div>
+    <p class="fine">Download the <code>.tar.gz</code> from <a href="https://github.com/markovic-nikola/tuxflow/releases/latest">the latest release</a> first. <code>--user</code> installs to <code>~/.local</code>. Without it the script installs to <code>/usr/local</code> and asks for sudo.</p>
+  </div>
+
+  <div role="tabpanel" id="panel-source" aria-labelledby="tab-source" hidden>
+    <div class="code" data-copy>
+<pre><code>git clone https://github.com/markovic-nikola/tuxflow.git
+cd tuxflow
+cargo build --release -p tuxflow
+./target/release/tuxflow</code></pre>
+    </div>
+    <p class="fine">Needs a Rust toolchain and a C compiler (<code>build-essential</code>, <code>gcc</code> or <code>base-devel</code>). No toolkit development packages.</p>
+  </div>
+</section>
+
+<section class="shortcuts" id="shortcuts">
+  <h2>Keyboard shortcuts</h2>
+  <p class="section-intro">These are the defaults. Each one can be changed in Settings.</p>
+  <div class="shortcuts-grid">
+    <table>
+      <tbody>
+        <tr><th scope="row">Command palette</th><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></td></tr>
+        <tr><th scope="row">Add a project or process</th><td><kbd>Ctrl</kbd><kbd>N</kbd></td></tr>
+        <tr><th scope="row">New terminal</th><td><kbd>Ctrl</kbd><kbd>T</kbd></td></tr>
+        <tr><th scope="row">Quick jump</th><td><kbd>Ctrl</kbd><kbd>G</kbd></td></tr>
+        <tr><th scope="row">Filter processes</th><td><kbd>Ctrl</kbd><kbd>F</kbd></td></tr>
+        <tr><th scope="row">Search the terminal</th><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>F</kbd></td></tr>
+        <tr><th scope="row">Close agent or terminal</th><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>W</kbd></td></tr>
+        <tr><th scope="row">Toggle the sidebar</th><td><kbd>Ctrl</kbd><kbd>\</kbd></td></tr>
+        <tr><th scope="row">Settings</th><td><kbd>Ctrl</kbd><kbd>,</kbd></td></tr>
+        <tr><th scope="row">Commit, in Git Changes</th><td><kbd>Ctrl</kbd><kbd>Enter</kbd></td></tr>
+      </tbody>
+    </table>
+    <table>
+      <tbody>
+        <tr><th scope="row">Previous or next process</th><td><kbd>Ctrl</kbd><kbd>&#8593;</kbd> <kbd>&#8595;</kbd></td></tr>
+        <tr><th scope="row">Previous or next project</th><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>&#8593;</kbd> <kbd>&#8595;</kbd></td></tr>
+        <tr><th scope="row">Jump to a process by number</th><td><kbd>Ctrl</kbd><kbd>1</kbd>&hellip;<kbd>9</kbd></td></tr>
+        <tr><th scope="row">Jump to a project by number</th><td><kbd>Alt</kbd><kbd>1</kbd>&hellip;<kbd>9</kbd></td></tr>
+        <tr><th scope="row">Focus the sidebar or terminal</th><td><kbd>Ctrl</kbd><kbd>&#8592;</kbd> <kbd>&#8594;</kbd></td></tr>
+        <tr><th scope="row">Start or stop the process</th><td><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>S</kbd></td></tr>
+        <tr><th scope="row">Restart the process</th><td><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>R</kbd></td></tr>
+        <tr><th scope="row">Clear output</th><td><kbd>Ctrl</kbd><kbd>Alt</kbd><kbd>C</kbd></td></tr>
+        <tr><th scope="row">Larger or smaller text</th><td><kbd>Ctrl</kbd><kbd>=</kbd> <kbd>-</kbd></td></tr>
+        <tr><th scope="row">Copy or paste</th><td><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>C</kbd> <kbd>V</kbd></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>TuxFlow is open source under the MIT license.</p>
+  <p>
+    <a href="https://github.com/markovic-nikola/tuxflow">Source</a>
+    <a href="https://github.com/markovic-nikola/tuxflow/issues">Issues</a>
+    <a href="https://github.com/markovic-nikola/tuxflow/releases">Releases</a>
+  </p>
+</footer>
+
+<script>
+  // Install tabs: click, or arrow keys along the tab list.
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
+  function selectTab(tab) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute('aria-selected', on);
+      t.tabIndex = on ? 0 : -1;
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+    });
+  }
+  tabs.forEach(function (tab, i) {
+    tab.addEventListener('click', function () { selectTab(tab); });
+    tab.addEventListener('keydown', function (e) {
+      var step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!step) return;
+      var next = tabs[(i + step + tabs.length) % tabs.length];
+      selectTab(next);
+      next.focus();
+    });
+  });
+
+  // Copy buttons on the command blocks.
+  document.querySelectorAll('.code[data-copy]').forEach(function (block) {
+    if (!navigator.clipboard) return;
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'copy';
+    button.textContent = 'Copy';
+    button.addEventListener('click', function () {
+      navigator.clipboard.writeText(block.querySelector('code').textContent).then(function () {
+        button.textContent = 'Copied';
+        setTimeout(function () { button.textContent = 'Copy'; }, 1600);
+      });
+    });
+    block.appendChild(button);
+  });
+
+  // The release link names the current version, so the page never states one itself.
+  var releaseLink = document.querySelector('[data-latest-release]');
+  fetch('https://api.github.com/repos/markovic-nikola/tuxflow/releases/latest')
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+    .then(function (release) {
+      if (release.tag_name) releaseLink.textContent = 'See what is new in ' + release.tag_name;
+    })
+    .catch(function () {});
+</script>
+
+</body>
+</html>

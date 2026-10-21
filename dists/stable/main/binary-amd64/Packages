@@ -1,0 +1,110 @@
+Package: tuxflow
+Architecture: amd64
+Version: 0.2.20-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 36309
+Depends: libc6 (>= 2.34), libc6 (>= 2.39)
+Recommends: pulseaudio-utils
+Filename: pool/main/t/tuxflow/tuxflow_0.2.20-1_amd64.deb
+Size: 10587452
+MD5sum: 16337ce40d90f174faa425e0bd756af6
+SHA1: 9dbb61892d8ee9f416ea6ffe54d7658f6c078dd2
+SHA256: b73081ab83a0f6110fd2c6a9ac8d3fcd95d7a80f93c7422a6694d4c15de98ae6
+SHA512: 856280a8a89281706a51b08553f67a0f786cf881fa51243d0f00092b476b60827d204bc49748c81bbd454f855d66bec9f8ee336daea8c33547c02ebedae15ad7
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ follow their output and status, and expose an MCP server so AI agents can
+ observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.2.21-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 36345
+Depends: libc6 (>= 2.34), libc6 (>= 2.39)
+Recommends: pulseaudio-utils
+Filename: pool/main/t/tuxflow/tuxflow_0.2.21-1_amd64.deb
+Size: 10602412
+MD5sum: 206c10b1b9cc7077a08880742e95cc73
+SHA1: 9d8d9e6a6b9c3b03cfa7e3470447fedfbd83cefa
+SHA256: 3144cb64ac56508e147199205d91f45bd79f69cc552265346cf4750086ca536c
+SHA512: 781c6750fd56403e0b605b6b9460ba72c8d916d23cccdbb9438d0ff97b7a23a0fb02d08c5662ed6934108e20c30a69c2c542d2f8da6de6db8c70000e13fad0b5
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ follow their output and status, and expose an MCP server so AI agents can
+ observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.2.22-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 36345
+Depends: libc6 (>= 2.34), libc6 (>= 2.39)
+Recommends: pulseaudio-utils
+Filename: pool/main/t/tuxflow/tuxflow_0.2.22-1_amd64.deb
+Size: 10600212
+MD5sum: 324841821a9e46081e49e88d7fff85c3
+SHA1: 2ced9b15d1b9c0560755f02ca5d9afb8feac7696
+SHA256: f7177db1f978bcb1abea52cbe5ade58611f85fec9f42792fb144f4ebf36a11b7
+SHA512: 6bd6ee944a46f26c7e9e957974e4362e2ee2aa2bb6f5eab92e7c6d8096c823a909a4bbd2e73d74c0fb215ceafedb3cee105056a1b81c237778f6adc8ed1609ac
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ follow their output and status, and expose an MCP server so AI agents can
+ observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.2.23-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 36346
+Depends: libc6 (>= 2.34), libc6 (>= 2.39)
+Recommends: pulseaudio-utils
+Filename: pool/main/t/tuxflow/tuxflow_0.2.23-1_amd64.deb
+Size: 10600180
+MD5sum: 07265e62d2cf3df1cbb4115211f89ea1
+SHA1: 9be5ac4a4ae41f90d72b94207eab4fd1db2f7aed
+SHA256: 4df0daa77cc1eeca0ef76586024ede128335879144e54d21b0388a5b760b2126
+SHA512: 4fc1663ad8ca376cce7ddeb306e892127be4e6928f14b25ea962bf680776c53bc07f007448feab856a4878f078d97401c50d8c2366e189b0ec4bf1e3519b413a
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ follow their output and status, and expose an MCP server so AI agents can
+ observe and control neighboring processes.
+
+Package: tuxflow
+Architecture: amd64
+Version: 0.2.24-1
+Priority: optional
+Section: devel
+Maintainer: Nikola Markovic <markovic-nikola@users.noreply.github.com>
+Installed-Size: 36350
+Depends: libc6 (>= 2.34), libc6 (>= 2.39)
+Recommends: pulseaudio-utils
+Filename: pool/main/t/tuxflow/tuxflow_0.2.24-1_amd64.deb
+Size: 10598636
+MD5sum: 44ef347083a0b9bcbb6ac03afcd17d14
+SHA1: e58f5d5b4a46ea24c8d91b9e7a76f63dbd990878
+SHA256: b9c0e4a210872f1a7f7321f7ffbc73cf17341f0fde4f812fca1ea2b120bfb39c
+SHA512: f3431b05b4078b6861d72b16abe151b584f2c60c611f963938b6998326ff33e4839c0e7733856ba108124c9c56ea1e80ef42b5dc0441363f22c71a823ee32e40
+Homepage: https://markovic-nikola.github.io/tuxflow/
+Description: A Linux-native dev environment manager
+ TuxFlow lets developers manage their entire dev environment from one window —
+ start/stop/restart dev servers, run multiple AI coding agents side by side,
+ follow their output and status, and expose an MCP server so AI agents can
+ observe and control neighboring processes.
+

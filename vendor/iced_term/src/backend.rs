@@ -827,6 +827,7 @@ impl Backend {
         regex: &mut RegexSearch,
     ) -> Option<Match> {
         let x = visible_regex_match_iter(terminal, regex)
+            .filter_map(|rm| trim_link(terminal, rm))
             .find(|rm| rm.contains(&point));
         x
     }
@@ -869,6 +870,57 @@ fn visible_regex_match_iter<'a>(
     RegexIter::new(start, end, Direction::Right, term, regex)
         .skip_while(move |rm| rm.end().line < viewport_start)
         .take_while(move |rm| rm.start().line <= viewport_end)
+}
+
+/// Cut a regex match down to the link it is. The regex has to allow `.`, `)`
+/// and friends mid-URL, so it also swallows the sentence around one.
+fn trim_link(term: &Term<EventProxy>, link: Match) -> Option<Match> {
+    let grid = term.grid();
+    let (start, end) = (*link.start(), *link.end());
+    let mut points = vec![start];
+    let mut chars = vec![grid.index(start).c];
+    let mut cells = grid.iter_from(start);
+    while points[points.len() - 1] != end {
+        let Some(indexed) = cells.next() else { break };
+        points.push(indexed.point);
+        chars.push(indexed.c);
+    }
+    let len = link_len(&chars);
+    (len > 0).then(|| start..=points[len - 1])
+}
+
+/// How many of `chars` belong to the URL (alacritty's hint post-processing):
+/// everything before the first closer with no opener, since `(see
+/// https://a.b/c)` closes outside the match, then minus trailing punctuation.
+fn link_len(chars: &[char]) -> usize {
+    let (mut parens, mut brackets) = (0, 0);
+    let mut len = chars.len();
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            '(' => parens += 1,
+            '[' => brackets += 1,
+            ')' if parens == 0 => {
+                len = i;
+                break;
+            },
+            ']' if brackets == 0 => {
+                len = i;
+                break;
+            },
+            ')' => parens -= 1,
+            ']' => brackets -= 1,
+            _ => (),
+        }
+    }
+    while len > 0
+        && matches!(
+            chars[len - 1],
+            '.' | ',' | ':' | ';' | '?' | '!' | '(' | '[' | '\''
+        )
+    {
+        len -= 1;
+    }
+    len
 }
 
 pub struct RenderableContent {
@@ -996,6 +1048,66 @@ mod tests {
             }
         }
         panic!("child never exited");
+    }
+
+    fn trimmed(url: &str) -> String {
+        let chars: Vec<char> = url.chars().collect();
+        chars[..link_len(&chars)].iter().collect()
+    }
+
+    #[test]
+    fn links_lose_the_punctuation_around_them() {
+        for (matched, url) in [
+            (
+                "https://claude.ai/artifact/1vNiy.",
+                "https://claude.ai/artifact/1vNiy",
+            ),
+            ("https://a.b/c,", "https://a.b/c"),
+            ("https://a.b/c?", "https://a.b/c"),
+            ("https://a.b/c...", "https://a.b/c"),
+            ("https://a.b/c)", "https://a.b/c"),
+            ("https://a.b/c).", "https://a.b/c"),
+            ("https://a.b/c.)", "https://a.b/c"),
+            ("https://a.b/c](d)", "https://a.b/c"),
+            ("https://a.b/c'", "https://a.b/c"),
+        ] {
+            assert_eq!(trimmed(matched), url, "{matched}");
+        }
+    }
+
+    #[test]
+    fn links_keep_what_is_part_of_the_url() {
+        for url in [
+            "https://a.b/c.html",
+            "https://a.b/?q=1&r=2",
+            "https://en.wikipedia.org/wiki/Rust_(language)",
+            "https://a.b/x[1]",
+            "http://localhost:5173/",
+        ] {
+            assert_eq!(trimmed(url), url);
+        }
+    }
+
+    /// The trim lands on grid points: what the click sends and what the
+    /// underline covers both come from the range this returns.
+    #[test]
+    fn hovered_link_stops_before_the_full_stop() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut backend =
+            Backend::new(1, tx, settings("printf 'see https://a.b/c. ok'"))
+                .expect("spawn");
+        run_to_exit(&mut rx);
+        assert!(screen(&mut backend).contains("https://a.b/c."));
+
+        let term = backend.term.clone();
+        let term = term.lock();
+        let line = term.grid().cursor.point.line;
+        let on_link = Point::new(line, Column(6));
+        let on_stop = Point::new(line, Column(17));
+        let regex = &mut backend.url_regex.clone();
+        let link = backend.regex_match_at(&term, on_link, regex).unwrap();
+        assert_eq!(extract_text(&term, &link), "https://a.b/c");
+        assert!(backend.regex_match_at(&term, on_stop, regex).is_none());
     }
 
     /// The whole point of `respawn`: a second run does NOT cost the user

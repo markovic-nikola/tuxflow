@@ -485,3 +485,12 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     matches a named family at the exact weight, so a bold emoji would
     miss the font's single face. Without the family installed, shaping
     falls through to the ordinary chain.
+33. **Detected links lose the sentence around them** (`trim_link`,
+    `link_len` in `backend.rs`). Upstream took the URL regex's match
+    verbatim, so a link ending a sentence was underlined and opened with
+    its `.`, and one in parentheses with its `)`. Alacritty's own hint
+    post-processing, ported: cut at the first closer with no opener, then
+    strip trailing `.,:;?!(['`. It runs inside `regex_match_at`, so the
+    underline and the click agree and hovering the dot is not a link.
+    Differs in one way: after a cut, the strip still runs (alacritty keeps
+    the `.` of `c.)`).

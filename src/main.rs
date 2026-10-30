@@ -1392,8 +1392,7 @@ impl App {
         for arg in &args {
             let key = normalize_key(arg);
             if !app.saved.directories.iter().any(|d| d == &key) {
-                app.saved.add(&key);
-                app.saved.save();
+                app.place_new_project(&key);
             }
         }
 
@@ -3147,21 +3146,24 @@ impl App {
     /// in which case it has no source to come back from and is persisted as a
     /// custom command instead.
     fn finish_add_project(&mut self) -> Task<Event> {
-        let Some(state) = &mut self.add_project else {
+        // Only a named project leaves the form; the rest keeps it up.
+        let named = |s: &mut add_project::State| {
+            s.configure
+                .as_ref()
+                .is_some_and(|c| !c.name.trim().is_empty())
+        };
+        let Some(state) = self.add_project.take_if(named) else {
             return Task::none();
         };
         let Some(c) = &state.configure else {
             return Task::none();
         };
         let name = c.name.trim().to_string();
-        if name.is_empty() {
-            return Task::none();
-        }
         let key = c.key.clone();
         let default_dir = c.location.dir_str();
         let conservative = detector::conservative_names(&c.stacks);
 
-        self.saved.add(&key);
+        self.place_new_project(&key);
         if name != c.detected_name {
             self.saved.set_name(&key, &name);
         }
@@ -3208,9 +3210,30 @@ impl App {
         }
         self.saved.save();
 
-        self.add_project = None;
-        let task = self.open_project(&key);
+        self.open_new_project(&key)
+    }
+
+    /// Give a project that was never here its place in the sidebar: just
+    /// under the running ones, in both orders. `last_used` is what recent-first
+    /// goes by (now = top of the stopped tier), the manual position is for
+    /// recent-first off and for the machines this stamp never reaches.
+    fn place_new_project(&mut self, key: &str) {
+        let running: Vec<String> = self
+            .projects
+            .iter()
+            .filter(|p| p.has_running())
+            .map(|p| p.key())
+            .collect();
+        self.saved.add(key, &running);
+        self.state.set_last_used(key, unix_now());
+    }
+
+    /// Open a project [`Self::place_new_project`] just placed and switch to
+    /// it. `open_project` appends, so the card moves to its place here.
+    fn open_new_project(&mut self, key: &str) -> Task<Event> {
+        let task = self.open_project(key);
         self.active = self.projects.len() - 1;
+        self.sort_projects();
         let git = self.poll_git_fetch();
         Task::batch([task, git])
     }
@@ -3951,11 +3974,7 @@ impl App {
             .iter()
             .position(|&i| self.projects[i].id == tgt);
         self.saved.reorder_to_match(&order);
-        if self.settings.sidebar.recent_first {
-            self.sort_projects_recent_first();
-        } else {
-            self.sort_projects_manual();
-        }
+        self.sort_projects();
         // The pointer stays on the target header's TREE position through
         // the drop, and iced carries a mouse_area's hover state by
         // position: the header drawn there now — whichever card the new
@@ -6518,12 +6537,9 @@ impl App {
                         None => {
                             log::info!("instance: opening {key}");
                             if !self.saved.directories.iter().any(|d| d == &key) {
-                                self.saved.add(&key);
-                                self.saved.save();
+                                self.place_new_project(&key);
                             }
-                            tasks.push(self.open_project(&key));
-                            self.active = self.projects.len() - 1;
-                            tasks.push(self.poll_git_fetch());
+                            tasks.push(self.open_new_project(&key));
                         }
                     }
                 }
@@ -9450,11 +9466,7 @@ impl App {
                 // Both directions re-sort — GTK's set_recent_first applies
                 // the manual order when switched OFF, not a freeze of
                 // whatever recency had produced.
-                if v {
-                    self.sort_projects_recent_first();
-                } else {
-                    self.sort_projects_manual();
-                }
+                self.sort_projects();
             }
             Msg::NotifyCrash(v) => self.settings.notifications.on_crash = v,
             Msg::NotifyRestart(v) => self.settings.notifications.on_auto_restart = v,
@@ -9626,6 +9638,15 @@ impl App {
             .map(|p| (p.key(), p.expanded))
             .collect();
         self.saved.record_expanded(states);
+    }
+
+    /// Order the sidebar by whichever rule the setting names.
+    fn sort_projects(&mut self) {
+        if self.settings.sidebar.recent_first {
+            self.sort_projects_recent_first();
+        } else {
+            self.sort_projects_manual();
+        }
     }
 
     /// GTK's sidebar order (`sort_project_rows` in project_list.rs), not a
@@ -9956,10 +9977,7 @@ impl App {
 
     fn refresh_recent_order(&mut self) {
         let mut flipped = false;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = unix_now();
         for pidx in 0..self.projects.len() {
             let running = self.projects[pidx].has_running();
             if self.projects[pidx].was_running == running {
@@ -10371,6 +10389,14 @@ fn bold() -> iced::Font {
         weight: iced::font::Weight::Bold,
         ..iced::Font::DEFAULT
     }
+}
+
+/// Seconds since the epoch, as `last_used` stores them.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The recent-first comparison key for one project, sorted ascending:

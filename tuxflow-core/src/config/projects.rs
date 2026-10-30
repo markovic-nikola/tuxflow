@@ -113,9 +113,17 @@ impl SavedProjects {
         self.baseline = baseline;
     }
 
-    pub fn add(&mut self, dir: &str) {
+    /// Add `dir` just below the last of `above` in the manual order, or at
+    /// the top when none of them is listed. A new project lands where it can
+    /// be seen, not under the whole workspace.
+    pub fn add(&mut self, dir: &str, above: &[String]) {
         if !self.directories.iter().any(|d| d == dir) {
-            self.directories.push(dir.to_string());
+            let at = self
+                .directories
+                .iter()
+                .rposition(|d| above.contains(d))
+                .map_or(0, |i| i + 1);
+            self.directories.insert(at, dir.to_string());
             self.save();
         }
     }
@@ -312,12 +320,30 @@ mod tests {
     /// `load_from()` path, which had no coverage at all: every setter
     /// persists, so exercising one used to mean writing the real config.
     #[test]
+    fn a_new_project_lands_below_the_last_of_those_named() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("projects.toml");
+        let mut saved = SavedProjects::load_from(&file);
+        for key in ["/c", "/b", "/a"] {
+            saved.add(key, &[]);
+        }
+        assert_eq!(saved.directories, ["/a", "/b", "/c"]);
+
+        saved.add("/new", &["/a".to_string(), "/b".to_string()]);
+        assert_eq!(saved.directories, ["/a", "/b", "/new", "/c"]);
+
+        saved.add("/a", &[]);
+        let reloaded = SavedProjects::load_from(&file);
+        assert_eq!(reloaded.directories, ["/a", "/b", "/new", "/c"]);
+    }
+
+    #[test]
     fn a_setter_persists_and_reloads() {
         let dir = tempfile::tempdir().expect("temp dir");
         let file = dir.path().join("projects.toml");
 
         let mut saved = SavedProjects::load_from(&file);
-        saved.add("/p/one");
+        saved.add("/p/one", &[]);
         saved.set_name("/p/one", "One");
         saved.set_icon("/p/one", Some("/p/one/logo.svg".into()));
 
@@ -344,7 +370,7 @@ mod tests {
     fn a_default_instance_is_unbound() {
         let mut saved = SavedProjects::default();
         saved.set_icon("/p/one", Some("/p/one/logo.svg".into()));
-        saved.add("/p/one");
+        saved.add("/p/one", &[]);
 
         assert!(
             saved.path.is_none(),
@@ -371,7 +397,7 @@ mod tests {
         let mut saved = SavedProjects::load_from(&file);
         assert!(!file.exists(), "nothing written before the first mutation");
 
-        saved.add("/p/one");
+        saved.add("/p/one", &[]);
         assert!(file.exists(), "a setter on a bound instance must persist");
     }
 
@@ -384,7 +410,7 @@ mod tests {
         let file = dir.path().join("projects.toml");
 
         let mut saved = SavedProjects::load_from(&file);
-        saved.add("/p/one");
+        saved.add("/p/one", &[]);
 
         let written = fs::read_to_string(&file).expect("must have been written");
         assert!(

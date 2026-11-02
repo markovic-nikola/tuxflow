@@ -4,11 +4,11 @@
 
 <h1 align="center">TuxFlow</h1>
 
-A Linux-native dev environment manager. Manage dev servers, AI coding agents, and terminals from a single window.
+Run dev servers, AI coding agents, and terminals from one Linux desktop window, on this machine or on a server over SSH. Remote work lives in tmux on the host, so a dropped connection or a closed app just detaches it: open TuxFlow again and everything is still running, with its ports tunnelled to localhost.
 
 Built in Rust on [iced](https://iced.rs) with its own terminal widget (an [alacritty](https://github.com/alacritty/alacritty)-backed fork of iced_term), so it needs no desktop toolkit installed: one binary, X11 or Wayland.
 
-> **Note:** TuxFlow is in early development. Expect rough edges, missing features, and breaking changes.
+> **Note:** TuxFlow is pre-1.0 and used daily by its author. Config may still change between releases, and [bug reports](https://github.com/markovic-nikola/tuxflow/issues) are welcome.
 
 ![TuxFlow running dev servers and AI agents across local and remote projects](docs/shots/hero.webp)
 

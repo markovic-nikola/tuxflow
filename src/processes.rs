@@ -877,8 +877,8 @@ mod tests {
         let mut entry = ProcessEntry::new(agent);
         assert_eq!(entry.label(), "claude");
         assert_eq!(configured_label(&entry.config), "claude");
-        entry.title = Some("✳ myapp crawler CPU load".into());
-        assert_eq!(entry.label(), "✳ myapp crawler CPU load");
+        entry.title = Some("✳ Fix crawler CPU load".into());
+        assert_eq!(entry.label(), "✳ Fix crawler CPU load");
         assert_eq!(entry.display_title(), entry.label());
 
         let mut ssh = pc("ssh-2");

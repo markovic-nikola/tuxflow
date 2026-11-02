@@ -10,6 +10,8 @@ Built in Rust on [iced](https://iced.rs) with its own terminal widget (an [alacr
 
 > **Note:** TuxFlow is in early development. Expect rough edges, missing features, and breaking changes.
 
+![TuxFlow running dev servers and AI agents across local and remote projects](docs/shots/hero.webp)
+
 ## Features
 
 - **Process management** — Start, stop, restart dev servers and background tasks from one place

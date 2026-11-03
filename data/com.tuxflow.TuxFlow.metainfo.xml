@@ -4,26 +4,27 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>TuxFlow</name>
-  <summary>Linux-native dev environment manager</summary>
+  <summary>Dev servers and AI agents, local or over SSH</summary>
   <description>
     <p>
-      TuxFlow lets developers manage their entire dev environment from one window —
-      start/stop/restart dev servers, run multiple AI coding agents side by side,
-      monitor process status and resource usage, auto-restart crashed processes,
-      watch files for changes, and expose an MCP server so AI agents can observe
-      and control neighboring processes.
+      TuxFlow runs dev servers, AI coding agents and terminals from one window,
+      for projects on this machine or on a server over SSH. Remote work lives in
+      tmux on the host, so a dropped connection or a closed app only detaches it:
+      open TuxFlow again and everything is still running, with its ports
+      tunnelled to localhost.
     </p>
     <p>Features:</p>
     <ul>
-      <li>Manage multiple dev processes (servers, watchers, queues) from a single window</li>
-      <li>Run AI coding agents (Claude Code, Codex, Gemini CLI) side by side</li>
-      <li>Auto-detect project stacks (Node.js, Rust, Python, Go, PHP, Ruby, Docker)</li>
-      <li>Auto-restart crashed processes with exponential backoff</li>
-      <li>File watching with glob patterns to restart on changes</li>
-      <li>Command palette (Ctrl+K) for quick navigation</li>
-      <li>MCP server for AI agent integration</li>
-      <li>TOML-based configuration</li>
-      <li>Dark-first design with GTK4 + libadwaita</li>
+      <li>Start, stop and restart dev servers, watchers and queues for many projects at once</li>
+      <li>Run AI coding agents (Claude Code, Codex, Gemini CLI, OpenCode, Aider) side by side, with a notification when one finishes its turn</li>
+      <li>Remote projects over SSH: persistent sessions, automatic port tunnels, clipboard and image paste in both directions, and voice input for remote agents</li>
+      <li>Detects ports and URLs in output and opens the app in your browser once it is ready</li>
+      <li>Auto-detects project stacks (Node.js, Rust, Go, Python, PHP/Laravel, Ruby, Docker, Make) and suggests commands</li>
+      <li>Restarts crashed processes with backoff, and restarts on file changes matching glob patterns</li>
+      <li>Built-in git status, diff, commit and one-click sync</li>
+      <li>MCP server so agents can see and control the other processes</li>
+      <li>Command palette (Ctrl+Shift+P), terminal search and fully configurable shortcuts</li>
+      <li>Dark, light or system theme, with accent colours and terminal colour schemes</li>
     </ul>
   </description>
   <launchable type="desktop-id">com.tuxflow.TuxFlow.desktop</launchable>
@@ -36,7 +37,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>TuxFlow managing multiple development processes</caption>
-      <image>https://raw.githubusercontent.com/markovic-nikola/tuxflow/main/docs/hero.png</image>
+      <image>https://markovic-nikola.github.io/tuxflow/og.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1" />

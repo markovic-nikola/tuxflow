@@ -1,0 +1,35 @@
+# Maintainer: Nikola Markovic <markovic-nikola at users dot noreply dot github dot com>
+
+pkgname=tuxflow-bin
+pkgver=0.2.25
+pkgrel=1
+pkgdesc='Dev servers and AI agents, local or over SSH'
+arch=('x86_64')
+url='https://markovic-nikola.github.io/tuxflow/'
+license=('MIT')
+# The binary links libc alone; everything else is loaded at runtime by the
+# windowing and rendering stack.
+depends=('glibc' 'gcc-libs' 'libglvnd' 'libx11' 'libxcb' 'libxcursor' 'libxi'
+         'libxkbcommon' 'libxkbcommon-x11' 'wayland')
+optdepends=('openssh: remote projects and SSH connections'
+            'git: git status, diff and sync'
+            'libpulse: notification sounds'
+            'pipewire: voice input for remote agents (pw-record)'
+            'alsa-utils: voice input for remote agents (arecord)'
+            'xdg-utils: opening links in the browser'
+            'vulkan-icd-loader: Vulkan rendering')
+provides=('tuxflow')
+conflicts=('tuxflow')
+options=('!strip' '!debug')
+source=("https://github.com/markovic-nikola/tuxflow/releases/download/v$pkgver/tuxflow-$pkgver-x86_64-linux.tar.gz")
+sha256sums=('b9458d06a129ec7f1179c825f3f1533e71585e33127a9ea55d19b52dfd535d50')
+
+package() {
+  cd "tuxflow-$pkgver-x86_64-linux"
+  install -Dm755 tuxflow "$pkgdir/usr/bin/tuxflow"
+  install -Dm755 tuxflow-mcp "$pkgdir/usr/bin/tuxflow-mcp"
+  install -Dm644 com.tuxflow.TuxFlow.desktop "$pkgdir/usr/share/applications/com.tuxflow.TuxFlow.desktop"
+  install -Dm644 com.tuxflow.TuxFlow.metainfo.xml "$pkgdir/usr/share/metainfo/com.tuxflow.TuxFlow.metainfo.xml"
+  install -Dm644 com.tuxflow.TuxFlow.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.tuxflow.TuxFlow.svg"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

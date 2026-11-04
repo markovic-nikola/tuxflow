@@ -69,6 +69,19 @@ Download the latest `.deb` from [GitHub Releases](https://github.com/markovic-ni
 sudo apt install ./tuxflow_*_amd64.deb  # resolves dependencies; dpkg -i does not
 ```
 
+### Arch Linux
+
+Until `tuxflow-bin` is on the AUR, build the same package from its PKGBUILD
+(needs `base-devel`):
+
+```bash
+mkdir tuxflow-bin && cd tuxflow-bin
+curl -fsSLO https://raw.githubusercontent.com/markovic-nikola/tuxflow/main/packaging/aur/PKGBUILD
+makepkg -si
+```
+
+Run the same steps again to update after a release.
+
 ### Binary tarball
 
 Download the latest `.tar.gz` from [GitHub Releases](https://github.com/markovic-nikola/tuxflow/releases):

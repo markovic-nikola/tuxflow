@@ -75,5 +75,6 @@ echo ""
 
 git push && git push --tags
 echo ""
-echo "Done! Release workflow will build and publish artifacts."
+echo "Done! Release workflow will build and publish artifacts,"
+echo "then commit the PKGBUILD bump to main — git pull once it has run."
 echo "Watch progress at: https://github.com/markovic-nikola/tuxflow/actions"

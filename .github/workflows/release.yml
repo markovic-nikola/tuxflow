@@ -108,3 +108,33 @@ jobs:
           git commit -qm "Publish site and apt repo for ${GITHUB_REF_NAME}"
           git push -q --force \
             "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+
+      # Points packaging/aur at this release on main, checksummed from the
+      # tarball built above: the README has Arch users `makepkg` the PKGBUILD
+      # straight from main, so a release that skipped this step would keep
+      # installing the previous version. Last on purpose — it checks out main
+      # over the tag, and nothing after it may build from the tree. A push that
+      # races one of the user's is retried from a fresh main rather than
+      # rebased: the checkout is shallow, and update.sh is idempotent anyway.
+      - name: Point the PKGBUILD at this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tarball="$PWD/tuxflow-${VERSION}-x86_64-linux.tar.gz"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          for attempt in 1 2 3; do
+            git fetch -q --depth=1 origin main
+            git checkout -q -B main FETCH_HEAD
+            packaging/aur/update.sh "$VERSION" "$tarball"
+            if git diff --quiet -- packaging/aur; then
+              echo "PKGBUILD already points at v${VERSION}"
+              exit 0
+            fi
+            git commit -qm "Point the PKGBUILD at v${VERSION}" -- packaging/aur
+            git push -q origin main && exit 0
+            echo "push raced another, retrying ($attempt)"
+            sleep 5
+          done
+          exit 1

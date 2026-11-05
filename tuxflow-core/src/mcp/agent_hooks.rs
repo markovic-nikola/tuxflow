@@ -41,12 +41,15 @@ const PLUGIN_JSON: &str = r#"{"name":"tuxflow","version":"1.0.0","description":"
 const HOOK_COMMAND: &str = "command -v python3 >/dev/null 2>&1 && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/tuxflow-event.py\" >/dev/null 2>&1; exit 0";
 
 /// The hooks: `Stop` (turn finished — not fired on an Esc interrupt; its
-/// last message decides finished vs [`closing_ask`]),
+/// last message decides finished vs [`closing_ask`]), `StopFailure` (the
+/// turn ended on an API error INSTEAD of a `Stop` — without it such an
+/// agent sat with no marker at all, its bell already ignored as hooked),
 /// `PermissionRequest` (the permission dialog is about to show), the
 /// `Notification`s that mean "waiting on you", and `UserPromptSubmit`
 /// (the user answered, wherever from).
 const HOOK_EVENTS: &[&str] = &[
     "Stop",
+    "StopFailure",
     "PermissionRequest",
     "Notification",
     "UserPromptSubmit",
@@ -66,7 +69,7 @@ if path and process:
         hook = json.load(sys.stdin)
     except ValueError:
         sys.exit(0)
-    keep = {k: hook[k] for k in ("hook_event_name", "notification_type", "message", "tool_name") if k in hook}
+    keep = {k: hook[k] for k in ("hook_event_name", "notification_type", "message", "tool_name", "error") if k in hook}
     last = hook.get("last_assistant_message")
     if isinstance(last, str):
         keep["last_assistant_message"] = last[-TAIL:]
@@ -144,6 +147,10 @@ pub enum AgentEvent {
     /// A permission dialog or a question is waiting; `reason` is Claude's
     /// own wording when it gave one.
     NeedsInput { reason: Option<String> },
+    /// The turn ended on an API error ("Connection lost mid-response"):
+    /// the agent stopped short and waits for a prompt to go on. `reason`
+    /// is [`failure_reason`]'s cut of Claude's error line.
+    Failed { reason: String },
     /// The user answered — from this terminal or any other.
     Resumed,
 }
@@ -168,6 +175,9 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
                 None => AgentEvent::Finished,
             },
         ),
+        "StopFailure" => Some(AgentEvent::Failed {
+            reason: failure_reason(field("last_assistant_message"), field("error")),
+        }),
         "PermissionRequest" => Some(AgentEvent::NeedsInput {
             reason: field("tool_name").map(|t| format!("wants to use {t}")),
         }),
@@ -185,8 +195,30 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
     Some((process, event))
 }
 
-/// The longest ask quoted in a notification.
+/// The longest ask (or failure) quoted in a notification.
 const ASK_MAX_CHARS: usize = 120;
+
+/// What stopped a failed turn, from the error message Claude printed in
+/// the transcript (`API Error: Connection lost mid-response. The response
+/// above may be incomplete.`, verified against 2.1.281): its first
+/// sentence, prefix and full stop dropped — "Connection lost
+/// mid-response". The advice after it ("may be incomplete", "Try again")
+/// is the same for every failure and says nothing about which one this
+/// was. With no message, the hook's error code ("server_error" → "server
+/// error").
+pub fn failure_reason(message: Option<&str>, error: Option<&str>) -> String {
+    let line = message
+        .and_then(|m| m.lines().map(str::trim).find(|l| !l.is_empty()))
+        .map(|l| l.strip_prefix("API Error:").unwrap_or(l).trim());
+    let first = line
+        .and_then(|l| sentences(l).first().copied())
+        .map(|s| s.trim_end_matches('.'))
+        .filter(|s| !s.is_empty());
+    match first {
+        Some(sentence) => clip(sentence),
+        None => error.map_or_else(|| String::from("API error"), |e| e.replace('_', " ")),
+    }
+}
 
 /// Openings of a closing paragraph that hand the next step to the user.
 /// Kept to requests that wait on a reply or an action — a parting "let me
@@ -309,6 +341,11 @@ fn ask_excerpt(closing: &[Vec<&str>]) -> String {
         .or(sentences.last())
         .copied()
         .unwrap_or_default();
+    clip(sentence)
+}
+
+/// `sentence` cut to [`ASK_MAX_CHARS`].
+fn clip(sentence: &str) -> String {
     match sentence.char_indices().nth(ASK_MAX_CHARS) {
         Some((cut, _)) => format!("{}…", sentence[..cut].trim_end()),
         None => sentence.to_string(),
@@ -362,6 +399,52 @@ mod tests {
         assert_eq!(
             parse(serde_json::json!({"hook_event_name": "UserPromptSubmit"})),
             Some(Some(AgentEvent::Resumed))
+        );
+    }
+
+    /// The turn that ends on an API error: `StopFailure`, never `Stop`,
+    /// with the transcript's error line as its last message.
+    #[test]
+    fn a_turn_ending_on_an_api_error_failed() {
+        let fail = |hook| match parse_event_line(&line(hook)) {
+            Some((_, Some(AgentEvent::Failed { reason }))) => reason,
+            other => panic!("not a failure: {other:?}"),
+        };
+        assert_eq!(
+            fail(serde_json::json!({
+                "hook_event_name": "StopFailure",
+                "error": "server_error",
+                "last_assistant_message": "API Error: Connection lost mid-response. The response above may be incomplete.",
+            })),
+            "Connection lost mid-response"
+        );
+        assert_eq!(
+            fail(serde_json::json!({
+                "hook_event_name": "StopFailure",
+                "last_assistant_message": "API Error: Your computer went to sleep before a response was produced. Try again.",
+            })),
+            "Your computer went to sleep before a response was produced"
+        );
+        // A status and the server's body: one long "sentence", clipped.
+        let body = format!(
+            "API Error: 500 {{\"type\":\"error\",\"message\":\"{}\"}}",
+            "x".repeat(200)
+        );
+        let reason = fail(
+            serde_json::json!({"hook_event_name": "StopFailure", "last_assistant_message": body}),
+        );
+        assert!(
+            reason.starts_with("500 {") && reason.ends_with('…'),
+            "{reason}"
+        );
+        // No message: the hook's own code.
+        assert_eq!(
+            fail(serde_json::json!({"hook_event_name": "StopFailure", "error": "rate_limit"})),
+            "rate limit"
+        );
+        assert_eq!(
+            fail(serde_json::json!({"hook_event_name": "StopFailure"})),
+            "API error"
         );
     }
 

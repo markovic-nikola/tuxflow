@@ -1787,16 +1787,27 @@ impl App {
         self.projects[pidx].entries[index].hooked = true;
         match event {
             Some(AgentEvent::Finished) => {
+                self.projects[pidx].entries[index].failure = None;
                 self.mark_waiting(pidx, index, Attention::Finished);
                 self.notify_agent_idle(pidx, index, "finished");
             }
             Some(AgentEvent::NeedsInput { reason }) => {
+                self.projects[pidx].entries[index].failure = None;
                 self.mark_waiting(pidx, index, Attention::NeedsYou);
                 let detail = reason.unwrap_or_else(|| String::from("needs you"));
                 self.notify_agent_idle(pidx, index, &detail);
             }
+            // Stopped short: it goes nowhere until the user says so, which
+            // is "needs you" — the "!" badge, not the finished dot.
+            Some(AgentEvent::Failed { reason }) => {
+                self.mark_waiting(pidx, index, Attention::NeedsYou);
+                self.notify_agent_idle(pidx, index, &format!("stopped — {reason}"));
+                self.projects[pidx].entries[index].failure = Some(reason);
+            }
             Some(AgentEvent::Resumed) => {
-                self.projects[pidx].entries[index].attention = None;
+                let entry = &mut self.projects[pidx].entries[index];
+                entry.attention = None;
+                entry.failure = None;
             }
             None => {}
         }
@@ -2128,6 +2139,7 @@ impl App {
                 entry.idle_notified = false;
                 // Until this run's hooks speak, its bell is the signal.
                 entry.hooked = false;
+                entry.failure = None;
                 let name = entry.config.name.clone();
                 project.ports.clear(&name);
                 project.selected = index;
@@ -2414,6 +2426,7 @@ impl App {
         // the agent still waits on the host, and the reconnect resumes it.
         if !connection_loss {
             entry.attention = None;
+            entry.failure = None;
         }
 
         // The terminal stays — it holds the run's output, which is what the
@@ -8135,18 +8148,24 @@ impl App {
                 c
             }
         };
-        let dot_color = fade(dot_color(&entry.status, accent));
         // The light rides the card sweep's phase instead of keeping one of
         // its own: every working row turns in step, and a busy agent still
         // costs exactly one timer no matter how many rows are lit. A
-        // stalled agent keeps its accent and changes SHAPE (see `Light`).
+        // stalled agent keeps its accent and changes SHAPE; a failed one
+        // wears the "needs you" badge's colour too (see `Light`).
         let light = if entry.stall.is_some() {
             Light::Stalled
+        } else if entry.failure.is_some() {
+            Light::Failed
         } else if entry.busy() {
             Light::Working(self.sweep.phase)
         } else {
             Light::Rest
         };
+        let dot_color = fade(match light {
+            Light::Failed => theme::attention_for(project.location.is_remote()),
+            _ => dot_color(&entry.status, accent),
+        });
         let name = entry.label();
 
         // GTK hangs the command off the whole row (`set_tooltip_text` in
@@ -8253,15 +8272,16 @@ impl App {
         // row is one more yellow beside the gold title and dot. The glyph
         // carries the state; this only says how long. The reason rides
         // the status bar, where there is room for it.
-        if let Some(stall) = &entry.stall {
-            content = content.push(
-                text(match &stall.wait {
-                    Some(wait) => format!("API {wait}"),
-                    None => String::from("API"),
-                })
-                .size(9)
-                .color(pal().dim),
-            );
+        let pill = match (&entry.stall, &entry.failure) {
+            (Some(stall), _) => Some(match &stall.wait {
+                Some(wait) => format!("API {wait}"),
+                None => String::from("API"),
+            }),
+            (None, Some(_)) => Some(String::from("API error")),
+            (None, None) => None,
+        };
+        if let Some(pill) = pill {
+            content = content.push(text(pill).size(9).color(pal().dim));
         }
 
         // The lifecycle glyphs (design round F): bare icons sliding in
@@ -9022,40 +9042,59 @@ impl App {
         form_card(col)
     }
 
+    /// The status bar's API caption: the selected agent's own trouble
+    /// when it has some — its retry line ("Waiting for API response ·
+    /// retry in 2m 34s") or what stopped its turn ("Stopped: Connection
+    /// lost mid-response") — otherwise how many agents anywhere are stuck
+    /// or stopped. A remote project's request leaves from its HOST, so the
+    /// caption names it — Claude Code's "check your network" never says
+    /// which network.
+    fn api_trouble_summary(&self) -> Option<String> {
+        let selected = self
+            .active_project()
+            .and_then(|p| p.entries.get(p.selected).map(|e| (p, e)));
+        if let Some((p, e)) = selected {
+            let on_host = |mut line: String| {
+                if let ProjectLocation::Ssh { host, .. } = &p.location {
+                    line.push_str(&format!(" on {host}"));
+                }
+                line
+            };
+            if let Some(stall) = &e.stall {
+                let mut line = on_host(stall.reason.clone());
+                if let Some(wait) = &stall.wait {
+                    line.push_str(&format!(" \u{00b7} retry {wait}"));
+                }
+                return Some(line);
+            }
+            if let Some(reason) = &e.failure {
+                return Some(on_host(format!("Stopped: {reason}")));
+            }
+        }
+        let entries = || self.projects.iter().flat_map(|p| &p.entries);
+        let stalled = entries().filter(|e| e.stall.is_some()).count();
+        let failed = entries().filter(|e| e.failure.is_some()).count();
+        let parts: Vec<String> = [
+            match stalled {
+                0 => None,
+                1 => Some(String::from("1 agent waiting for its API")),
+                n => Some(format!("{n} agents waiting for their API")),
+            },
+            match failed {
+                0 => None,
+                1 => Some(String::from("1 agent stopped by an API error")),
+                n => Some(format!("{n} agents stopped by API errors")),
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
+    }
+
     /// The bottom bar, GTK's `status_bar.rs` laid out in the same order:
     /// remote hint + per-project counter + across-projects total on the
     /// left, the git chips and the action buttons on the right.
-    /// The status bar's stall caption: the selected agent's retry line
-    /// when it has one ("Waiting for API response · retry in 2m 34s"),
-    /// otherwise how many agents anywhere are stuck. A remote project's
-    /// request leaves from its HOST, so the caption names it — Claude
-    /// Code's "check your network" never says which network.
-    fn stall_summary(&self) -> Option<String> {
-        let project = self.active_project();
-        let selected = project.and_then(|p| p.entries.get(p.selected).map(|e| (p, e)));
-        if let Some((p, stall)) = selected.and_then(|(p, e)| e.stall.as_ref().map(|s| (p, s))) {
-            let mut line = stall.reason.clone();
-            if let ProjectLocation::Ssh { host, .. } = &p.location {
-                line.push_str(&format!(" on {host}"));
-            }
-            if let Some(wait) = &stall.wait {
-                line.push_str(&format!(" \u{00b7} retry {wait}"));
-            }
-            return Some(line);
-        }
-        let stalled = self
-            .projects
-            .iter()
-            .flat_map(|p| &p.entries)
-            .filter(|e| e.stall.is_some())
-            .count();
-        match stalled {
-            0 => None,
-            1 => Some(String::from("1 agent waiting for its API")),
-            n => Some(format!("{n} agents waiting for their API")),
-        }
-    }
-
     fn view_status_bar(&'_ self) -> Element<'_, Event> {
         let project = self.active_project();
 
@@ -9099,12 +9138,12 @@ impl App {
             };
         }
 
-        // An agent stuck retrying its API: the selected one by its own
-        // line, else a count of those elsewhere — the sidebar's pills say
-        // which, this says why.
-        if let Some(stall) = self.stall_summary() {
+        // An agent stuck retrying its API, or stopped by an error: the
+        // selected one by its own line, else a count of those elsewhere —
+        // the sidebar's pills say which, this says why.
+        if let Some(trouble) = self.api_trouble_summary() {
             bar = bar.push(text("\u{00b7}").size(11).color(pal().dim));
-            bar = bar.push(text(stall).size(11).color(pal().restarting));
+            bar = bar.push(text(trouble).size(11).color(pal().restarting));
         }
 
         // GTK's update chip: amber caption text in the left cluster, two

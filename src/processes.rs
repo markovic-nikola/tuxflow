@@ -118,6 +118,12 @@ pub struct ProcessEntry {
     /// (core `util::agent_stall`). Wins over `working` wherever the
     /// sidebar shows motion — see [`ProcessEntry::busy`].
     pub stall: Option<Stall>,
+    /// The agent's last turn ended on an API error ("Connection lost
+    /// mid-response"), as its `StopFailure` hook reported: the reason,
+    /// until its next prompt, turn end or run. Unlike `attention` it stays
+    /// while the user looks — the row keeps saying the agent stopped
+    /// short, since the transcript's error line scrolls away.
+    pub failure: Option<String>,
 }
 
 /// Why an agent is waiting on the user.
@@ -159,6 +165,7 @@ impl ProcessEntry {
             attention: None,
             hooked: false,
             stall: None,
+            failure: None,
         }
     }
 

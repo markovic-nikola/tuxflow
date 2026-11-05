@@ -49,15 +49,38 @@ const ARC_SPAN: f32 = TAU * 0.3;
 /// frame — there is no stepping to see at 8 px across.
 const TURNS_PER_PASS: f32 = 2.0;
 
-struct StatusDot {
-    color: Color,
-    /// `Some(phase)` while this process is producing output.
-    sweep: Option<f32>,
+/// What the light is doing, beyond its colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Light {
+    /// The plain disc.
+    Rest,
+    /// Producing output: the core with the arc orbiting at `phase`.
+    Working(f32),
+    /// Running but getting nowhere — an agent retrying its API: a pause
+    /// glyph (picked over a dashed ring around the core, 2026-11-05 — the
+    /// ring read as "stuck working" but less at a glance). Told apart by
+    /// shape rather than hue on purpose: the colour is the
+    /// project's accent, which is user-picked, so any fixed "waiting" hue
+    /// collides with some accent (restarting amber against the remote
+    /// gold already does), and the dot must keep saying where it lives.
+    Stalled,
 }
 
+struct StatusDot {
+    color: Color,
+    light: Light,
+}
+
+/// The pause glyph's bars: as tall as the resting disc is wide plus a
+/// little, so it fills the same optical box; each bar a hair over the
+/// arc's weight so the pair holds up at this size.
+const PAUSE_H: f32 = 6.6;
+const PAUSE_W: f32 = 1.8;
+const PAUSE_GAP: f32 = 1.8;
+
 /// The status light for a process row.
-pub fn status_dot<'a, Message: 'a>(color: Color, sweep: Option<f32>) -> Element<'a, Message> {
-    Canvas::new(StatusDot { color, sweep })
+pub fn status_dot<'a, Message: 'a>(color: Color, light: Light) -> Element<'a, Message> {
+    Canvas::new(StatusDot { color, light })
         .width(SIZE)
         .height(SIZE)
         .into()
@@ -77,9 +100,25 @@ impl<Message> Program<Message> for StatusDot {
         let mut frame = Frame::new(renderer, bounds.size());
         let center = frame.center();
 
-        match self.sweep {
-            None => frame.fill(&Path::circle(center, REST_R), self.color),
-            Some(phase) => {
+        match self.light {
+            Light::Rest => frame.fill(&Path::circle(center, REST_R), self.color),
+            Light::Stalled => {
+                let top = center.y - PAUSE_H / 2.0;
+                for x in [
+                    center.x - PAUSE_GAP / 2.0 - PAUSE_W,
+                    center.x + PAUSE_GAP / 2.0,
+                ] {
+                    frame.fill(
+                        &Path::rounded_rectangle(
+                            iced::Point::new(x, top),
+                            iced::Size::new(PAUSE_W, PAUSE_H),
+                            0.6.into(),
+                        ),
+                        self.color,
+                    );
+                }
+            }
+            Light::Working(phase) => {
                 frame.fill(&Path::circle(center, CORE_R), self.color);
                 let start = phase * TAU * TURNS_PER_PASS;
                 let arc = Path::new(|builder| {

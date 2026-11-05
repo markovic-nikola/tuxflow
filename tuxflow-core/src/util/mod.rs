@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod agent_stall;
 pub mod agents;
 pub mod banner;
 pub mod editor;

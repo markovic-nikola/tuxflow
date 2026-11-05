@@ -494,3 +494,11 @@ marks something VTE gives TuxFlow that stock iced_term does not.
     underline and the click agree and hovering the dot is not a link.
     Differs in one way: after a cut, the strip still runs (alacritty keeps
     the `.` of `c.)`).
+34. **`Backend::try_recent_text(max_lines)`** (and the `Terminal`
+    passthrough): patch 25's read under `sync`'s try-lock instead of the
+    fair one, `None` while the PTY thread holds it. The app reads the rows
+    above every repainting agent's cursor on each 2 s activity tick to
+    spot Claude Code's API-retry line (core `util/agent_stall.rs`), and a
+    timer must not park the UI thread behind a flood — a skipped sample is
+    just answered on the next tick. Both reads share one body
+    (`text_above_cursor`).

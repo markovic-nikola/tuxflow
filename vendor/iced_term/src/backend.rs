@@ -767,7 +767,18 @@ impl Backend {
     /// the parse lock fairly: a one-off read that waits out a flood is
     /// fine here, unlike `sync`, which runs on every repaint.
     pub fn recent_text(&self, max_lines: usize) -> String {
-        let term = self.term.lock();
+        Self::text_above_cursor(&self.term.lock(), max_lines)
+    }
+
+    /// `recent_text` for a caller on a timer: `None` while the PTY thread
+    /// holds the parse lock, rather than parking the UI thread behind a
+    /// flood — the next tick simply asks again.
+    pub fn try_recent_text(&self, max_lines: usize) -> Option<String> {
+        let term = self.term.try_lock_unfair()?;
+        Some(Self::text_above_cursor(&term, max_lines))
+    }
+
+    fn text_above_cursor(term: &Term<EventProxy>, max_lines: usize) -> String {
         let grid = term.grid();
         let end_line = grid.cursor.point.line;
         let span = max_lines.saturating_sub(1) as i32;

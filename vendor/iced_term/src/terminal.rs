@@ -141,6 +141,10 @@ impl Terminal {
         self.backend.recent_text(max_lines)
     }
 
+    pub fn try_recent_text(&self, max_lines: usize) -> Option<String> {
+        self.backend.try_recent_text(max_lines)
+    }
+
     pub fn widget_id(&self) -> &iced::widget::Id {
         &self.widget_id
     }

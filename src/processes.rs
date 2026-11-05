@@ -10,6 +10,7 @@ use tuxflow_core::config::projects::SavedProjects;
 use tuxflow_core::config::schema::{ProcessCategory, ProcessConfig};
 use tuxflow_core::detect::detector;
 use tuxflow_core::remote::{self, ProjectLocation};
+use tuxflow_core::util::agent_stall::{self, Stall};
 
 // The GTK app's policy constants, verbatim (process/auto_restart.rs).
 pub const MAX_RESTART_ATTEMPTS: u32 = 5;
@@ -112,6 +113,11 @@ pub struct ProcessEntry {
     /// (`mcp::agent_hooks`): its bell and the silence guess are then
     /// redundant, and ignored.
     pub hooked: bool,
+    /// The agent is repainting a retry countdown, not working: Claude
+    /// Code's own retry line read off the grid on each activity sample
+    /// (core `util::agent_stall`). Wins over `working` wherever the
+    /// sidebar shows motion — see [`ProcessEntry::busy`].
+    pub stall: Option<Stall>,
 }
 
 /// Why an agent is waiting on the user.
@@ -152,6 +158,7 @@ impl ProcessEntry {
             idle_notified: false,
             attention: None,
             hooked: false,
+            stall: None,
         }
     }
 
@@ -190,7 +197,8 @@ impl ProcessEntry {
     /// The next `working` state, from the repaints counted since the last
     /// sample. Non-agents and anything not running are never working: only
     /// agents get the treatment (GTK samples the same set), and a stopped
-    /// terminal's last repaints must not leave the card lit.
+    /// terminal's last repaints must not leave the card lit. The retry
+    /// line is re-read beside it, and the answer is [`Self::busy`].
     pub fn sample_activity(&mut self) -> bool {
         let events = std::mem::take(&mut self.activity_burst);
         self.working = self.config.category == ProcessCategory::Agent
@@ -200,7 +208,41 @@ impl ProcessEntry {
                 events,
                 self.last_activity.map_or(Duration::MAX, |at| at.elapsed()),
             );
-        self.working
+        self.sample_stall();
+        self.busy()
+    }
+
+    /// Working for real: repainting, and not because of a retry countdown.
+    pub fn busy(&self) -> bool {
+        self.working && self.stall.is_none()
+    }
+
+    /// Rows above the cursor that hold Claude Code's retry line: the line
+    /// itself, the input box under it (three rows) and its footer, with a
+    /// little room for a wrapped error.
+    const STALL_ROWS: usize = 10;
+
+    /// Re-read the retry line. Gated on fresh repaints, not on `working`:
+    /// a countdown ticks once a second, under the burst threshold, so a
+    /// stall already running when this app attached would never turn
+    /// `working` on — while an agent quiet for the whole quiet window has
+    /// no countdown running at all. A skipped read (the PTY thread holds
+    /// the lock) keeps the last answer.
+    fn sample_stall(&mut self) {
+        let repainting = self
+            .last_activity
+            .is_some_and(|at| at.elapsed() < tuxflow_core::util::activity::QUIET_WINDOW);
+        if self.config.category != ProcessCategory::Agent || !self.is_running() || !repainting {
+            self.stall = None;
+            return;
+        }
+        if let Some(text) = self
+            .terminal
+            .as_ref()
+            .and_then(|t| t.try_recent_text(Self::STALL_ROWS))
+        {
+            self.stall = agent_stall::detect(&text);
+        }
     }
 
     /// Has this agent been silent for `threshold`? Only a running agent

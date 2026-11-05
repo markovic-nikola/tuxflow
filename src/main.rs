@@ -53,7 +53,7 @@ use tuxflow_core::util::watch::{self, WatchSet};
 
 use keys::{AppAction, AppKeys};
 use processes::{Attention, ProcessEntry, Status, plan_after_exit};
-use status_dot::{spinner, status_dot};
+use status_dot::{Light, spinner, status_dot};
 use theme::{CRASHED, LOCAL_ACCENT, accent_for, pal};
 use tuxflow_core::config::settings::AppSettings;
 use widgets::form_card;
@@ -558,7 +558,7 @@ impl ProjectState {
 
     /// At least one agent in here is producing output right now.
     fn agent_working(&self) -> bool {
-        self.entries.iter().any(|e| e.working)
+        self.entries.iter().any(|e| e.busy())
     }
 }
 
@@ -8138,8 +8138,15 @@ impl App {
         let dot_color = fade(dot_color(&entry.status, accent));
         // The light rides the card sweep's phase instead of keeping one of
         // its own: every working row turns in step, and a busy agent still
-        // costs exactly one timer no matter how many rows are lit.
-        let working = entry.working.then_some(self.sweep.phase);
+        // costs exactly one timer no matter how many rows are lit. A
+        // stalled agent keeps its accent and changes SHAPE (see `Light`).
+        let light = if entry.stall.is_some() {
+            Light::Stalled
+        } else if entry.busy() {
+            Light::Working(self.sweep.phase)
+        } else {
+            Light::Rest
+        };
         let name = entry.label();
 
         // GTK hangs the command off the whole row (`set_tooltip_text` in
@@ -8186,7 +8193,7 @@ impl App {
         // Fixed content height: hover swaps elements in and out (hint ↔
         // glyph cluster), and the row must measure the same with any of
         // them or the rows below shift while the pointer moves.
-        let mut content = row![status_dot(dot_color, working), label]
+        let mut content = row![status_dot(dot_color, light), label]
             .spacing(8)
             .height(17)
             .align_y(iced::Alignment::Center);
@@ -8240,6 +8247,21 @@ impl App {
                 );
             }
             _ => {}
+        }
+        // The retry pill: the wait as the agent printed it, in the dim
+        // ink rather than the Restarting pill's amber, which on a remote
+        // row is one more yellow beside the gold title and dot. The glyph
+        // carries the state; this only says how long. The reason rides
+        // the status bar, where there is room for it.
+        if let Some(stall) = &entry.stall {
+            content = content.push(
+                text(match &stall.wait {
+                    Some(wait) => format!("API {wait}"),
+                    None => String::from("API"),
+                })
+                .size(9)
+                .color(pal().dim),
+            );
         }
 
         // The lifecycle glyphs (design round F): bare icons sliding in
@@ -8424,7 +8446,7 @@ impl App {
                 let name = entry.label();
                 (
                     row![
-                        status_dot(dot_color(&entry.status, accent), None),
+                        status_dot(dot_color(&entry.status, accent), Light::Rest),
                         clipped_label(text(name).size(12.5).color(pal().text)),
                     ]
                     .spacing(8)
@@ -9003,6 +9025,37 @@ impl App {
     /// The bottom bar, GTK's `status_bar.rs` laid out in the same order:
     /// remote hint + per-project counter + across-projects total on the
     /// left, the git chips and the action buttons on the right.
+    /// The status bar's stall caption: the selected agent's retry line
+    /// when it has one ("Waiting for API response · retry in 2m 34s"),
+    /// otherwise how many agents anywhere are stuck. A remote project's
+    /// request leaves from its HOST, so the caption names it — Claude
+    /// Code's "check your network" never says which network.
+    fn stall_summary(&self) -> Option<String> {
+        let project = self.active_project();
+        let selected = project.and_then(|p| p.entries.get(p.selected).map(|e| (p, e)));
+        if let Some((p, stall)) = selected.and_then(|(p, e)| e.stall.as_ref().map(|s| (p, s))) {
+            let mut line = stall.reason.clone();
+            if let ProjectLocation::Ssh { host, .. } = &p.location {
+                line.push_str(&format!(" on {host}"));
+            }
+            if let Some(wait) = &stall.wait {
+                line.push_str(&format!(" \u{00b7} retry {wait}"));
+            }
+            return Some(line);
+        }
+        let stalled = self
+            .projects
+            .iter()
+            .flat_map(|p| &p.entries)
+            .filter(|e| e.stall.is_some())
+            .count();
+        match stalled {
+            0 => None,
+            1 => Some(String::from("1 agent waiting for its API")),
+            n => Some(format!("{n} agents waiting for their API")),
+        }
+    }
+
     fn view_status_bar(&'_ self) -> Element<'_, Event> {
         let project = self.active_project();
 
@@ -9044,6 +9097,14 @@ impl App {
                 )),
                 None => bar.push(counter),
             };
+        }
+
+        // An agent stuck retrying its API: the selected one by its own
+        // line, else a count of those elsewhere — the sidebar's pills say
+        // which, this says why.
+        if let Some(stall) = self.stall_summary() {
+            bar = bar.push(text("\u{00b7}").size(11).color(pal().dim));
+            bar = bar.push(text(stall).size(11).color(pal().restarting));
         }
 
         // GTK's update chip: amber caption text in the left cluster, two

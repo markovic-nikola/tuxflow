@@ -85,6 +85,14 @@ fn handshake<W: Write, R: BufRead>(w: &mut W, r: &mut R) {
         instructions.contains("Before you start a dev server"),
         "instructions steer the agent: {instructions}"
     );
+    // A client asks only for what is advertised: without `tools` here
+    // Claude Code never sends `tools/list`, however well it answers.
+    let capabilities = &init["result"]["capabilities"];
+    assert!(
+        capabilities["tools"].is_object() && capabilities["resources"].is_object(),
+        "tools and resources are advertised: {capabilities}"
+    );
+    assert_eq!(init["result"]["serverInfo"]["name"], "tuxflow");
     writeln!(
         w,
         r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#

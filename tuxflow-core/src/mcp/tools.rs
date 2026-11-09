@@ -4,7 +4,7 @@ use rmcp::{
     model::{
         ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams, RawResource,
         RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, Resource,
-        ResourceContents, ResourceTemplate, ResourcesCapability, ServerInfo,
+        ResourceContents, ResourceTemplate, ResourcesCapability, ServerInfo, ToolsCapability,
     },
     schemars,
     service::RequestContext,
@@ -304,7 +304,14 @@ impl TuxFlowMcpServer {
 impl ServerHandler for TuxFlowMcpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
+        // Both must be ADVERTISED: `tools/list` answers either way, but a
+        // client that reads no `tools` capability never asks (Claude Code
+        // showed the instructions below and not one tool to follow them
+        // with). `#[tool_handler]` only adds it to a `get_info` it writes
+        // itself, and this one is ours.
+        info.capabilities.tools = Some(ToolsCapability::default());
         info.capabilities.resources = Some(ResourcesCapability::default());
+        info.server_info.name = "tuxflow".into();
         info.instructions = Some(
             "TuxFlow manages this project's long-running processes (dev servers, watchers, \
              test runners) in its own terminals, and the user is watching them. Before you \

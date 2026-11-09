@@ -1,7 +1,7 @@
 # Maintainer: Nikola Markovic <markovic-nikola at users dot noreply dot github dot com>
 
 pkgname=tuxflow-bin
-pkgver=0.2.28
+pkgver=0.2.29
 pkgrel=1
 pkgdesc='Dev servers and AI agents, local or over SSH'
 arch=('x86_64')
@@ -22,7 +22,7 @@ provides=('tuxflow')
 conflicts=('tuxflow')
 options=('!strip' '!debug')
 source=("https://github.com/markovic-nikola/tuxflow/releases/download/v$pkgver/tuxflow-$pkgver-x86_64-linux.tar.gz")
-sha256sums=('e5f9d717453e8a2282ee4b11ed5a68920300feb49c61d08704600426392229f8')
+sha256sums=('8f60fc5698933dd418a14d7c92cd24ff0c895c5f3f42bb6c6864f43c4ae20c20')
 
 package() {
   cd "tuxflow-$pkgver-x86_64-linux"

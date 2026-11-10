@@ -41,7 +41,8 @@ const PLUGIN_JSON: &str = r#"{"name":"tuxflow","version":"1.0.0","description":"
 const HOOK_COMMAND: &str = "command -v python3 >/dev/null 2>&1 && python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/tuxflow-event.py\" >/dev/null 2>&1; exit 0";
 
 /// The hooks: `Stop` (turn finished — not fired on an Esc interrupt; its
-/// last message decides finished vs [`closing_ask`]), `StopFailure` (the
+/// last message decides finished vs [`closing_ask`], its background tasks
+/// finished vs [`awaits_background`]), `StopFailure` (the
 /// turn ended on an API error INSTEAD of a `Stop` — without it such an
 /// agent sat with no marker at all, its bell already ignored as hooked),
 /// `PermissionRequest` (the permission dialog is about to show), the
@@ -73,6 +74,9 @@ if path and process:
     last = hook.get("last_assistant_message")
     if isinstance(last, str):
         keep["last_assistant_message"] = last[-TAIL:]
+    tasks = hook.get("background_tasks")
+    if isinstance(tasks, list):
+        keep["background_tasks"] = [{k: t[k] for k in ("type", "status") if k in t} for t in tasks if isinstance(t, dict)]
     line = json.dumps({"jsonrpc": "2.0", "method": "tuxflow/agent_event", "params": {"process": process, "hook": keep}})
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(2)
@@ -169,12 +173,11 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
     let hook = params.get("hook")?;
     let field = |k: &str| hook.get(k).and_then(|v| v.as_str());
     let event = match field("hook_event_name")? {
-        "Stop" => Some(
-            match field("last_assistant_message").and_then(closing_ask) {
-                Some(ask) => AgentEvent::NeedsInput { reason: Some(ask) },
-                None => AgentEvent::Finished,
-            },
-        ),
+        "Stop" => match field("last_assistant_message").and_then(closing_ask) {
+            Some(ask) => Some(AgentEvent::NeedsInput { reason: Some(ask) }),
+            None if awaits_background(hook) => None,
+            None => Some(AgentEvent::Finished),
+        },
         "StopFailure" => Some(AgentEvent::Failed {
             reason: failure_reason(field("last_assistant_message"), field("error")),
         }),
@@ -193,6 +196,42 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
         _ => None,
     };
     Some((process, event))
+}
+
+/// Background task types that END on their own and wake the agent when
+/// they do. A `shell` is left out on purpose: a dev server or a `tail -f`
+/// started in the background never ends, and counting it would hold back
+/// "finished" for the rest of the session.
+const WAKING_TASKS: &[&str] = &["subagent", "workflow", "teammate"];
+
+/// Statuses of a task that will not wake anyone any more, should Claude
+/// ever list one — an unknown status counts as still running.
+const ENDED_STATUSES: &[&str] = &[
+    "completed",
+    "failed",
+    "killed",
+    "cancelled",
+    "canceled",
+    "stopped",
+];
+
+/// A `Stop` that is a PAUSE, not the end: the agent sent subagents to the
+/// background and its turn "ended" only until one reports back (Claude
+/// Code's `background_tasks`, one entry per in-flight task). Each report
+/// starts a short turn with a `Stop` of its own, so N subagents made N+1
+/// "finished" banners, all but the last one false. An ask still gets
+/// through — [`parse_event_line`] checks for it first.
+fn awaits_background(hook: &serde_json::Value) -> bool {
+    let Some(tasks) = hook.get("background_tasks").and_then(|t| t.as_array()) else {
+        return false;
+    };
+    let field = |task: &serde_json::Value, k: &str| {
+        task.get(k).and_then(|v| v.as_str()).map(str::to_lowercase)
+    };
+    tasks.iter().any(|task| {
+        field(task, "type").is_some_and(|t| WAKING_TASKS.contains(&t.as_str()))
+            && field(task, "status").is_none_or(|s| !ENDED_STATUSES.contains(&s.as_str()))
+    })
 }
 
 /// The longest ask (or failure) quoted in a notification.
@@ -511,6 +550,102 @@ mod tests {
             parse_event_line(&line(serde_json::json!({"hook_event_name": "Stop"})))
                 .and_then(|(_, e)| e),
             Some(AgentEvent::Finished)
+        );
+    }
+
+    /// A turn that "ends" with subagents still out is a pause: no event
+    /// until the last one is back. A background shell never holds it.
+    #[test]
+    fn a_stop_with_subagents_still_running_is_not_finished() {
+        let stop = |msg: &str, tasks: serde_json::Value| {
+            parse_event_line(&line(serde_json::json!({
+                "hook_event_name": "Stop",
+                "last_assistant_message": msg,
+                "background_tasks": tasks,
+            })))
+            .map(|(_, e)| e)
+        };
+        let task = |ty: &str, status: &str| serde_json::json!({"type": ty, "status": status});
+        let done = "Launched three reviewers; I'll report when they are back.";
+        // Hooks are live (`Some`), nothing to say (`None`).
+        for ty in WAKING_TASKS {
+            assert_eq!(
+                stop(done, serde_json::json!([task(ty, "running")])),
+                Some(None),
+                "{ty}"
+            );
+        }
+        assert_eq!(
+            stop(done, serde_json::json!([{"type": "subagent"}])),
+            Some(None)
+        );
+        // The last report's turn: nothing in flight, or only what never ends.
+        let finished = Some(Some(AgentEvent::Finished));
+        assert_eq!(stop(done, serde_json::json!([])), finished);
+        assert_eq!(
+            stop(done, serde_json::json!([task("shell", "running")])),
+            finished
+        );
+        assert_eq!(
+            stop(done, serde_json::json!([task("subagent", "completed")])),
+            finished
+        );
+        // A question is waiting on the user whatever else is running.
+        assert_eq!(
+            stop(
+                "Two are still out. Want me to commit the first fix?",
+                serde_json::json!([task("subagent", "running")])
+            ),
+            Some(Some(AgentEvent::NeedsInput {
+                reason: Some("Want me to commit the first fix?".into())
+            }))
+        );
+    }
+
+    /// The script cuts each task to the two fields the rule reads.
+    #[test]
+    fn the_hook_script_forwards_background_tasks() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tuxflow-hook-fwd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (script, sock) = (dir.join("hook.py"), dir.join("s"));
+        std::fs::write(&script, SCRIPT).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let mut child = std::process::Command::new("python3")
+            .arg(&script)
+            .env("TUXFLOW_MCP_SOCKET", &sock)
+            .env(PROCESS_ENV, "claude")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = serde_json::json!({
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Launched.",
+            "background_tasks": [
+                {"id": "t1", "type": "subagent", "status": "running", "description": "review"}
+            ],
+        });
+        std::io::Write::write_all(
+            &mut child.stdin.take().unwrap(),
+            input.to_string().as_bytes(),
+        )
+        .unwrap();
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut sent = String::new();
+        std::io::Read::read_to_string(&mut conn, &mut sent).unwrap();
+        child.wait().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!sent.contains("review"), "{sent}");
+        assert_eq!(
+            parse_event_line(sent.trim()),
+            Some((String::from("claude"), None))
         );
     }
 

@@ -42,7 +42,11 @@ pub struct AppearanceSettings {
     /// The dot on an agent waiting for the user in another project. A
     /// name from `palette::ATTENTION_COLORS`; unknown names fall back.
     pub attention_color: String,
+    /// The terminal's family; "Monospace" is the system's.
     pub font_family: String,
+    /// The family of everything that is not a terminal. Empty is the
+    /// system's sans-serif.
+    pub ui_font_family: String,
     pub font_size: u32,
     pub font_weight: u32,
     pub bold_font_weight: u32,
@@ -175,6 +179,7 @@ impl Default for AppearanceSettings {
             remote_accent_color: "yellow".to_string(),
             attention_color: "pink".to_string(),
             font_family: "Monospace".to_string(),
+            ui_font_family: String::new(),
             font_size: 12,
             font_weight: 400,
             bold_font_weight: 700,

@@ -12,6 +12,7 @@ mod add_ssh;
 mod badged;
 mod dnd;
 mod edit_project;
+mod fonts;
 mod git_view;
 mod instance;
 mod keys;
@@ -1295,6 +1296,7 @@ enum Event {
 impl App {
     fn new() -> (Self, Task<Event>) {
         let settings = AppSettings::load();
+        fonts::apply_ui_family(&settings.appearance.ui_font_family);
         // Must reach the mic module before any project registers its host,
         // or the first load would skip bridging (GTK's window does the same
         // before it builds anything).
@@ -4395,10 +4397,11 @@ impl App {
     /// string per change is the accepted iced idiom.
     fn term_font(&self) -> iced_term::settings::FontSettings {
         let a = &self.settings.appearance;
-        let family = if a.font_family.is_empty() || a.font_family == "Monospace" {
+        let saved = fonts::saved_family(fonts::TERMINAL, &a.font_family);
+        let family = if saved.eq_ignore_ascii_case(fonts::SYSTEM_MONOSPACE) {
             iced::font::Family::Monospace
         } else {
-            iced::font::Family::Name(Box::leak(a.font_family.clone().into_boxed_str()))
+            iced::font::Family::Name(Box::leak(saved.to_string().into_boxed_str()))
         };
         iced_term::settings::FontSettings {
             size: (a.font_size as f32).clamp(6.0, 32.0),
@@ -9513,21 +9516,12 @@ impl App {
                     tuxflow_core::config::palette::theme_name(idx as u32).to_string();
                 self.broadcast_theme();
             }
-            Msg::FontFamilyDraft(value) => {
-                if let Some(state) = &mut self.settings_ui {
-                    state.font_family_draft = value;
-                }
-                return Task::none();
+            Msg::UiFontFamily(family) => {
+                fonts::apply_ui_family(&family);
+                self.settings.appearance.ui_font_family = family;
             }
-            Msg::FontFamilyApply => {
-                if let Some(state) = &self.settings_ui {
-                    let family = state.font_family_draft.trim();
-                    self.settings.appearance.font_family = if family.is_empty() {
-                        String::from("Monospace")
-                    } else {
-                        family.to_string()
-                    };
-                }
+            Msg::FontFamily(family) => {
+                self.settings.appearance.font_family = family;
                 self.broadcast_font();
             }
             Msg::FontSize(v) => {

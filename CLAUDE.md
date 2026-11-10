@@ -80,6 +80,7 @@ src/                       # The app — package `tuxflow` (root), the iced shel
   theme.rs                 # Palette (dark/light behind pal()), card Sweep, semantic colours
   scheme.rs                # System color-scheme via the settings portal
   settings_ui.rs           # Settings as a full-pane view
+  fonts.rs                 # Installed families for the two font pickers + live UI font (repoints fontdb's generic sans-serif)
   git_view.rs              # Git Changes as a full-pane view
   add_project.rs / add_ssh.rs / edit_project.rs   # Full-pane forms
   widgets.rs               # Adwaita furniture (groups/rows/switches/avatars) generic over the message

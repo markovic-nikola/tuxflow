@@ -11,7 +11,7 @@
 //! file-watch…) still edit the shared settings.toml and say so in
 //! their subtitle rather than pretending.
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input};
+use iced::widget::{button, column, combo_box, container, pick_list, row, scrollable, text};
 use iced::{Element, Length};
 use tuxflow_core::config::keybindings::{ShortcutAction, action_metadata};
 use tuxflow_core::config::palette;
@@ -21,6 +21,7 @@ use tuxflow_core::config::settings::{
 use tuxflow_core::mcp::setup;
 use tuxflow_core::util::sounds::BUNDLED_SOUNDS;
 
+use crate::fonts::{self, FontChoice};
 use crate::theme::{self, CRASHED, bold, pal};
 use crate::widgets::{group, label_row, row_base, switch_row};
 
@@ -52,9 +53,10 @@ pub struct State {
     /// Last capture that hit an existing binding: (attempted action,
     /// display name of the holder). Cleared on the next interaction.
     pub conflict: Option<(ShortcutAction, &'static str)>,
-    /// Font family is typed, not picked — buffered until Enter so a
-    /// half-typed name doesn't restyle every terminal per keystroke.
-    pub font_family_draft: String,
+    /// Installed families for the two font pickers, listed once per
+    /// opening of Settings (a combo box owns its search text).
+    pub ui_fonts: combo_box::State<FontChoice>,
+    pub terminal_fonts: combo_box::State<FontChoice>,
     /// paplay feedback for the preview buttons (GTK shows a toast).
     pub sound_error: Option<String>,
     /// Which setup row's config was last copied (shows a ✓).
@@ -69,7 +71,14 @@ impl State {
             page: Page::Appearance,
             capturing: None,
             conflict: None,
-            font_family_draft: s.appearance.font_family.clone(),
+            ui_fonts: combo_box::State::new(fonts::choices(
+                fonts::UI,
+                &s.appearance.ui_font_family,
+            )),
+            terminal_fonts: combo_box::State::new(fonts::choices(
+                fonts::TERMINAL,
+                &s.appearance.font_family,
+            )),
             sound_error: None,
             copied: None,
             setup_open: None,
@@ -89,8 +98,8 @@ pub enum Msg {
     AttentionColor(&'static str),
     TermTheme(&'static str),
     FocusIndicator(&'static str),
-    FontFamilyDraft(String),
-    FontFamilyApply,
+    UiFontFamily(String),
+    FontFamily(String),
     FontSize(u32),
     FontWeight(u32),
     BoldWeight(u32),
@@ -220,6 +229,14 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
                     scheme,
                     Msg::ColorScheme,
                 ),
+                font_row(
+                    "Interface Font",
+                    "Everything outside the terminals \u{2014} type to search",
+                    &state.ui_fonts,
+                    fonts::UI,
+                    &a.ui_font_family,
+                    Msg::UiFontFamily,
+                ),
                 pick_row(
                     "Accent Color",
                     "Accent for buttons and highlights",
@@ -267,17 +284,13 @@ fn page_appearance<'a>(state: &'a State, s: &'a AppSettings) -> iced::widget::Co
                     choice_label(FOCUS_INDICATOR_CHOICES, &a.focus_indicator),
                     Msg::FocusIndicator,
                 ),
-                row_base(
+                font_row(
                     "Font Family",
-                    "Monospace family name \u{2014} Enter applies to every terminal",
-                    text_input("Monospace", &state.font_family_draft)
-                        .on_input(Msg::FontFamilyDraft)
-                        .on_submit(Msg::FontFamilyApply)
-                        .style(theme::input(theme::accent_for(false)))
-                        .padding([5, 10])
-                        .size(12.5)
-                        .width(190)
-                        .into(),
+                    "Fixed-width families \u{2014} type to search",
+                    &state.terminal_fonts,
+                    fonts::TERMINAL,
+                    &a.font_family,
+                    Msg::FontFamily,
                 ),
                 spin_u32("Font Size", "", a.font_size, 1, 6, 32, Msg::FontSize),
                 spin_u32(
@@ -687,6 +700,33 @@ fn choice_label(choices: &'static [(&'static str, &'static str)], name: &str) ->
 }
 
 // ── Row builders ────────────────────────────────────────────────────────
+
+/// A searchable family picker showing the saved family for `role`.
+fn font_row<'a>(
+    title: &'a str,
+    subtitle: &'a str,
+    fonts: &'a combo_box::State<FontChoice>,
+    role: fonts::Role,
+    saved: &str,
+    f: fn(String) -> Msg,
+) -> Element<'a, Msg> {
+    row_base(
+        title,
+        subtitle,
+        combo_box(
+            fonts,
+            "Search fonts\u{2026}",
+            fonts::selected(fonts.options(), role, saved),
+            move |choice: FontChoice| f(choice.family),
+        )
+        .input_style(theme::input(theme::accent_for(false)))
+        .padding([5, 10])
+        .size(12.5)
+        .menu_height(260)
+        .width(250)
+        .into(),
+    )
+}
 
 fn pick_row<'a>(
     title: &'a str,

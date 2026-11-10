@@ -5076,6 +5076,7 @@ dependencies = [
  "open",
  "png 0.18.1",
  "tokio",
+ "ttf-parser",
  "tuxflow-core",
  "zbus",
 ]

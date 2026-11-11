@@ -132,6 +132,7 @@ pub enum Msg {
     ResetKeys,
     // Tools
     Composer(bool),
+    AutoContinue(bool),
     RemoteMic(bool),
     Editor(&'static str),
     ReuseEditor(bool),
@@ -586,6 +587,12 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
                     "Compose messages locally under agent terminals and send in one go \u{2014} avoids per-keystroke lag on remote projects",
                     t.agent_composer,
                     Msg::Composer,
+                ),
+                switch_row(
+                    "Continue After API Errors",
+                    "When Claude Code stops on an API error such as a connection lost mid-response, send \"continue\" two minutes later \u{2014} unless you type in its terminal first. Up to three times in a row",
+                    t.agent_auto_continue,
+                    Msg::AutoContinue,
                 ),
                 switch_row(
                     "Remote Microphone",

@@ -1789,22 +1789,34 @@ impl App {
         self.projects[pidx].entries[index].hooked = true;
         match event {
             Some(AgentEvent::Finished) => {
-                self.projects[pidx].entries[index].failure = None;
+                let entry = &mut self.projects[pidx].entries[index];
+                entry.failure = None;
+                entry.auto_continues = 0;
                 self.mark_waiting(pidx, index, Attention::Finished);
                 self.notify_agent_idle(pidx, index, "finished");
             }
             Some(AgentEvent::NeedsInput { reason }) => {
-                self.projects[pidx].entries[index].failure = None;
+                let entry = &mut self.projects[pidx].entries[index];
+                entry.failure = None;
+                entry.auto_continues = 0;
                 self.mark_waiting(pidx, index, Attention::NeedsYou);
                 let detail = reason.unwrap_or_else(|| String::from("needs you"));
                 self.notify_agent_idle(pidx, index, &detail);
             }
             // Stopped short: it goes nowhere until the user says so, which
             // is "needs you" — the "!" badge, not the finished dot.
-            Some(AgentEvent::Failed { reason }) => {
+            Some(AgentEvent::Failed { reason, retryable }) => {
                 self.mark_waiting(pidx, index, Attention::NeedsYou);
                 self.notify_agent_idle(pidx, index, &format!("stopped — {reason}"));
-                self.projects[pidx].entries[index].failure = Some(reason);
+                let entry = &mut self.projects[pidx].entries[index];
+                let auto_continue = retryable
+                    && self.settings.tools.agent_auto_continue
+                    && entry.auto_continues < processes::AUTO_CONTINUE_MAX;
+                entry.failure = Some(processes::Failure {
+                    reason,
+                    continue_at: auto_continue
+                        .then(|| Instant::now() + processes::AUTO_CONTINUE_DELAY),
+                });
             }
             Some(AgentEvent::Resumed) => {
                 let entry = &mut self.projects[pidx].entries[index];
@@ -2142,6 +2154,7 @@ impl App {
                 // Until this run's hooks speak, its bell is the signal.
                 entry.hooked = false;
                 entry.failure = None;
+                entry.auto_continues = 0;
                 let name = entry.config.name.clone();
                 project.ports.clear(&name);
                 project.selected = index;
@@ -4827,6 +4840,43 @@ impl App {
         )
     }
 
+    /// Type "continue" into every agent whose failed turn has waited out
+    /// `AUTO_CONTINUE_DELAY` (armed in `agent_event`, behind the setting):
+    /// the composer's delivery — one bracketed paste, Enter a beat later —
+    /// addressed to the run that failed. Switching the setting off also
+    /// disarms what is already waiting.
+    fn send_due_continues(&mut self) -> Task<Event> {
+        let enabled = self.settings.tools.agent_auto_continue;
+        let mut due = Vec::new();
+        for project in &mut self.projects {
+            for entry in &mut project.entries {
+                if !enabled {
+                    entry.cancel_auto_continue();
+                } else if entry.take_auto_continue()
+                    && let Some(term) = entry.term_id
+                {
+                    log::info!(
+                        "auto-continue: {} ({}/{})",
+                        entry.config.name,
+                        entry.auto_continues,
+                        processes::AUTO_CONTINUE_MAX
+                    );
+                    due.push((project.id, term, entry.run_id));
+                }
+            }
+        }
+        Task::batch(due.into_iter().map(|(project, term, run)| {
+            self.composer_deliver(
+                project,
+                term,
+                run,
+                Default::default(),
+                processes::AUTO_CONTINUE_TEXT.to_string(),
+                false,
+            )
+        }))
+    }
+
     /// (project id, term id, run id) of the selected process while it is
     /// running — the triple every composed write is addressed to, so a
     /// restart or a switch between paste and delivery drops the bytes
@@ -5691,6 +5741,7 @@ impl App {
                 // GTK's per-project ticker does both on this cadence: the
                 // working dot and the idle-silence fallback.
                 self.check_agent_silence();
+                let continues = self.send_due_continues();
                 let start = self
                     .projects
                     .iter()
@@ -5702,9 +5753,9 @@ impl App {
                 });
                 match start {
                     Some(generation) => {
-                        Task::batch([next, Task::done(Event::SweepTick(generation))])
+                        Task::batch([next, continues, Task::done(Event::SweepTick(generation))])
                     }
-                    None => next,
+                    None => Task::batch([next, continues]),
                 }
             }
             Event::SweepTick(generation) => {
@@ -6972,6 +7023,11 @@ impl App {
 
                 let action = {
                     let entry = &mut self.projects[pidx].entries[index];
+                    // Keys, pastes, mouse reports: the user is at this
+                    // terminal, so a pending "continue" is no longer ours.
+                    if matches!(cmd, BackendCommand::Write(_)) {
+                        entry.cancel_auto_continue();
+                    }
                     match entry.terminal.as_mut() {
                         Some(term) => term.handle(iced_term::Command::ProxyToBackend(cmd)),
                         None => iced_term::actions::Action::Ignore,
@@ -9070,8 +9126,17 @@ impl App {
                 }
                 return Some(line);
             }
-            if let Some(reason) = &e.failure {
-                return Some(on_host(format!("Stopped: {reason}")));
+            if let Some(failure) = &e.failure {
+                let mut line = on_host(format!("Stopped: {}", failure.reason));
+                if let Some(at) = failure.continue_at {
+                    let left = at.saturating_duration_since(Instant::now()).as_secs();
+                    line.push_str(&format!(
+                        " \u{00b7} continuing in {}:{:02}",
+                        left / 60,
+                        left % 60
+                    ));
+                }
+                return Some(line);
             }
         }
         let entries = || self.projects.iter().flat_map(|p| &p.entries);
@@ -9618,6 +9683,7 @@ impl App {
                 self.rebuild_keys();
             }
             Msg::Composer(v) => self.settings.tools.agent_composer = v,
+            Msg::AutoContinue(v) => self.settings.tools.agent_auto_continue = v,
             Msg::RemoteMic(v) => {
                 self.settings.tools.remote_microphone = v;
                 // Applies live, to projects that are already open, in both

@@ -20,6 +20,17 @@ const MAX_BACKOFF_EXPONENT: u32 = 5;
 /// not accumulate into a give-up.
 const STABLE_RUN_SECS: u64 = 60;
 
+/// How long a failed agent turn waits before "continue" is typed for the
+/// user (Settings → Tools → Continue After API Errors): long enough for a
+/// dropped link to come back, and for someone at the desk to get there
+/// first.
+pub const AUTO_CONTINUE_DELAY: Duration = Duration::from_secs(120);
+/// Failed turns in a row that get a "continue" before the agent is left
+/// to the user — an API that is down fails each one the same way.
+pub const AUTO_CONTINUE_MAX: u32 = 3;
+/// What is typed.
+pub const AUTO_CONTINUE_TEXT: &str = "continue";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Status {
     Stopped,
@@ -123,7 +134,21 @@ pub struct ProcessEntry {
     /// until its next prompt, turn end or run. Unlike `attention` it stays
     /// while the user looks — the row keeps saying the agent stopped
     /// short, since the transcript's error line scrolls away.
-    pub failure: Option<String>,
+    pub failure: Option<Failure>,
+    /// "continue"s typed for the user since this agent last ended a turn
+    /// properly (or its run began) — the count `AUTO_CONTINUE_MAX` caps.
+    pub auto_continues: u32,
+}
+
+/// A turn that ended on an API error.
+#[derive(Debug, Clone)]
+pub struct Failure {
+    /// Claude's error line, cut to its first sentence.
+    pub reason: String,
+    /// When "continue" gets typed into the agent for the user. `None`:
+    /// the setting is off, the error is one a retry can't fix, the cap is
+    /// spent, the user wrote to the terminal first, or it has been sent.
+    pub continue_at: Option<Instant>,
 }
 
 /// Why an agent is waiting on the user.
@@ -166,6 +191,7 @@ impl ProcessEntry {
             hooked: false,
             stall: None,
             failure: None,
+            auto_continues: 0,
         }
     }
 
@@ -249,6 +275,33 @@ impl ProcessEntry {
             .and_then(|t| t.try_recent_text(Self::STALL_ROWS))
         {
             self.stall = agent_stall::detect(&text);
+        }
+    }
+
+    /// Is this agent's "continue" due? Taken once: the failure stays (its
+    /// `UserPromptSubmit` hook clears it when the prompt lands), the timer
+    /// does not. Held back while the run is not up — a remote agent
+    /// mid-reconnect gets it once its terminal is attached again.
+    pub fn take_auto_continue(&mut self) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        let Some(failure) = &mut self.failure else {
+            return false;
+        };
+        if failure.continue_at.is_none_or(|at| Instant::now() < at) {
+            return false;
+        }
+        failure.continue_at = None;
+        self.auto_continues += 1;
+        true
+    }
+
+    /// The user wrote to this terminal: whatever happens next is theirs.
+    /// A "continue" typed after a half-written prompt would send it.
+    pub fn cancel_auto_continue(&mut self) {
+        if let Some(failure) = &mut self.failure {
+            failure.continue_at = None;
         }
     }
 
@@ -667,6 +720,42 @@ mod tests {
             .env
             .insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-private".into());
         (location, config)
+    }
+
+    fn failed(continue_in: Option<Duration>) -> ProcessEntry {
+        let mut entry = ProcessEntry::new(remote_agent().1);
+        entry.status = Status::Running;
+        let now = Instant::now();
+        entry.failure = Some(Failure {
+            reason: "Connection lost mid-response".into(),
+            // A due time in the past, without subtracting from `now`.
+            continue_at: continue_in.map(|d| now + d),
+        });
+        entry
+    }
+
+    /// "continue" is typed once per failure, only when due, and never
+    /// after the user wrote to the terminal.
+    #[test]
+    fn auto_continue_fires_once_when_due() {
+        let mut entry = failed(Some(Duration::ZERO));
+        assert!(entry.take_auto_continue());
+        assert_eq!(entry.auto_continues, 1);
+        assert!(entry.failure.is_some(), "the marker waits for the hook");
+        assert!(!entry.take_auto_continue());
+
+        assert!(!failed(Some(AUTO_CONTINUE_DELAY)).take_auto_continue());
+        assert!(!failed(None).take_auto_continue());
+
+        let mut touched = failed(Some(Duration::ZERO));
+        touched.cancel_auto_continue();
+        assert!(!touched.take_auto_continue());
+
+        let mut reconnecting = failed(Some(Duration::ZERO));
+        reconnecting.status = Status::Stopped;
+        assert!(!reconnecting.take_auto_continue());
+        reconnecting.status = Status::Running;
+        assert!(reconnecting.take_auto_continue());
     }
 
     /// The phone picker must start what ▶ would: the same tmux session

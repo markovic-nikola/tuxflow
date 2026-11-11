@@ -153,8 +153,10 @@ pub enum AgentEvent {
     NeedsInput { reason: Option<String> },
     /// The turn ended on an API error ("Connection lost mid-response"):
     /// the agent stopped short and waits for a prompt to go on. `reason`
-    /// is [`failure_reason`]'s cut of Claude's error line.
-    Failed { reason: String },
+    /// is [`failure_reason`]'s cut of Claude's error line; `retryable`
+    /// says whether prompting it again could get anywhere
+    /// ([`failure_retryable`]).
+    Failed { reason: String, retryable: bool },
     /// The user answered — from this terminal or any other.
     Resumed,
 }
@@ -180,6 +182,7 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
         },
         "StopFailure" => Some(AgentEvent::Failed {
             reason: failure_reason(field("last_assistant_message"), field("error")),
+            retryable: failure_retryable(field("error")),
         }),
         "PermissionRequest" => Some(AgentEvent::NeedsInput {
             reason: field("tool_name").map(|t| format!("wants to use {t}")),
@@ -257,6 +260,28 @@ pub fn failure_reason(message: Option<&str>, error: Option<&str>) -> String {
         Some(sentence) => clip(sentence),
         None => error.map_or_else(|| String::from("API error"), |e| e.replace('_', " ")),
     }
+}
+
+/// `StopFailure` error codes (Claude Code 2.1.322) that only the user can
+/// clear — a login, a plan, a request the API refuses as it stands.
+/// Sending the same conversation again fails the same way.
+const NEEDS_THE_USER: &[&str] = &[
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "account_on_hold",
+    "verification_required",
+    "billing_error",
+    "invalid_request",
+    "model_not_found",
+    "cloud_credential_error",
+];
+
+/// Could a "continue" get a failed turn going again? Yes for whatever the
+/// network or the API's load did (a dropped stream, a server error, a rate
+/// limit) and for a code this list has never seen; no for the ones in
+/// [`NEEDS_THE_USER`].
+pub fn failure_retryable(error: Option<&str>) -> bool {
+    error.is_none_or(|code| !NEEDS_THE_USER.contains(&code))
 }
 
 /// Openings of a closing paragraph that hand the next step to the user.
@@ -446,7 +471,7 @@ mod tests {
     #[test]
     fn a_turn_ending_on_an_api_error_failed() {
         let fail = |hook| match parse_event_line(&line(hook)) {
-            Some((_, Some(AgentEvent::Failed { reason }))) => reason,
+            Some((_, Some(AgentEvent::Failed { reason, .. }))) => reason,
             other => panic!("not a failure: {other:?}"),
         };
         assert_eq!(
@@ -485,6 +510,18 @@ mod tests {
             fail(serde_json::json!({"hook_event_name": "StopFailure"})),
             "API error"
         );
+    }
+
+    /// A dropped stream is worth another prompt; a login or a plan is not.
+    #[test]
+    fn only_what_a_retry_can_fix_is_retryable() {
+        assert!(failure_retryable(Some("server_error")));
+        assert!(failure_retryable(Some("rate_limit")));
+        assert!(failure_retryable(Some("a_code_from_the_future")));
+        assert!(failure_retryable(None));
+        assert!(!failure_retryable(Some("authentication_failed")));
+        assert!(!failure_retryable(Some("billing_error")));
+        assert!(!failure_retryable(Some("invalid_request")));
     }
 
     /// A turn that ends by asking is "needs you", quoting the ask; a plain

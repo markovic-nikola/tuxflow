@@ -1,0 +1,578 @@
+/* Colours are the app's own (src/theme.rs, dark palette), so the screenshots
+   sit in the page rather than on it. Green and gold carry the meaning they
+   have in the sidebar: a project on this machine, a project on a server. */
+:root {
+  --ground: #121217;
+  --card: #17171d;
+  --pane: #1e1e2e;
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-strong: rgba(255, 255, 255, 0.16);
+  --text: #ececf1;
+  --text-secondary: #a6a6b0;
+  --text-dim: #8f8f9a;
+  --here: #73c991;
+  --there: #ffce5c;
+  --on-accent: #201a08;
+
+  /* No web fonts: the page is set in the visitor's desktop font, as the app is. */
+  --font-ui: "Adwaita Sans", Inter, Cantarell, "Noto Sans", system-ui, sans-serif;
+  --font-mono: "Adwaita Mono", "JetBrains Mono", "DejaVu Sans Mono", ui-monospace, monospace;
+
+  --width: 1080px;
+  --gutter: clamp(1.25rem, 4vw, 2.5rem);
+  --radius: 10px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 1.5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p,
+dl,
+dd,
+figure {
+  margin: 0;
+}
+
+a {
+  color: var(--text);
+  text-decoration-color: var(--hairline-strong);
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+:focus-visible {
+  outline: 2px solid var(--there);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--there);
+  color: var(--on-accent);
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+}
+
+p code,
+dd code {
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+}
+
+.icon-defs {
+  position: absolute;
+}
+
+/* === Header === */
+.site-header,
+main > section,
+footer {
+  max-width: var(--width);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 1.25rem;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  font-size: 1.1rem;
+  text-decoration: none;
+}
+
+.brand img {
+  border-radius: 6px;
+}
+
+.site-header nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  font-size: 0.95rem;
+}
+
+.site-header nav a {
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+
+.site-header nav a:hover {
+  color: var(--text);
+}
+
+.nav-github {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.nav-github svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* === Hero === */
+.hero {
+  padding-block: clamp(3rem, 8vw, 5.5rem) 0;
+}
+
+h1 {
+  max-width: 17ch;
+  font-size: clamp(2.5rem, 6.4vw, 4.5rem);
+  font-weight: 750;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.lede {
+  max-width: 58ch;
+  margin-top: 1.5rem;
+  font-size: clamp(1.1rem, 1.6vw, 1.25rem);
+  color: var(--text-secondary);
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
+  margin-top: 2rem;
+}
+
+.button {
+  display: inline-block;
+  padding: 0.7rem 1.25rem;
+  border-radius: 8px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button-primary {
+  background: var(--there);
+  color: var(--on-accent);
+}
+
+.button-primary:hover {
+  background: #ffd97a;
+}
+
+.release-link {
+  color: var(--text-secondary);
+}
+
+/* === Screenshots === */
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+  border: 1px solid var(--hairline-strong);
+  background: var(--pane);
+}
+
+.hero .shot {
+  margin-top: clamp(2.5rem, 6vw, 4rem);
+}
+
+.hero .shot img {
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+}
+
+figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.75rem;
+  margin-top: 1rem;
+  font-size: 0.92rem;
+  color: var(--text-secondary);
+}
+
+.legend::before {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 0.55em;
+  margin-right: 0.55em;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 0.08em;
+}
+
+.legend-here::before {
+  color: var(--here);
+}
+
+.legend-there::before {
+  color: var(--there);
+}
+
+/* === Sections === */
+main > section + section {
+  padding-top: clamp(4.5rem, 10vw, 7.5rem);
+}
+
+h2 {
+  max-width: 24ch;
+  font-size: clamp(1.7rem, 3.4vw, 2.4rem);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.section-intro {
+  max-width: 60ch;
+  margin-top: 0.9rem;
+  color: var(--text-secondary);
+}
+
+dt {
+  font-weight: 600;
+}
+
+dd {
+  color: var(--text-secondary);
+  font-size: 0.97rem;
+}
+
+dd + dt {
+  margin-top: 1.15rem;
+}
+
+.fine {
+  margin-top: 0.85rem;
+  font-size: 0.92rem;
+  color: var(--text-dim);
+}
+
+/* === Here / there === */
+.places-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.25rem;
+  margin-top: 2.5rem;
+  align-items: start;
+}
+
+/* The two cards borrow the sidebar's project cards: an accent ring and an
+   accent title, with the accent washed into the top-left corner. */
+.place {
+  padding: 1.6rem 1.75rem 1.75rem;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  background:
+    radial-gradient(120% 60% at 0% 0%, color-mix(in srgb, var(--accent) 11%, transparent), transparent 70%),
+    var(--card);
+}
+
+.place-here {
+  --accent: var(--here);
+}
+
+.place-there {
+  --accent: var(--there);
+}
+
+.place h3 {
+  margin-bottom: 1.4rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.place-note {
+  margin-top: 1.5rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--hairline);
+  font-size: 0.92rem;
+  color: var(--text-dim);
+}
+
+/* === Text beside a screenshot === */
+.feature {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(1.75rem, 4vw, 3.5rem);
+  align-items: center;
+}
+
+.feature-flip .feature-text {
+  order: 2;
+}
+
+.feature-text > p {
+  margin-top: 1rem;
+  color: var(--text-secondary);
+}
+
+.feature-text > dl {
+  margin-top: 1.75rem;
+}
+
+.feature-text > .code {
+  margin-top: 1.5rem;
+}
+
+/* One short command in a narrow column: wrap it instead of scrolling. */
+.feature-text > .code pre {
+  white-space: pre-wrap;
+}
+
+.feature-text > .fine {
+  margin-top: 0.85rem;
+  color: var(--text-dim);
+}
+
+/* === Code === */
+.code {
+  position: relative;
+  border-radius: var(--radius);
+  border: 1px solid var(--hairline);
+  background: var(--pane);
+}
+
+.code pre {
+  margin: 0;
+  padding: 1.1rem 1.25rem;
+  overflow-x: auto;
+  font-size: 0.86rem;
+  line-height: 1.7;
+}
+
+.code[data-copy] pre {
+  padding-right: 5.5rem;
+}
+
+.copy {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--card);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.copy:hover {
+  color: var(--text);
+}
+
+kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0.15em 0.45em;
+  border-radius: 5px;
+  border: 1px solid var(--hairline-strong);
+  border-bottom-width: 2px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  text-align: center;
+}
+
+kbd + kbd {
+  margin-left: 0.25em;
+}
+
+/* === The rest === */
+.rest-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: clamp(1.75rem, 4vw, 3.5rem);
+  margin-top: 2.25rem;
+  align-items: start;
+}
+
+.rest-grid > dl {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.4rem 2rem;
+}
+
+.config p {
+  margin-bottom: 1rem;
+  font-size: 0.97rem;
+  color: var(--text-secondary);
+}
+
+/* === Install === */
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin-top: 2rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.tabs button {
+  margin-bottom: -1px;
+  padding: 0.6rem 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.97rem;
+  cursor: pointer;
+}
+
+.tabs button:hover {
+  color: var(--text);
+}
+
+.tabs button[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--there);
+}
+
+.install [role="tabpanel"] {
+  max-width: 760px;
+  margin-top: 1.25rem;
+}
+
+/* === Shortcuts === */
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 3.5rem;
+  margin-top: 1.75rem;
+}
+
+.shortcuts table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.shortcuts th,
+.shortcuts td {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.shortcuts th {
+  font-weight: 400;
+  text-align: left;
+  color: var(--text-secondary);
+}
+
+.shortcuts td {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* === Footer === */
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem 2rem;
+  margin-top: clamp(4.5rem, 10vw, 7.5rem);
+  padding-block: 2rem 3rem;
+  border-top: 1px solid var(--hairline);
+  font-size: 0.92rem;
+  color: var(--text-dim);
+}
+
+footer a {
+  color: var(--text-secondary);
+}
+
+footer a + a {
+  margin-left: 1.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* === Narrow screens === */
+@media (max-width: 860px) {
+  .places-grid,
+  .feature,
+  .feature-flip,
+  .rest-grid,
+  .shortcuts-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .feature-flip .feature-text {
+    order: 0;
+  }
+
+  .shortcuts-grid table:first-child tr:last-child > * {
+    border-bottom: 1px solid var(--hairline);
+  }
+}
+
+@media (max-width: 560px) {
+  .site-header nav a:not(.nav-github) {
+    display: none;
+  }
+
+  .rest-grid > dl {
+    grid-template-columns: 1fr;
+  }
+
+  .place {
+    padding: 1.35rem 1.25rem 1.5rem;
+  }
+
+  /* No room beside the command: the button sits under it. */
+  .code[data-copy] pre {
+    padding-right: 1.25rem;
+  }
+
+  .copy {
+    position: static;
+    margin: 0 0 0.9rem 1.25rem;
+  }
+}

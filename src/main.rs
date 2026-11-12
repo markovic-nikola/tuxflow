@@ -9107,8 +9107,11 @@ impl App {
     /// lost mid-response") — otherwise how many agents anywhere are stuck
     /// or stopped. A remote project's request leaves from its HOST, so the
     /// caption names it — Claude Code's "check your network" never says
-    /// which network.
-    fn api_trouble_summary(&self) -> Option<String> {
+    /// which network. Each part comes with its colour: amber while
+    /// something is still going to happen on its own (a retry, a pending
+    /// "continue"), the error red once the agent waits on the user.
+    fn api_trouble_summary(&self) -> Vec<(String, iced::Color)> {
+        let waiting = pal().restarting;
         let selected = self
             .active_project()
             .and_then(|p| p.entries.get(p.selected).map(|e| (p, e)));
@@ -9124,7 +9127,7 @@ impl App {
                 if let Some(wait) = &stall.wait {
                     line.push_str(&format!(" \u{00b7} retry {wait}"));
                 }
-                return Some(line);
+                return vec![(line, waiting)];
             }
             if let Some(failure) = &e.failure {
                 let mut line = on_host(format!("Stopped: {}", failure.reason));
@@ -9136,28 +9139,33 @@ impl App {
                         left % 60
                     ));
                 }
-                return Some(line);
+                let color = match failure.continue_at {
+                    Some(_) => waiting,
+                    None => CRASHED,
+                };
+                return vec![(line, color)];
             }
         }
         let entries = || self.projects.iter().flat_map(|p| &p.entries);
         let stalled = entries().filter(|e| e.stall.is_some()).count();
         let failed = entries().filter(|e| e.failure.is_some()).count();
-        let parts: Vec<String> = [
+        [
             match stalled {
                 0 => None,
                 1 => Some(String::from("1 agent waiting for its API")),
                 n => Some(format!("{n} agents waiting for their API")),
-            },
+            }
+            .map(|line| (line, waiting)),
             match failed {
                 0 => None,
                 1 => Some(String::from("1 agent stopped by an API error")),
                 n => Some(format!("{n} agents stopped by API errors")),
-            },
+            }
+            .map(|line| (line, CRASHED)),
         ]
         .into_iter()
         .flatten()
-        .collect();
-        (!parts.is_empty()).then(|| parts.join(" \u{00b7} "))
+        .collect()
     }
 
     /// The bottom bar, GTK's `status_bar.rs` laid out in the same order:
@@ -9209,9 +9217,9 @@ impl App {
         // An agent stuck retrying its API, or stopped by an error: the
         // selected one by its own line, else a count of those elsewhere —
         // the sidebar's pills say which, this says why.
-        if let Some(trouble) = self.api_trouble_summary() {
+        for (trouble, color) in self.api_trouble_summary() {
             bar = bar.push(text("\u{00b7}").size(11).color(pal().dim));
-            bar = bar.push(text(trouble).size(11).color(pal().restarting));
+            bar = bar.push(text(trouble).size(11).color(color));
         }
 
         // GTK's update chip: amber caption text in the left cluster, two

@@ -182,7 +182,7 @@ pub fn parse_event_line(line: &str) -> Option<(String, Option<AgentEvent>)> {
         },
         "StopFailure" => Some(AgentEvent::Failed {
             reason: failure_reason(field("last_assistant_message"), field("error")),
-            retryable: failure_retryable(field("error")),
+            retryable: failure_retryable(field("last_assistant_message"), field("error")),
         }),
         "PermissionRequest" => Some(AgentEvent::NeedsInput {
             reason: field("tool_name").map(|t| format!("wants to use {t}")),
@@ -263,9 +263,14 @@ pub fn failure_reason(message: Option<&str>, error: Option<&str>) -> String {
 }
 
 /// `StopFailure` error codes (Claude Code 2.1.322) that only the user can
-/// clear — a login, a plan, a request the API refuses as it stands.
-/// Sending the same conversation again fails the same way.
+/// clear — a login, a plan, a request the API refuses as it stands — or
+/// that only the clock can: a usage limit (`rate_limit`) holds until its
+/// reset time, and Claude Code resumes by itself then ("continuing
+/// automatically at 7:30pm"). Sending the same conversation again fails
+/// the same way; against a limit it also stacked three "continue"
+/// prompts for the reset to answer (0.2.31).
 const NEEDS_THE_USER: &[&str] = &[
+    "rate_limit",
     "authentication_failed",
     "oauth_org_not_allowed",
     "account_on_hold",
@@ -276,12 +281,21 @@ const NEEDS_THE_USER: &[&str] = &[
     "cloud_credential_error",
 ];
 
+/// How Claude words a usage limit in the transcript ("You've hit your
+/// 5-hour limit · resets 7:30pm", "Usage limit reached"), lowercase — the
+/// second gate, for a limit that arrives under another code or none.
+const LIMIT_PHRASES: &[&str] = &["hit your", "usage limit", "limit reached"];
+
 /// Could a "continue" get a failed turn going again? Yes for whatever the
-/// network or the API's load did (a dropped stream, a server error, a rate
-/// limit) and for a code this list has never seen; no for the ones in
-/// [`NEEDS_THE_USER`].
-pub fn failure_retryable(error: Option<&str>) -> bool {
-    error.is_none_or(|code| !NEEDS_THE_USER.contains(&code))
+/// network or the API's load did (a dropped stream, a server error) and
+/// for a code this list has never seen; no for the ones in
+/// [`NEEDS_THE_USER`], nor for a `message` that reads as a usage limit.
+pub fn failure_retryable(message: Option<&str>, error: Option<&str>) -> bool {
+    let limited = message.is_some_and(|m| {
+        let m = m.to_lowercase();
+        LIMIT_PHRASES.iter().any(|phrase| m.contains(phrase))
+    });
+    !limited && error.is_none_or(|code| !NEEDS_THE_USER.contains(&code))
 }
 
 /// Openings of a closing paragraph that hand the next step to the user.
@@ -515,13 +529,24 @@ mod tests {
     /// A dropped stream is worth another prompt; a login or a plan is not.
     #[test]
     fn only_what_a_retry_can_fix_is_retryable() {
-        assert!(failure_retryable(Some("server_error")));
-        assert!(failure_retryable(Some("rate_limit")));
-        assert!(failure_retryable(Some("a_code_from_the_future")));
-        assert!(failure_retryable(None));
-        assert!(!failure_retryable(Some("authentication_failed")));
-        assert!(!failure_retryable(Some("billing_error")));
-        assert!(!failure_retryable(Some("invalid_request")));
+        let lost =
+            Some("API Error: Connection lost mid-response. The response above may be incomplete.");
+        assert!(failure_retryable(lost, Some("server_error")));
+        assert!(failure_retryable(lost, Some("a_code_from_the_future")));
+        assert!(failure_retryable(lost, None));
+        assert!(failure_retryable(None, None));
+        assert!(!failure_retryable(None, Some("authentication_failed")));
+        assert!(!failure_retryable(None, Some("billing_error")));
+        assert!(!failure_retryable(None, Some("invalid_request")));
+        // A usage limit waits for its reset, by its code or by its words.
+        let limit = Some("You've hit your 5-hour limit \u{00b7} resets 7:30pm (Europe/Berlin)");
+        assert!(!failure_retryable(limit, Some("rate_limit")));
+        assert!(!failure_retryable(None, Some("rate_limit")));
+        assert!(!failure_retryable(limit, None));
+        assert!(!failure_retryable(
+            Some("Usage limit reached"),
+            Some("unknown")
+        ));
     }
 
     /// A turn that ends by asking is "needs you", quoting the ask; a plain

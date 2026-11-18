@@ -590,7 +590,7 @@ fn page_tools<'a>(s: &'a AppSettings) -> iced::widget::Column<'a, Msg> {
                 ),
                 switch_row(
                     "Continue After API Errors",
-                    "When Claude Code stops on an API error such as a connection lost mid-response, send \"continue\" two minutes later \u{2014} unless you type in its terminal first. Up to three times in a row",
+                    "When Claude Code stops on an API error such as a connection lost mid-response, send \"continue\" two minutes later \u{2014} unless you type in its terminal first. Up to three times in a row; never for a usage limit",
                     t.agent_auto_continue,
                     Msg::AutoContinue,
                 ),

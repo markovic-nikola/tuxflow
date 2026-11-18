@@ -120,10 +120,13 @@ pub fn apply_conservative_filter(stacks: &mut Vec<DetectedStack>) {
         }
         if stack.name == "PHP" {
             // Keep the pre-expansion Laravel set for existing projects —
-            // migrate/tinker only appear in the add-project dialog.
-            stack
-                .suggested_processes
-                .retain(|p| !matches!(p.name.as_str(), "artisan migrate" | "artisan tinker"));
+            // dev/migrate/tinker only appear in the add-project dialog.
+            stack.suggested_processes.retain(|p| {
+                !matches!(
+                    p.name.as_str(),
+                    "artisan dev" | "artisan migrate" | "artisan tinker"
+                )
+            });
         }
     }
 }
@@ -262,17 +265,38 @@ fn is_composer_lifecycle_hook(name: &str) -> bool {
         || name.starts_with("post_")
 }
 
+/// First Laravel major that ships `php artisan dev` (server, queue, logs and
+/// Vite in one TUI). Earlier ones answer "Command dev is not defined".
+const ARTISAN_DEV_SINCE: u32 = 13;
+
+/// Can any alternative of this composer constraint (`^12.0|^13.0`, `>=13.2`,
+/// `13.*`) resolve to a Laravel with `artisan dev`? Read off the leading
+/// major of each alternative; a constraint with no number (`*`, `dev-main`)
+/// says nothing, so the command is not offered.
+fn laravel_has_artisan_dev(constraint: &str) -> bool {
+    constraint.split('|').any(|alt| {
+        let major: String = alt
+            .trim_start_matches(|c: char| !c.is_ascii_digit())
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        major.parse::<u32>().is_ok_and(|m| m >= ARTISAN_DEV_SINCE)
+    })
+}
+
 fn detect_php(fs: &dyn ProjectFs, content: &str) -> Vec<ProcessConfig> {
     let mut procs = Vec::new();
 
     if let Ok(composer) = serde_json::from_str::<serde_json::Value>(content) {
-        let is_laravel = composer
+        let laravel = composer
             .get("require")
-            .and_then(|r| r.as_object())
-            .is_some_and(|r| r.contains_key("laravel/framework"));
+            .and_then(|r| r.get("laravel/framework"));
 
-        if is_laravel {
+        if let Some(constraint) = laravel {
             procs.push(make_process("artisan serve", "php artisan serve", true));
+            if constraint.as_str().is_some_and(laravel_has_artisan_dev) {
+                procs.push(make_process("artisan dev", "php artisan dev", true));
+            }
             // A vite frontend normally comes with package.json scripts, which
             // the Node.js rule already surfaces with the right package
             // manager (bun/pnpm/…) — suggesting it here too would duplicate

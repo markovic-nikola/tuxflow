@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use tuxflow_core::detect::detector::detect_stacks;
+use tuxflow_core::detect::detector::{detect_stacks, detect_stacks_conservative};
 
 #[test]
 fn detect_nodejs_npm() {
@@ -248,6 +248,53 @@ fn detect_laravel() {
             .suggested_processes
             .iter()
             .any(|p| p.command.contains("artisan migrate"))
+    );
+}
+
+#[test]
+fn laravel_offers_artisan_dev_only_where_it_exists() {
+    let has_dev = |constraint: &str| {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            format!(r#"{{"require":{{"laravel/framework":"{constraint}"}}}}"#),
+        )
+        .unwrap();
+        detect_stacks(dir.path())[0]
+            .suggested_processes
+            .iter()
+            .any(|p| p.command == "php artisan dev")
+    };
+    // The command arrived with Laravel 13; older ones don't define it.
+    for yes in [
+        "^13.0",
+        "13.*",
+        ">=13.2",
+        "^12.0|^13.0",
+        "^12.0 || ^13.0",
+        "v14.1.0",
+    ] {
+        assert!(has_dev(yes), "{yes}");
+    }
+    for no in ["^11.0", "^12.0", "~12.3", "*", "dev-main"] {
+        assert!(!has_dev(no), "{no}");
+    }
+}
+
+#[test]
+fn artisan_dev_is_not_added_to_existing_projects_uninvited() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("composer.json"),
+        r#"{"require":{"laravel/framework":"^13.0"}}"#,
+    )
+    .unwrap();
+    let stacks = detect_stacks_conservative(dir.path());
+    assert!(
+        !stacks[0]
+            .suggested_processes
+            .iter()
+            .any(|p| p.name == "artisan dev")
     );
 }
 

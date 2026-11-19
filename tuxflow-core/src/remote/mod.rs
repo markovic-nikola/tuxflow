@@ -602,42 +602,69 @@ pub fn new_remote_pidfile() -> String {
 
 /// Fake `xclip` installed into `~/.local/bin` on remote hosts (which are
 /// headless — no real clipboard exists). Terminal agents like Claude Code
-/// read pasted images by running `xclip -t TARGETS -o` / `-t image/png -o`;
+/// read pasted images by asking `xclip` for `TARGETS` and then `image/png`;
 /// the shim serves whatever image TuxFlow last uploaded from the local
 /// clipboard, giving the native paste experience ([Image #1] attachment).
 /// The freshness window keeps an old screenshot from re-attaching on later,
 /// unrelated pastes.
+///
+/// The arguments are PARSED, never matched as a phrase: v1 looked for the
+/// literal `-t TARGETS -o`, and Claude Code 2.1.328 began sending
+/// `-o -t TARGETS` — the shim answered "no image" to every paste and the
+/// agent said "no image over SSH" (2026-11-19). The header line is
+/// [`SHIM_OURS`] + [`SHIM_VERSION`], which is how provisioning tells a stale
+/// shim of ours (replaced) from a real `xclip` the user put there (kept).
 const CLIPBOARD_SHIM: &str = r#"#!/bin/sh
-# TuxFlow clipboard shim v1 (auto-installed; safe to delete)
+# TuxFlow clipboard shim v2 (auto-installed; safe to delete)
 CLIP="$HOME/.cache/tuxflow/clipboard.png"
 fresh() {
     [ -f "$CLIP" ] || return 1
     now=$(date +%s); mt=$(stat -c %Y "$CLIP" 2>/dev/null || echo 0)
     [ $((now - mt)) -le 15 ]
 }
-case "$*" in
-    *"-t TARGETS -o"*) fresh && { echo image/png; exit 0; }; exit 1 ;;
-    *"-t image/png -o"*) fresh && exec cat "$CLIP"; exit 1 ;;
-    *"-o"*) exit 1 ;;
-    *) cat >/dev/null 2>&1; exit 0 ;;
+out= target=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o|-out) out=1 ;;
+        -t|-target) target=$2; [ $# -gt 1 ] && shift ;;
+        -selection|-sel) [ $# -gt 1 ] && shift ;;
+    esac
+    shift
+done
+# Copying IN: swallow it, there is no clipboard to hold it.
+[ -n "$out" ] || { cat >/dev/null 2>&1; exit 0; }
+fresh || exit 1
+case "$target" in
+    TARGETS) echo image/png ;;
+    image/png) exec cat "$CLIP" ;;
+    *) exit 1 ;;
 esac
 "#;
+
+/// What every version of the shim carries in its header.
+const SHIM_OURS: &str = "TuxFlow clipboard shim";
+/// This version's header tag; bump it together with the script's.
+const SHIM_VERSION: &str = "shim v2";
+
+/// Shell snippet that installs the xclip shim when it is missing or an older
+/// version of ours. Prefix for any script that wants the agent's next Ctrl+V
+/// to read our clipboard file.
+fn shim_provision_script() -> String {
+    format!(
+        "mkdir -p ~/.cache/tuxflow ~/.local/bin && \
+         if [ ! -e ~/.local/bin/xclip ] || \
+         {{ grep -q {ours} ~/.local/bin/xclip && ! grep -q {version} ~/.local/bin/xclip; }}; then \
+         printf '%s' {shim} > ~/.local/bin/xclip && chmod +x ~/.local/bin/xclip; fi",
+        ours = sh_quote(SHIM_OURS),
+        version = sh_quote(SHIM_VERSION),
+        shim = sh_quote(CLIPBOARD_SHIM)
+    )
+}
 
 /// Upload PNG bytes from the local clipboard to `host`'s TuxFlow clipboard
 /// file, provisioning the `xclip` shim on first use. Returns the absolute
 /// remote path (for typing into non-agent terminals). Blocking — call from
 /// a worker thread.
-/// Shell snippet that installs the xclip shim if missing. Prefix for any
-/// script that wants the agent's next Ctrl+V to read our clipboard file.
-fn shim_provision_script() -> String {
-    format!(
-        "mkdir -p ~/.cache/tuxflow ~/.local/bin && \
-         if [ ! -e ~/.local/bin/xclip ]; then \
-         printf '%s' {} > ~/.local/bin/xclip && chmod +x ~/.local/bin/xclip; fi",
-        sh_quote(CLIPBOARD_SHIM)
-    )
-}
-
 pub fn upload_clipboard_image(host: &str, png: &[u8]) -> Result<String, String> {
     let script = format!(
         "{} && cat > ~/.cache/tuxflow/clipboard.png && \
@@ -1342,6 +1369,73 @@ mod tests {
         assert!(
             replayed.ends_with("after-st\n"),
             "tail rows kept: {replayed:?}"
+        );
+    }
+
+    /// The shim against the argument orders agents have actually sent, run
+    /// for real under a scratch HOME: Claude Code up to 2.1.327 asked
+    /// `-t TARGETS -o`, 2.1.328 asks `-o -t TARGETS`. Also provisioning's
+    /// three cases — install, replace our older version, keep a real xclip.
+    #[test]
+    fn clipboard_shim_answers_either_argument_order() {
+        use std::process::Command;
+        let home = tempfile::tempdir().unwrap();
+        let sh = |script: &str| {
+            Command::new("sh")
+                .args(["-c", script])
+                .env("HOME", home.path())
+                .output()
+                .unwrap()
+        };
+        let provision = shim_provision_script();
+        assert!(CLIPBOARD_SHIM.contains(SHIM_OURS) && CLIPBOARD_SHIM.contains(SHIM_VERSION));
+
+        assert!(sh(&provision).status.success());
+        let xclip = |args: &str| sh(&format!("~/.local/bin/xclip {args}"));
+        // Nothing uploaded yet.
+        assert!(!xclip("-selection clipboard -o -t TARGETS").status.success());
+
+        std::fs::write(home.path().join(".cache/tuxflow/clipboard.png"), b"PNGDATA").unwrap();
+        for list in [
+            "-selection clipboard -t TARGETS -o",
+            "-selection clipboard -o -t TARGETS",
+        ] {
+            let out = xclip(list);
+            assert_eq!(out.stdout, b"image/png\n", "{list}");
+        }
+        for read in [
+            "-selection clipboard -t image/png -o",
+            "-selection clipboard -o -t image/png",
+        ] {
+            assert_eq!(xclip(read).stdout, b"PNGDATA", "{read}");
+        }
+        // Text and other formats are not ours to serve; a copy IN succeeds.
+        assert!(
+            !xclip("-selection clipboard -o -t image/bmp")
+                .status
+                .success()
+        );
+        assert!(
+            !xclip("-selection clipboard -t text/plain -o")
+                .status
+                .success()
+        );
+        assert!(
+            sh("echo hi | ~/.local/bin/xclip -selection clipboard")
+                .status
+                .success()
+        );
+
+        // An older shim of ours is replaced; someone's real xclip is not.
+        let bin = home.path().join(".local/bin/xclip");
+        std::fs::write(&bin, format!("#!/bin/sh\n# {SHIM_OURS} v1\nexit 1\n")).unwrap();
+        sh(&provision);
+        assert_eq!(std::fs::read_to_string(&bin).unwrap(), CLIPBOARD_SHIM);
+        std::fs::write(&bin, "#!/bin/sh\necho real\n").unwrap();
+        sh(&provision);
+        assert_eq!(
+            std::fs::read_to_string(&bin).unwrap(),
+            "#!/bin/sh\necho real\n"
         );
     }
 }

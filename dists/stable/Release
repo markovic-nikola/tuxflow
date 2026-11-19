@@ -1,0 +1,24 @@
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Thu, 19 Nov 2026 14:15:01 +0000
+Description: TuxFlow apt repository
+Label: TuxFlow
+Origin: TuxFlow
+Suite: stable
+MD5Sum:
+ ed50dd3f6d93d763af2c06742ee67053              174 Release
+ 68eda89ea28db5e8efb8c32b99bd785f             5030 main/binary-amd64/Packages
+ 39ebb334c609a1d4ac7f7a797eb1957b             1460 main/binary-amd64/Packages.gz
+SHA1:
+ f7a94a5d5106c031b8df138fa1389887f4b28f0f              174 Release
+ 2c26a64d8265a173735f066ae5d9532e3fa7518b             5030 main/binary-amd64/Packages
+ 912d729930322416d928880b8cf5d837b9376b72             1460 main/binary-amd64/Packages.gz
+SHA256:
+ 39a5c57f1de948affaffdbaf393aa4320adb4ecac6b56420f330eb527e36dc24              174 Release
+ d2c232deea703e07184fccb0238f0b97d959eeed67ed72658a9305708e261462             5030 main/binary-amd64/Packages
+ 54d17b7d3bb9a187c6061bbaaab12f368f5260cddfa3c777217729577c03851a             1460 main/binary-amd64/Packages.gz
+SHA512:
+ a5c560fa1809b38c374e6b99fed7b150aaedb3629744c9ee97bb107eff980dd804129ae88675f0ad84342c054e815e95ee0a975a7faa88b84f2054b2b8cdef64              174 Release
+ 524867b1aa7367f2919fe2b399c6953ec8360bdc43ece20733deb281f0c3b73088b5373076595ea31f979217143f364ff4b8727ca549c29977cb96ded4140aad             5030 main/binary-amd64/Packages
+ 15d07df11516914cc250f2fa26df258eff9d5519428374ca68f89034243d1f4da8c46a4fb63aef2b6a01536fa5408e1323b1c72faa06cfbf2e35e8fbef9e2897             1460 main/binary-amd64/Packages.gz

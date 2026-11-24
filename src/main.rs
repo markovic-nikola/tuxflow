@@ -3945,7 +3945,7 @@ impl App {
             return false;
         };
         match (drag.source, target) {
-            ((src, None), (tgt, None)) => src != tgt,
+            ((src, None), (tgt, None)) => src != tgt && self.project_drop_sticks(src, tgt),
             ((sp, Some(si)), (tp, Some(ti))) => {
                 sp == tp
                     && si != ti
@@ -3959,6 +3959,22 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Whether a project dropped on another would stay where it lands.
+    /// Recent-first owns the order except INSIDE the running tier, whose
+    /// start order a drag may rearrange (`move_running_project`); a stopped
+    /// card on either end would be sorted straight back, so no indicator
+    /// offers that drop.
+    fn project_drop_sticks(&self, src: u64, tgt: u64) -> bool {
+        if !self.settings.sidebar.recent_first {
+            return true;
+        }
+        let running = |id| {
+            self.project_index(id)
+                .is_some_and(|i| self.projects[i].has_running())
+        };
+        running(src) && running(tgt)
     }
 
     /// The drop: dispatch on what was dragged (legality was settled while
@@ -3975,18 +3991,21 @@ impl App {
         }
     }
 
-    /// GTK's `Workspace::reorder_project`: the MANUAL order is what moves —
-    /// `saved.directories`, the order recent-first sorting falls back on —
-    /// and the sidebar re-sorts by whichever rule is on. With recent-first
-    /// on that is usually no visible change (GTK re-applies the recency
-    /// sort right after the drop for the same reason); the saved order
-    /// still took the move, and shows once the setting is off.
+    /// A project drop. With recent-first off the MANUAL order moves
+    /// (`saved.directories`, GTK's `Workspace::reorder_project`). With it
+    /// on the manual order is left alone — a move there would show nothing
+    /// now and surprise later — and the drop rearranges the running tier
+    /// instead (`drop_allowed` admits no other drop then).
     fn move_project(&mut self, src: u64, tgt: u64, before: bool) {
         let key_of = |id| self.project_index(id).map(|i| self.projects[i].key());
         let (Some(src_key), Some(tgt_key)) = (key_of(src), key_of(tgt)) else {
             return;
         };
-        let mut order = self.saved.directories.clone();
+        let recent = self.settings.sidebar.recent_first;
+        let mut order = match recent {
+            true => self.running_keys(),
+            false => self.saved.directories.clone(),
+        };
         let (Some(s), Some(t)) = (
             order.iter().position(|k| k == &src_key),
             order.iter().position(|k| k == &tgt_key),
@@ -3996,12 +4015,24 @@ impl App {
         let Some(dst) = dnd::drop_index(s, t, before) else {
             return;
         };
-        dnd::reorder(&mut order, s, dst);
         let slot = self
             .shown_projects()
             .iter()
             .position(|&i| self.projects[i].id == tgt);
-        self.saved.reorder_to_match(&order);
+        if recent {
+            // The tier is sorted by start stamp, so the stamps are the
+            // order: hand the same ones out again in the dropped order.
+            // They live in state.toml — this arrangement is this machine's
+            // and lasts until a project stops (its next start appends).
+            let stamps = order.iter().map(|k| self.state.get_last_used(k)).collect();
+            dnd::reorder(&mut order, s, dst);
+            for (key, stamp) in order.iter().zip(strictly_ascending(stamps)) {
+                self.state.set_last_used(key, stamp);
+            }
+        } else {
+            dnd::reorder(&mut order, s, dst);
+            self.saved.reorder_to_match(&order);
+        }
         self.sort_projects();
         // The pointer stays on the target header's TREE position through
         // the drop, and iced carries a mouse_area's hover state by
@@ -9825,6 +9856,16 @@ impl App {
         self.saved.record_expanded(states);
     }
 
+    /// The running tier's project keys, top to bottom as drawn under
+    /// recent-first (`self.projects` is kept sorted).
+    fn running_keys(&self) -> Vec<String> {
+        self.projects
+            .iter()
+            .filter(|p| p.has_running())
+            .map(|p| p.key())
+            .collect()
+    }
+
     /// Order the sidebar by whichever rule the setting names.
     fn sort_projects(&mut self) {
         if self.settings.sidebar.recent_first {
@@ -10602,6 +10643,19 @@ fn recent_order_key(
     (std::cmp::Reverse(running), tier_key, manual)
 }
 
+/// Start stamps for a rearranged running tier: the tier's own stamps,
+/// sorted, with ties pulled apart. Equal stamps (two projects started in
+/// the same second) would fall through to the manual order and undo the
+/// drop. Ties move DOWN, into the past — a stamp pushed up could outrank
+/// the next project to start.
+fn strictly_ascending(mut stamps: Vec<u64>) -> Vec<u64> {
+    stamps.sort_unstable();
+    for i in (0..stamps.len().saturating_sub(1)).rev() {
+        stamps[i] = stamps[i].min(stamps[i + 1].saturating_sub(1));
+    }
+    stamps
+}
+
 /// An avatar path we can actually draw, or None for the initials square.
 /// Existence is checked HERE, once at load, and never again: a saved icon
 /// can outlive the file it names (a deleted logo, a cleared cache), and iced
@@ -11105,6 +11159,29 @@ mod tests {
                 "never-used-b",
             ]
         );
+    }
+
+    /// A drop in the running tier reuses the tier's stamps; they must come
+    /// back strictly ascending or the sort breaks ties by manual order.
+    #[test]
+    fn restamped_tier_keeps_the_dropped_order() {
+        assert_eq!(strictly_ascending(vec![90, 50, 70]), vec![50, 70, 90]);
+        // Same-second starts are pulled apart downward, never past "now".
+        assert_eq!(strictly_ascending(vec![70, 70, 70]), vec![68, 69, 70]);
+        assert_eq!(strictly_ascending(vec![69, 70, 70]), vec![68, 69, 70]);
+        assert!(strictly_ascending(vec![]).is_empty());
+
+        let dropped = ["c", "a", "b"];
+        let mut rows: Vec<_> = dropped
+            .iter()
+            .zip(strictly_ascending(vec![70, 70, 50]))
+            .enumerate()
+            // Manual order runs the other way, so a tie would show.
+            .map(|(i, (name, stamp))| (*name, recent_order_key(true, stamp, 9 - i)))
+            .collect();
+        rows.sort_by_key(|(_, k)| *k);
+        let order: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
+        assert_eq!(order, dropped);
     }
 
     #[test]

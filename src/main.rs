@@ -5371,6 +5371,7 @@ impl App {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
                 };
+                self.keep_filtered_open(pidx);
                 let switched = self.active != pidx;
                 self.active = pidx;
                 self.projects[pidx].selected = index;
@@ -5393,6 +5394,7 @@ impl App {
                 let Some(pidx) = self.project_index(project) else {
                     return Task::none();
                 };
+                self.keep_filtered_open(pidx);
                 if self.projects[pidx].entries[index].is_running() {
                     self.stop(pidx, index);
                 }
@@ -5797,17 +5799,8 @@ impl App {
             },
             Event::ToggleExpanded(project) => {
                 if let Some(pidx) = self.project_index(project) {
-                    self.projects[pidx].expanded = !self.projects[pidx].expanded;
-                    // GTK parity: single-expand collapses the others when
-                    // one opens.
-                    if self.projects[pidx].expanded && self.settings.sidebar.single_project_expand {
-                        for (i, p) in self.projects.iter_mut().enumerate() {
-                            if i != pidx {
-                                p.expanded = false;
-                            }
-                        }
-                    }
-                    self.persist_expanded();
+                    let open = !self.projects[pidx].expanded;
+                    self.set_expanded(pidx, open);
                     // A project is otherwise activated by selecting one of
                     // its processes; one with none has only its header, so
                     // without this its pane — the only place a first
@@ -9794,6 +9787,30 @@ impl App {
             project.expanded = i == self.active;
         }
         self.persist_expanded();
+    }
+
+    /// Open or close one project's card and save it. GTK parity:
+    /// single-expand collapses the others when one opens.
+    fn set_expanded(&mut self, pidx: usize, open: bool) {
+        self.projects[pidx].expanded = open;
+        if open && self.settings.sidebar.single_project_expand {
+            for (i, p) in self.projects.iter_mut().enumerate() {
+                if i != pidx {
+                    p.expanded = false;
+                }
+            }
+        }
+        self.persist_expanded();
+    }
+
+    /// A filter shows the rows of a collapsed project without opening it,
+    /// so a process picked or started from those rows vanished again the
+    /// moment the filter closed. Acting on a row is the user opening the
+    /// project: make it stick.
+    fn keep_filtered_open(&mut self, pidx: usize) {
+        if self.sidebar_filter().is_some() && !self.projects[pidx].expanded {
+            self.set_expanded(pidx, true);
+        }
     }
 
     /// Save every project's open/closed state — single-expand changes the

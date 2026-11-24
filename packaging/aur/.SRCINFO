@@ -1,6 +1,6 @@
 pkgbase = tuxflow-bin
 	pkgdesc = Dev servers and AI agents, local or over SSH
-	pkgver = 0.2.35
+	pkgver = 0.2.36
 	pkgrel = 1
 	url = https://markovic-nikola.github.io/tuxflow/
 	arch = x86_64
@@ -26,7 +26,7 @@ pkgbase = tuxflow-bin
 	conflicts = tuxflow
 	options = !strip
 	options = !debug
-	source = https://github.com/markovic-nikola/tuxflow/releases/download/v0.2.35/tuxflow-0.2.35-x86_64-linux.tar.gz
-	sha256sums = 16562945002146e03dc10a59328f8af0885cf260f5c64f4ec0e8b82169b2e23e
+	source = https://github.com/markovic-nikola/tuxflow/releases/download/v0.2.36/tuxflow-0.2.36-x86_64-linux.tar.gz
+	sha256sums = 34616c8f6b626a48bbe2c539112ce87ef1618fdf95b699dde0bd0156fa6d50c6
 
 pkgname = tuxflow-bin

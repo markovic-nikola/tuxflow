@@ -56,7 +56,7 @@ the system:
 ```bash
 curl -fsSL https://markovic-nikola.github.io/tuxflow/KEY.gpg \
   | sudo gpg --dearmor -o /usr/share/keyrings/tuxflow.gpg
-echo "deb [signed-by=/usr/share/keyrings/tuxflow.gpg] https://markovic-nikola.github.io/tuxflow stable main" \
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/tuxflow.gpg] https://markovic-nikola.github.io/tuxflow stable main" \
   | sudo tee /etc/apt/sources.list.d/tuxflow.list
 sudo apt update && sudo apt install tuxflow
 ```

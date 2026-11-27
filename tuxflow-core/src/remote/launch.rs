@@ -9,8 +9,9 @@
 //! Rather than re-derive any of that in shell, TuxFlow writes out the very
 //! script its own spawn runs on the host ([`super::remote_launch_script`]),
 //! so a phone-started agent is indistinguishable from a desktop-started one:
-//! the desktop reattaches it on its next load, or when ▶ is pressed
-//! (`new-session -A` attaches instead of starting a second copy).
+//! a running desktop adopts it within a poll (the app's `SessionsTick`
+//! asks each host which sessions are alive) and reattaches, as a fresh load
+//! or ▶ would (`new-session -A` attaches instead of starting a second copy).
 //!
 //! On the host, under `~/.local/state/tuxflow/launch/<project hash>/`:
 //!

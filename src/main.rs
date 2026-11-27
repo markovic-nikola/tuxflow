@@ -25,7 +25,7 @@ mod status_dot;
 mod theme;
 mod widgets;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -80,6 +80,9 @@ const AUTO_OPEN_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const AUTO_OPEN_PROBE_RETRY: Duration = Duration::from_millis(500);
 /// How often the remote MCP sockets are asked whether anything answers.
 const MCP_HEALTH_INTERVAL: Duration = Duration::from_secs(30);
+/// How often each host is asked which TuxFlow sessions are alive, so one
+/// started there (the phone picker) shows up running without a relaunch.
+const SESSIONS_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a status-chip fetch may stay "in flight" before the next
 /// fetch tick ignores it. Core kills a git call at `GIT_TIMEOUT`, so a
 /// guard this old belongs to a report that was lost, not one still due.
@@ -1084,6 +1087,15 @@ enum Event {
     GitSweep(Option<u64>),
     /// 30 s chain: are the remote MCP sockets still answered?
     McpHealthTick,
+    /// 10 s chain: which sessions are alive on each remote host?
+    SessionsTick,
+    /// One host's answer; `asked_at` is when the question left, for
+    /// [`ProcessEntry::adoptable`].
+    SessionsListed {
+        host: String,
+        asked_at: Instant,
+        sessions: Vec<String>,
+    },
     GitPolled {
         project: u64,
         status: Option<tuxflow_core::remote::git::GitStatus>,
@@ -1449,6 +1461,10 @@ impl App {
         tasks.push(Task::perform(
             tokio::time::sleep(MCP_HEALTH_INTERVAL),
             |_| Event::McpHealthTick,
+        ));
+        tasks.push(Task::perform(
+            tokio::time::sleep(SESSIONS_POLL_INTERVAL),
+            |_| Event::SessionsTick,
         ));
         // Check for updates in the background: now, then again every
         // `update::RECHECK_INTERVAL` (each answer schedules the next).
@@ -2189,6 +2205,25 @@ impl App {
         self.start(pidx, index)
     }
 
+    /// Reattach a session someone else started on the host (startup's
+    /// reattach, minus what a click does): the user's selection and focus
+    /// stay where they are. The stale kill-before-create flag of the last
+    /// stop goes — it was meant for a session that is long gone, and would
+    /// kill this one.
+    fn adopt(&mut self, pidx: usize, index: usize) {
+        log::info!(
+            "adopting {} of {}: its session was started on the host",
+            self.projects[pidx].entries[index].config.name,
+            self.projects[pidx].name
+        );
+        let (active, selected) = (self.active, self.projects[pidx].selected);
+        self.projects[pidx].entries[index].remote_fresh_next = false;
+        // The only task a start returns is the click's terminal focus.
+        drop(self.start(pidx, index));
+        self.active = active;
+        self.projects[pidx].selected = selected;
+    }
+
     /// Stop. Remote: explicitly kill the host-side session first (the local
     /// PTY teardown only detaches it), fire-and-forget, and make the next
     /// spawn clear any survivor. Local: `shutdown()` SIGHUPs the child on
@@ -2217,6 +2252,7 @@ impl App {
             term.shutdown();
         }
         entry.status = Status::Stopped;
+        entry.ended_at = Some(Instant::now());
         self.maybe_drop_tunnels(pidx);
     }
 
@@ -2478,6 +2514,7 @@ impl App {
         entry.status = status;
         entry.restart_attempts = attempts;
         entry.stopping = false;
+        entry.ended_at = Some(Instant::now());
 
         // Desktop notifications, per the shared settings and GTK's focus
         // gate (`should_notify` guards every exit kind there). The outage
@@ -5900,6 +5937,69 @@ impl App {
                 Task::perform(tokio::time::sleep(MCP_HEALTH_INTERVAL), |_| {
                     Event::McpHealthTick
                 })
+            }
+            Event::SessionsTick => {
+                // Hosts with something a new session could belong to — one
+                // round trip per host, however many projects live there.
+                let now = Instant::now();
+                let hosts: BTreeSet<String> = self
+                    .projects
+                    .iter()
+                    .filter(|p| matches!(p.phase, Phase::Ready))
+                    .filter(|p| p.entries.iter().any(|e| e.adoptable(now)))
+                    .filter_map(|p| p.location.host().map(String::from))
+                    .collect();
+                let mut tasks: Vec<_> = hosts
+                    .into_iter()
+                    .map(|host| {
+                        let asked_at = Instant::now();
+                        Task::perform(
+                            tokio::task::spawn_blocking({
+                                let host = host.clone();
+                                move || remote::list_live_sessions(&host)
+                            }),
+                            move |joined| Event::SessionsListed {
+                                host,
+                                asked_at,
+                                sessions: joined.unwrap_or_default(),
+                            },
+                        )
+                    })
+                    .collect();
+                tasks.push(Task::perform(
+                    tokio::time::sleep(SESSIONS_POLL_INTERVAL),
+                    |_| Event::SessionsTick,
+                ));
+                Task::batch(tasks)
+            }
+            Event::SessionsListed {
+                host,
+                asked_at,
+                sessions,
+            } => {
+                for pidx in 0..self.projects.len() {
+                    let project = &self.projects[pidx];
+                    if !matches!(project.phase, Phase::Ready)
+                        || project.location.host() != Some(host.as_str())
+                    {
+                        continue;
+                    }
+                    let key = project.key();
+                    let found: Vec<usize> = (0..project.entries.len())
+                        .filter(|&i| {
+                            let entry = &project.entries[i];
+                            entry.adoptable(asked_at)
+                                && sessions.contains(&remote::remote_session_name(
+                                    &key,
+                                    &entry.config.name,
+                                ))
+                        })
+                        .collect();
+                    for index in found {
+                        self.adopt(pidx, index);
+                    }
+                }
+                Task::none()
             }
             Event::GitPolled {
                 project,

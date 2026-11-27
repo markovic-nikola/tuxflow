@@ -31,6 +31,10 @@ pub const AUTO_CONTINUE_MAX: u32 = 3;
 /// What is typed.
 pub const AUTO_CONTINUE_TEXT: &str = "continue";
 
+/// See [`ProcessEntry::adoptable`]: comfortably past the stop's interrupt
+/// grace plus a poll's round trip.
+pub const ADOPT_AFTER_END: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Status {
     Stopped,
@@ -70,6 +74,10 @@ pub struct ProcessEntry {
     /// value and are ignored.
     pub restart_generation: u64,
     pub started_at: Option<Instant>,
+    /// When the last run ended (stop, exit or crash). Adoption of a
+    /// session started elsewhere waits `ADOPT_AFTER_END` past it — see
+    /// [`ProcessEntry::adoptable`].
+    pub ended_at: Option<Instant>,
     /// Remote projects: pidfile on the host holding this spawn's login-shell
     /// PID (fresh per spawn — kill targets it).
     pub remote_pidfile: Option<String>,
@@ -173,6 +181,7 @@ impl ProcessEntry {
             restart_attempts: 0,
             restart_generation: 0,
             started_at: None,
+            ended_at: None,
             remote_pidfile: None,
             remote_session: None,
             remote_fresh_next: false,
@@ -197,6 +206,27 @@ impl ProcessEntry {
 
     pub fn is_running(&self) -> bool {
         matches!(self.status, Status::Running)
+    }
+
+    /// May a live host session with this entry's name, found by a poll
+    /// asked at `asked_at`, be reattached? Someone else started it — the
+    /// phone picker runs the launch list's script, which gives the session
+    /// the name ▶ would — and the sidebar should show it running.
+    ///
+    /// Only an entry with nothing in flight: Restarting and Reconnecting
+    /// are about to spawn on their own. And only once its last run ended
+    /// `ADOPT_AFTER_END` before the question was asked. A stopped run's
+    /// session lives on through the stop's ~2 s interrupt grace, and a run
+    /// that exited by itself was listed by any poll asked a moment
+    /// earlier; reattaching either would `new-session -A` a FRESH run of
+    /// the command the user (or the program) just ended. SSH rows run
+    /// locally and have no host session.
+    pub fn adoptable(&self, asked_at: Instant) -> bool {
+        matches!(self.status, Status::Stopped | Status::Crashed(_))
+            && self.config.category != ProcessCategory::SSH
+            && self
+                .ended_at
+                .is_none_or(|t| t + ADOPT_AFTER_END <= asked_at)
     }
 
     /// What to call this process on screen: the OSC title its program set,
@@ -803,6 +833,39 @@ mod tests {
         config.category = ProcessCategory::SSH;
         let remote = ProjectLocation::parse("ssh://box/srv/app");
         assert!(launch_entry(&remote, &config, None).is_none());
+    }
+
+    #[test]
+    fn only_idle_entries_whose_run_ended_long_before_the_poll_are_adopted() {
+        let asked = Instant::now() + Duration::from_secs(60);
+        let mut entry = ProcessEntry::new(remote_agent().1);
+        // Never run, stopped or crashed: nothing in flight.
+        assert!(entry.adoptable(asked));
+        entry.status = Status::Crashed(Some(1));
+        assert!(entry.adoptable(asked));
+        // About to spawn on their own, or already up.
+        for busy in [
+            Status::Running,
+            Status::Restarting(1),
+            Status::Reconnecting(1),
+        ] {
+            entry.status = busy;
+            assert!(!entry.adoptable(asked));
+        }
+        // A run that ended just before the question: its session may be
+        // the one the poll saw, still in the stop's grace.
+        entry.status = Status::Stopped;
+        entry.ended_at = Some(asked - ADOPT_AFTER_END + Duration::from_secs(1));
+        assert!(!entry.adoptable(asked));
+        // ...or after it: the reply is older than the stop.
+        entry.ended_at = Some(asked + Duration::from_secs(1));
+        assert!(!entry.adoptable(asked));
+        entry.ended_at = Some(asked - ADOPT_AFTER_END);
+        assert!(entry.adoptable(asked));
+        // SSH rows run locally — there is no host session to adopt.
+        let mut ssh = remote_agent().1;
+        ssh.category = ProcessCategory::SSH;
+        assert!(!ProcessEntry::new(ssh).adoptable(asked));
     }
 
     #[test]
